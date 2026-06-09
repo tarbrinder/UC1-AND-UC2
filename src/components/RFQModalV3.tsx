@@ -3263,13 +3263,20 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     const lc = t.layer_c_commercial_intelligence;
     const lb = t.layer_b_behavioral;
     const isTrue = (tr?: { value: unknown }) => tr && (tr.value === true || tr.value === 'true');
+    // "likely for" is SHARED WITH SELLERS, so it must reflect the CURRENT requirement — never the
+    // buyer's historical business active-intent. Else a personal / off-profile buy (a trader buying
+    // diapers for his newborn) wrongly tells sellers "likely for: Manufacturing inputs". Prefer the
+    // current requirement intent; fall back to the Twin's active-intent ONLY on-profile with no current
+    // intent yet (hierarchy: current requirement > persona/history).
+    const off = buildTwinPlanInput(t, form.productName).offProfile;
+    const likelyFor = (requirementIntent?.value || '').trim() || (off ? '' : String(lc.current_active_intent?.value || ''));
     return [
       canonicalBuyerType(t), // A2: the single canonical role (not raw business_type)
       isTrue(lc.multi_category_buyer) ? 'multi-SKU' : '',
       lb.whatsapp_affinity?.value === 'High' ? 'WhatsApp-first' : '',
       lb.local_preference?.value === 'High' ? 'local-only' : lb.local_preference?.value === 'Medium' ? 'local-leaning' : '',
       isTrue(lc.inventory_builder) ? 'inventory-builder' : '',
-      lc.current_active_intent ? `likely for: ${lc.current_active_intent.value}` : '',
+      likelyFor ? `likely for: ${likelyFor}` : '',
     ].filter(Boolean).join(' · ');
   };
 
