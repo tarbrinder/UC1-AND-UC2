@@ -492,6 +492,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // E: live External pull (Befisc/Sign3 identity + confidence-gated OSINT web search).
   const [external, setExternal] = useState<ExternalRunResult | null>(null);
   const [enrichedSpecs, setEnrichedSpecs] = useState<Set<string>>(new Set()); // specs prefilled from history
+  const [removedSpecs, setRemovedSpecs] = useState<Set<string>>(new Set()); // specs the buyer explicitly removed (× on the final requirement) — never re-fill
   // P (Quick Re-post): the prior requirement the buyer chose to "Buy again" (drives the review banner,
   // the recurring requirement-mode signal, and 🔁 spec provenance). repostMeta carries the per-spec
   // source date + whether it was custom-added (drift: not in the current ISQ schema) for the badge.
@@ -699,6 +700,10 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // resolved yet, so a brand can't slip through on an early auto-fill race.
   const applyAiSpec = useCallback((key: string, value: string, at = 'ai'): boolean => {
     if (!value) return false;
+    if (removedSpecs.has(key)) {
+      logGate({ field: key, classification: 'objective', action: 'blocked_manual', reason: 'buyer removed it (×)', at });
+      return false; // the buyer explicitly deleted this spec — never re-fill it
+    }
     if (manualSpecs.has(key)) {
       logGate({ field: key, classification: 'objective', action: 'blocked_manual', reason: 'user-set', at });
       return false;
@@ -711,7 +716,17 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     setAutoFilledSpecs((prev) => new Set(prev).add(key));
     logGate({ field: key, classification: 'objective', action: 'filled', reason: 'inferred', at });
     return true;
-  }, [manualSpecs, setSpec, preferenceSpecs, logGate]);
+  }, [removedSpecs, manualSpecs, setSpec, preferenceSpecs, logGate]);
+
+  // × on the final-requirement chip — the buyer drops a spec they don't want. Clears the value AND
+  // marks it removed so the cascade/auto-fill never silently re-adds it (applyAiSpec blocks it above).
+  const removeSpec = (key: string) => {
+    setForm((prev) => { const next = { ...prev.dynamicSpecs }; delete next[key]; return { ...prev, dynamicSpecs: next }; });
+    setRemovedSpecs((p) => new Set(p).add(key));
+    const drop = (s: Set<string>) => { const n = new Set(s); n.delete(key); return n; };
+    setManualSpecs(drop); setCascadeSpecs(drop); setAutoFilledSpecs(drop); setEnrichedSpecs(drop);
+    track('rfq_spec_removed', { spec: key });
+  };
 
   // Record one prompt pass for the debug "📡 Prompt trace" panel (what ran +
   // what was passed). Keeps the last dozen on-screen; mirrors to window for the
@@ -1895,6 +1910,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           setLockedSpecOrder(null);
           specTouched.current = false;
           setEnrichedSpecs(new Set());
+          setRemovedSpecs(new Set()); // new product = fresh spec set; clear prior removals
           setRepostSource(null); // P: a manual product change cancels any re-post (handleRepost re-sets it AFTER this)
           setRepostMeta({});
           setCascadeSpecs(new Set());
@@ -3505,12 +3521,28 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // registry (qty / category / profile / history). Spec fields+options are the ONLY
   // exempt source (they come from the IndiaMART ISQ API). An ungrounded card here is a bug.
   // Phase-2/3 foundation panel — the "Final RFQ Vision" table on existing intelligence.
+  // Audit visibility: HOW related is the CURRENT product to the buyer's history → whether the Twin's
+  // intent/history is allowed to influence this requirement at all. Makes the on/off-profile weighting
+  // decision auditable ("why did the engine trust history?"). Generic token-overlap, NO category literals.
+  const historyInfluence = (): { on: boolean; score: number; shared: string[] } => {
+    const tw = ignoreTwin ? null : liveTwin();
+    if (!tw || !form.productName.trim()) return { on: false, score: 0, shared: [] };
+    const lc = tw.layer_c_commercial_intelligence;
+    const hist = [...(lc?.historical_categories || []), String(lc?.current_active_intent?.value || '')].filter(Boolean).join(' ');
+    const pt = coreTokens(form.productName);
+    const ht = coreTokens(hist);
+    const shared = [...pt].filter((t) => ht.has(t));
+    const score = pt.size ? Math.round((shared.length / pt.size) * 100) / 100 : 0;
+    return { on: shared.length > 0, score, shared };
+  };
   const renderRequirementUnderstanding = () => {
     const dims = requirementUnderstanding();
     const known = dims.filter((d) => d.confidence > 0).length;
+    const hi = historyInfluence();
     return (
       <div className="border border-indigo-200 bg-indigo-50 rounded-xl p-3 text-[11px] text-indigo-900 space-y-1">
         <p className="font-bold">🧠 Requirement Understanding — the “Final RFQ Vision” ({known}/{dims.length} known · existing Twin/profile intelligence, NO new LLM · Phase-2/3 foundation)</p>
+        <p className={hi.on ? 'text-indigo-700' : 'text-amber-700'}>🧭 History influence: <b>{hi.on ? 'ON' : 'OFF'}</b> · current-vs-history similarity <b>{hi.score}</b> {hi.on ? `· shared: [${hi.shared.join(', ')}] → Twin intent/history may shape this requirement` : `· no shared category tokens → OFF-PROFILE: history weight ≈ 0, intent derives from the CURRENT product only (G3)`}</p>
         {dims.map((d) => (
           <div key={d.dim} className="border-l-2 border-indigo-200 pl-1.5 my-0.5">
             <p><b>{d.dim}:</b> <span className={d.confidence ? 'text-indigo-800 font-semibold' : 'text-gray-400'}>{d.value}</span>{d.confidence ? <span className="text-indigo-400"> · {d.confidence}% · {d.source}</span> : null}</p>
@@ -4894,15 +4926,17 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     if (!form.paymentTerms) missingGroups.push('Payment terms');
 
     // Live summary of everything captured — the supplier-facing recap.
-    const summaryChips = [
-      form.quantity ? `Qty: ${form.quantity}${form.unit ? ` ${form.unit}` : ''}` : '',
-      form.buyerType ? `Buyer: ${form.buyerType}` : '',
+    // Each chip carries an optional removeKey — a SPEC the buyer can drop with × (Qty/Buyer/answers
+    // are core and stay). Removing clears the value AND blocks the cascade from re-adding it.
+    const summaryChips: Array<{ text: string; removeKey?: string }> = [
+      form.quantity ? { text: `Qty: ${form.quantity}${form.unit ? ` ${form.unit}` : ''}` } : null,
+      form.buyerType ? { text: `Buyer: ${form.buyerType}` } : null,
       ...Object.entries(form.dynamicSpecs)
         .filter(([, v]) => v && v.trim())
-        .map(([k, v]) => `${k}: ${v}`),
+        .map(([k, v]) => ({ text: `${k}: ${v}`, removeKey: k })),
       // Quick-Questions: show the question (key) + the answer (value), not a bare value.
-      ...dynQuestions.filter((q) => dynAnswers[q.id]).map((q) => `${q.label.replace(/\s*\?$/, '')}: ${dynAnswers[q.id]}`),
-    ].filter(Boolean) as string[];
+      ...dynQuestions.filter((q) => dynAnswers[q.id]).map((q) => ({ text: `${q.label.replace(/\s*\?$/, '')}: ${dynAnswers[q.id]}` })),
+    ].filter(Boolean) as Array<{ text: string; removeKey?: string }>;
 
     return (
     <div>
@@ -5157,6 +5191,18 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
             <p className="text-[11px] text-teal-700 bg-teal-50 border border-teal-100 rounded-lg px-2.5 py-1.5">
               <span className="font-semibold">Buyer context</span> (shared with sellers): {twinContextLine(buyerTwin)}
             </p>
+            {/* Deduced PERSONA — the high-confidence dimensions that DON'T already appear above
+                (stage / urgency / power / awareness / support). So the persona we inferred LANDS in the
+                requirement, not just in debug. Strengthens seller matching; the buyer sees what we assumed. */}
+            {(() => {
+              const inContext = /manufactur|trader|retail|wholesal|distribut|multi-sku|whatsapp|local|inventory|likely for/i;
+              const extra = requirementUnderstanding().filter((d) => d.confidence > 0 && !/use case|who is the buyer/i.test(d.dim) && !inContext.test(d.value));
+              return extra.length ? (
+                <p className="text-[11px] text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-2.5 py-1.5">
+                  <span className="font-semibold text-gray-600">Buyer profile (deduced):</span> {extra.map((d) => `${d.dim.replace(/^(Buyer |Preferred |Purchase |Procurement )/, '')} — ${d.value}`).join(' · ')}
+                </p>
+              ) : null;
+            })()}
             {debug && (
               <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 break-words">
                 🐞 PII (debug only — never shown to sellers): {[enrichment?.buyer?.fullName, enrichment?.buyer?.mobile, enrichment?.buyer?.email, enrichment?.buyer?.companyName, [enrichment?.buyer?.city, enrichment?.buyer?.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ')} · twin evidence-volume {buyerTwin.twin_confidence.overall_score}/100
@@ -5168,10 +5214,19 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           <div className="flex flex-wrap gap-1.5 mb-3">
             {summaryChips.map((s) => (
               <span
-                key={s}
-                className="text-xs bg-gray-100 text-gray-600 rounded-full px-2.5 py-1 max-w-full"
+                key={s.text}
+                className="inline-flex items-center gap-1 text-xs bg-gray-100 text-gray-600 rounded-full pl-2.5 pr-1 py-1 max-w-full"
               >
-                {s}
+                <span className="truncate">{s.text}</span>
+                {s.removeKey ? (
+                  <button
+                    type="button"
+                    onClick={() => removeSpec(s.removeKey!)}
+                    aria-label={`Remove ${s.removeKey}`}
+                    title="Remove this — not relevant"
+                    className="shrink-0 w-4 h-4 flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-300 hover:text-gray-700 leading-none"
+                  >×</button>
+                ) : <span className="pr-1.5" />}
               </span>
             ))}
           </div>
