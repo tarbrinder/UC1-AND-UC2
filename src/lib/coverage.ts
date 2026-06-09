@@ -16,7 +16,7 @@
 
 export type FactStatus = 'active' | 'confirmed' | 'overridden' | 'rejected';
 export type FactSource =
-  | 'User' | 'Intent' | 'Planner' | 'Twin' | 'Cascade' | 'Deduced' | 'Spec' | 'LastPage' | 'Enrichment' | 'Verified';
+  | 'User' | 'Intent' | 'Planner' | 'Twin' | 'Cascade' | 'Deduced' | 'Spec' | 'LastPage' | 'Enrichment' | 'Verified' | 'History';
 
 export interface CoverageFact {
   concept: string; // normalised concept key (e.g. "intent", "cadence", "budget")
@@ -35,7 +35,10 @@ export interface CoverageFact {
 const AUTHORITY: Record<FactSource, number> = {
   // Verified third-party business truth (GST/HSN/Udyam/Website) outranks our own guesses
   // (Twin/Planner/Cascade/Deduced) but a buyer's own answer still overrides it.
-  User: 100, LastPage: 95, Intent: 92, Spec: 85, Verified: 78, Planner: 70, Cascade: 55, Enrichment: 52, Twin: 50, Deduced: 40,
+  // History = the buyer's OWN prior requirement (a re-post / past BL/ISQ answer): stronger than
+  // any AI guess (Planner/Cascade/Enrichment/Twin/Deduced), but a CURRENT-session answer
+  // (User/LastPage/Intent/Spec) or third-party Verified truth still overrides it.
+  User: 100, LastPage: 95, Intent: 92, Spec: 85, Verified: 78, History: 75, Planner: 70, Cascade: 55, Enrichment: 52, Twin: 50, Deduced: 40,
 };
 
 // Generic concept synonyms — fold many phrasings to ONE concept. Universal B2B

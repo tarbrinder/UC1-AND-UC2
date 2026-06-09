@@ -140,6 +140,9 @@ type PanelItem =
   | { kind: 'size' }
   | { kind: 'frequency' };
 
+// P (Quick Re-post): one of the buyer's prior requirements, ready to re-post ("Buy again").
+type PriorReq = { title: string; source: 'call' | 'isq' | 'buylead'; recencyDays?: number; specs: Record<string, string>; specCount: number };
+
 // Lightweight analytics — pushes to GTM's dataLayer if present, else no-ops.
 // Lets us watch the details-wizard funnel (open / skip / complete) in prod.
 // Funnel context auto-attached to EVERY tracked event. glid = the buyer; bl_id =
@@ -479,6 +482,11 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // E: live External pull (Befisc/Sign3 identity + confidence-gated OSINT web search).
   const [external, setExternal] = useState<ExternalRunResult | null>(null);
   const [enrichedSpecs, setEnrichedSpecs] = useState<Set<string>>(new Set()); // specs prefilled from history
+  // P (Quick Re-post): the prior requirement the buyer chose to "Buy again" (drives the review banner,
+  // the recurring requirement-mode signal, and 🔁 spec provenance). repostMeta carries the per-spec
+  // source date + whether it was custom-added (drift: not in the current ISQ schema) for the badge.
+  const [repostSource, setRepostSource] = useState<{ title: string; recencyDays?: number } | null>(null);
+  const [repostMeta, setRepostMeta] = useState<Record<string, { recencyDays?: number; custom: boolean }>>({});
   // Inference cascade: the LEAD answer (e.g. Usage=Salon) pre-fills the dependent
   // specs (strong hold / matte / bulk). These are AI-suggested + editable.
   const [cascadeSpecs, setCascadeSpecs] = useState<Set<string>>(new Set());
@@ -778,19 +786,41 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   const UNIT_DISCRETE = /piece|pcs|\bnos?\b|\bunit\b|\bset\b|pair|item|each/i;
   const UNIT_BULK = /tonne|quintal|\bmt\b|\bton\b|truck|container|\bkl\b/i;
   const UNIT_MEASURE = /\bkg\b|kilogram|\bgram|\bgm\b|litre|liter|\bml\b|\bmeter|\bmetre|\bcm\b|\bft\b|feet|inch|yard|sq\b|sqft|cubic/i;
-  const requirementMode = (): { mode: 'retail_single' | 'capital' | 'uncertain' | 'sized' | 'unknown'; retailish: boolean; descriptor: string } => {
+  // ── Requirement Mode v2 (R): "what KIND of purchase is this?" — the single business
+  // interpretation procurement people make. Fused (deterministic, NO new LLM) from the journey
+  // (deriveIntent) + qty + unit-tier + archetype + repeat-signal. EPHEMERAL: recomputed per
+  // requirement, NEVER persisted (only the Twin persona persists). It is the PRIMARY driver of
+  // requirement-specific deductions — persona is a prior, not the dominant signal.
+  // Priority: emergency (explicit breakdown/replacement — most time-critical, beats the archetype)
+  // → product NATURE (capital → project) → tiny (sample, dominates the pattern even for a repeat
+  // buyer) → recurring → bulk → one-off. (Prototype/Development: phase 2.)
+  type ReqMode = 'sample_trial' | 'one_off_retail' | 'recurring' | 'bulk' | 'capital' | 'project' | 'emergency' | 'unknown';
+  const requirementMode = (): { mode: ReqMode; paymentLean: 'advance' | 'credit' | 'either'; retailish: boolean; descriptor: string } => {
     const q = qtyNum;
     const unit = form.unit || '';
     const arche = reqPlan?.archetype || '';
-    // Product-awareness comes from the UNIT TIER (TMT → Tonne = bulk) + the archetype (machine →
-    // capital) — NOT from classifySegment, which would wrongly flip a 1-piece commodity (cable lug)
-    // out of retail and re-break the A10 payment fix.
-    if (arche === 'capital') return { mode: 'capital', retailish: false, descriptor: `${q || '?'} ${unit} of capital equipment — one unit is still a major, credit-plausible buy` };
-    if (q > 0 && UNIT_BULK.test(unit)) return { mode: 'sized', retailish: false, descriptor: `${q} ${unit} — a heavy/bulk unit; even 1 is a substantial B2B order, NOT retail` };
-    if (q > 0 && q <= 10 && UNIT_DISCRETE.test(unit)) return { mode: 'retail_single', retailish: true, descriptor: `${q} ${unit} — a ONE-OFF / retail-style single-unit order; for THIS order advance/COD + quick delivery are the norm even if the buyer usually buys bulk on credit` };
-    if (q > 0 && q <= 1 && UNIT_MEASURE.test(unit)) return { mode: 'uncertain', retailish: false, descriptor: `qty ${q} ${unit} on a small measure unit — could be a sample; order size uncertain` };
-    if (q > 0) return { mode: 'sized', retailish: false, descriptor: `${q} ${unit} — a sized order` };
-    return { mode: 'unknown', retailish: false, descriptor: '' };
+    const journey = (requirementIntent?.journey || '').toLowerCase();
+    // Read the INTENT ANSWER text too, not just the coarse journey enum — the LLM may classify
+    // "TMT for Infrastructure projects" as journey=industrial, but the answer itself says "project".
+    const intentVal = (requirementIntent?.value || '').toLowerCase();
+    const projectish = journey === 'project' || arche === 'project_service' || /\b(project|tender|turnkey|infrastructure)\b/.test(intentVal);
+    const emergencyish = journey === 'maintenance' || /\b(replace|replacement|breakdown|repair|urgent|emergency|spare)\b/.test(intentVal);
+    // A re-post ("Buy again") IS a repeat purchase by definition → feeds the recurring signal. It still
+    // sits BELOW emergency/capital/project in the hierarchy, so re-posting a broken motor stays emergency.
+    const recurs = !!repostSource || !!repeatSignal() || /repeat_procurement|inventory_builder/i.test(buyerProfile?.buyingPattern || '');
+    const tiny = q > 0 && q <= 2 && !UNIT_BULK.test(unit); // 1–2 units / 1 kg — a sample/one-off; dominates the repeat pattern
+    // Emergency FIRST: an explicit breakdown/replacement (intent answer or maintenance journey) is the
+    // most behaviour-defining signal and beats the derived archetype — a capital MOTOR being *replaced*
+    // is an urgent advance-pay buy (speed > price), not a capex project. Mirrors the project intent-text fix.
+    if (emergencyish) return { mode: 'emergency', paymentLean: 'advance', retailish: true, descriptor: `${q} ${unit} for maintenance/replacement — speed > price; immediate delivery, advance OK` };
+    if (arche === 'capital') return { mode: 'capital', paymentLean: 'credit', retailish: false, descriptor: `${q || '?'} ${unit} — CAPITAL equipment; installation/commissioning matter, credit/loan plausible` };
+    if (projectish) return { mode: 'project', paymentLean: 'credit', retailish: false, descriptor: `${q} ${unit} for a PROJECT/turnkey scope — milestone/credit terms, project timeline` };
+    if (tiny) return { mode: 'sample_trial', paymentLean: 'advance', retailish: true, descriptor: `${q} ${unit} — a SAMPLE/trial/one-off tiny order; advance/COD + quick delivery, NOT credit (even for a repeat/bulk buyer)` };
+    if (recurs) return { mode: 'recurring', paymentLean: 'credit', retailish: false, descriptor: `a RECURRING/replenishment order (bought before / repeat pattern) — credit terms + cadence appropriate` };
+    if (q > 0 && (UNIT_BULK.test(unit) || q > 10)) return { mode: 'bulk', paymentLean: 'either', retailish: false, descriptor: `${q} ${unit} — a BULK/stocking order; size to qty, freight matters` };
+    if (q > 0 && q <= 10 && UNIT_DISCRETE.test(unit)) return { mode: 'one_off_retail', paymentLean: 'advance', retailish: true, descriptor: `${q} ${unit} — a small ONE-OFF order; advance/COD likely` };
+    if (q > 0) return { mode: 'bulk', paymentLean: 'either', retailish: false, descriptor: `${q} ${unit} — a sized order` };
+    return { mode: 'unknown', paymentLean: 'either', retailish: false, descriptor: '' };
   };
   // Keyword-based so category-tailored personas (Salon, Distributor, Retailer…)
   // still gate GST/Firm correctly — anything that isn't an individual is business.
@@ -881,6 +911,48 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       if ([...cur].some((t) => tt.has(t))) return { title, date: String(b?.ETO_OFR_POSTDATE_ORIG || b?.date || '') };
     }
     return null;
+  };
+  // ── P (Quick Re-post): the buyer's prior requirements, ready to "Buy again". Built from
+  //    enrichment.categories (BL titles + ISQ/known specs) — de-duped by title (case-insensitive,
+  //    specs merged across records), richest source + earliest recency kept as the face, recency-
+  //    sorted, capped at 6. PII-free (titles + spec values only), generic (NO category literals).
+  //    Feeds the step-0 "Buy again" cards and the one-screen Re-post Review. ──
+  const priorRequirements = (): PriorReq[] => {
+    const cats = enrichment?.categories || [];
+    const byTitle = new Map<string, PriorReq>();
+    const rank = (s: string) => (s === 'isq' ? 3 : s === 'call' ? 2 : 1); // ISQ (has spec answers) richest
+    for (const c of cats) {
+      const title = (c.mcat || '').trim();
+      if (!title) continue;
+      const specs = { ...(c.isqAnswers || {}), ...(c.knownSpecs || {}) };
+      const key = title.toLowerCase();
+      const prev = byTitle.get(key);
+      const mergedSpecs = { ...(prev?.specs || {}), ...specs };
+      const recency = [prev?.recencyDays, c.recencyDays].filter((x): x is number => typeof x === 'number');
+      byTitle.set(key, {
+        title: prev?.title || title,
+        source: !prev || rank(c.source) > rank(prev.source) ? c.source : prev.source,
+        recencyDays: recency.length ? Math.min(...recency) : undefined,
+        specs: mergedSpecs,
+        specCount: Object.keys(mergedSpecs).length,
+      });
+    }
+    return [...byTitle.values()]
+      .sort((a, b) => (a.recencyDays ?? 1e9) - (b.recencyDays ?? 1e9) || b.specCount - a.specCount)
+      .slice(0, 6);
+  };
+  // Spec-drift matcher: a prior spec maps to the CURRENT ISQ spec that shares the most core tokens
+  // (same generic tokenizer as repeatSignal — NO category literals). 0 shared tokens → no match
+  // (the caller adds it as a custom "added from your last order" spec). Returns the current spec name.
+  const matchPriorSpec = (priorName: string, currentNames: string[]): string | null => {
+    const p = coreTokens(priorName);
+    if (!p.size) return null;
+    let best: string | null = null, bestN = 0;
+    for (const cn of currentNames) {
+      const overlap = [...coreTokens(cn)].filter((t) => p.has(t)).length;
+      if (overlap > bestN) { bestN = overlap; best = cn; }
+    }
+    return bestN > 0 ? best : null;
   };
   const dynCards = dynQuestions
     .filter((q) => {
@@ -1147,7 +1219,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     const tw = liveTwin();
     const twinBase = tw ? buildTwinPlanInput(tw, form.productName) : undefined;
     const twinForPlan = twinBase ? { ...twinBase, offProfile: twinBase.offProfile || twinMuted.current } : undefined;
-    const application = `${form.requirementNotes ? form.requirementNotes + '. ' : ''}Buyer just revealed intent → ${answer}. Now that this buyer's end-use is known, re-rank specOrder with the BUYER ANSWERABILITY rule weighing heavily: lead with the attributes THIS buyer can decide on confidently from that intent, and push DOWN fine-grained fabrication/material metrics they would more likely ask a supplier to recommend (unless their profile shows they are a technical/repeat buyer). Importance to the seller still matters, but a high-impact spec the buyer can't answer should NOT lead.`;
+    const application = `${requirementContext()}${form.requirementNotes ? form.requirementNotes + '. ' : ''}Buyer just revealed intent → ${answer}. Now that this buyer's end-use is known, re-rank specOrder with the BUYER ANSWERABILITY rule weighing heavily: lead with the attributes THIS buyer can decide on confidently from that intent, and push DOWN fine-grained fabrication/material metrics they would more likely ask a supplier to recommend (unless their profile shows they are a technical/repeat buyer). Importance to the seller still matters, but a high-impact spec the buyer can't answer should NOT lead.`;
     logPrompt({
       prompt: 'planRequirement · re-rank (P6)',
       model: 'gemini-2.5-flash-lite',
@@ -1210,6 +1282,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // doesn't ambush on arrival); afterwards it collapses to a reopenable chip.
   useEffect(() => {
     if (step !== 1 || dynLoading || intentAutoOpened.current || panelItems.length === 0) return;
+    if (repostSource) return; // P: a re-post lands on the single Review screen — never ambush it with the wizard (the chip stays tappable)
     if (conciergeState === 'pending') return; // P5c: the concierge confirm must come FIRST — don't auto-open the wizard over it
     if (requirementIntent && !requirementIntent.value && !intentGateSkipped) return; // A6: the intent gate comes FIRST
     // qualifier-first plans (capital/project/service) lead with the qualifier —
@@ -1456,6 +1529,26 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personaSpecMatch?.buyerType, form.buyerType]);
 
+  // V3: ALSO skip the role card when the TWIN confidently knows the buyer's role — don't re-ask
+  // "who are you" when we already know. Auto-set it (mirroring the spec→persona path above) so the
+  // last step still gates GST/Firm correctly. Marked deduced (buyerTypeDeducedFrom), so
+  // renderBuyerKindNote surfaces a "change" to recover/correct it — never a silent hidden field.
+  // Derives ONLY from the Twin's layer_a identity (the canonical source) — NOT buyerProfile.persona,
+  // which resolves earlier and can disagree (a profile "Manufacturer" vs a Twin "Trader" race). The
+  // Twin outranks the profile, so trusting it avoids seeding a stale role we then can't correct.
+  // Never overrides a manual pick, a spec-derived role, or the personal journey; off for ignoreTwin.
+  useEffect(() => {
+    if (form.buyerType || buyerTypeManual.current || personaSpecMatch || ignoreTwin) return;
+    if (!showProfile || page1Choice === 'personal') return; // retail/personal → no business role to derive
+    const twinType = (liveTwin()?.layer_a_identity?.business_type || '').trim();
+    if (twinType && !/unknown|individual|end[\s-]?user|consumer|home/i.test(twinType)) {
+      setField('buyerType', twinType);
+      setBuyerTypeDeducedFrom('your business profile');
+      track('rfq_buyertype_deduced', { buyerType: twinType, from: 'twin' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.buyerType, personaSpecMatch?.buyerType, showProfile, page1Choice, buyerTwin]);
+
   // ── Last-page belief (the Dumbledore payoff) ─────────────────────────────────
   // On reaching the last step, deduce the logistics we'd otherwise ask BLANK
   // (delivery timeline, payment terms) from EVERYTHING known — enrichment history,
@@ -1475,7 +1568,10 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     // A10: the CURRENT order's mode is the HIGH-weight signal — it outranks the persisted persona
     // for payment/delivery. A one-off single unit → advance/COD even for a Manufacturer/credit buyer.
     const rmDed = requirementMode();
-    if (rmDed.descriptor) known['CURRENT ORDER MODE (weigh ABOVE the buyer persona for payment/delivery)'] = rmDed.descriptor;
+    if (rmDed.descriptor) {
+      known['CURRENT ORDER MODE (weigh ABOVE the buyer persona for payment/delivery)'] = `${rmDed.mode}: ${rmDed.descriptor}`;
+      known['Payment lean for THIS order'] = rmDed.paymentLean; // advance | credit | either
+    }
     if (enrichment?.persona?.type) known['Persona'] = enrichment.persona.type;
     if (enrichment?.persona?.scale) known['Order scale'] = enrichment.persona.scale;
     if (enrichment?.persona?.repeatBuyer) known['Repeat buyer'] = 'yes';
@@ -1649,6 +1745,8 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           setLockedSpecOrder(null);
           specTouched.current = false;
           setEnrichedSpecs(new Set());
+          setRepostSource(null); // P: a manual product change cancels any re-post (handleRepost re-sets it AFTER this)
+          setRepostMeta({});
           setCascadeSpecs(new Set());
           setCascadeFrom('');
           setCascadeRationale('');
@@ -2213,6 +2311,57 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     ensureReqPlan(specs);
   };
 
+  // ── P (Quick Re-post): the buyer tapped "Buy again" on a prior requirement card.
+  // Commit the title (fetches the CURRENT ISQ schema), drift-map the prior spec answers
+  // onto it (matches → prefilled chip; non-matches → custom spec with an "added from your
+  // last order" badge), record History provenance + a recurring cadence, SKIP the intent
+  // question (a re-order needs no "what's it for"), then fast-forward to the single Re-post
+  // Review screen (the spec page, all specs revealed). The buyer reviews/edits and posts. ──
+  const handleRepost = async (pr: PriorReq) => {
+    setShowDropdown(false);
+    track('rfq_repost_selected', { title: pr.title, specs: pr.specCount, recencyDays: pr.recencyDays ?? -1 });
+    // 1) Commit the product — this fetches the live ISQ schema AND resets enrichedSpecs/manual/
+    //    intent/qty (so we apply onto a clean slate). Everything below runs AFTER the reset.
+    const result = await handleProductCommit(pr.title);
+    if (!result.valid) {
+      toast.show('Couldn’t load that product just now — please type it', 'warning');
+      return;
+    }
+    const currentNames = result.specs.map((s) => s.IM_SPEC_MASTER_DESC);
+    // 2) Drift-map prior specs → current schema. matched → applyAiSpec (editable, won't override
+    //    a brand/preference field — VEKA gate still applies); unmatched → custom spec key.
+    const used = new Set<string>();
+    const enriched = new Set<string>();
+    const meta: Record<string, { recencyDays?: number; custom: boolean }> = {};
+    for (const [name, value] of Object.entries(pr.specs)) {
+      if (!value || !value.trim()) continue;
+      const m = matchPriorSpec(name, currentNames.filter((c) => !used.has(c)));
+      if (m) {
+        if (applyAiSpec(m, value, 'repost')) { used.add(m); enriched.add(m); meta[m] = { recencyDays: pr.recencyDays, custom: false }; }
+      } else {
+        // Drift: a spec the buyer cared about last time that this category's schema doesn't expose.
+        setSpec(name, value);
+        enriched.add(name);
+        meta[name] = { recencyDays: pr.recencyDays, custom: true };
+      }
+    }
+    setEnrichedSpecs((prev) => new Set([...prev, ...enriched]));
+    setRepostMeta(meta);
+    setRepostSource({ title: pr.title, recencyDays: pr.recencyDays });
+    // 3) Registry: a re-post IS a recurring/replenishment signal — record it with History provenance
+    //    (beats AI guesses, below the current-session answer). Feeds requirementContext + Truth Table.
+    coverage.current.record('cadence', 'Recurring — re-order (buy again)', 'History', 85);
+    // 4) Skip the intent question — the buyer is re-ordering a known requirement, not stating a new use.
+    setIntentGateSkipped(true);
+    intentResolved.current = true;
+    setRequirementIntent(null);
+    // 5) Fast-forward to the single Re-post Review screen: the spec page with EVERY spec revealed.
+    setShowAllSpecs(true);
+    setStep(1);
+    ensureReqPlan(result.specs);
+    if (result.specs.length === 0) enterStep2(result.specs); // no-spec category → straight to review/delivery
+  };
+
   // Generate the woven non-spec questions once per product/qty/role signature.
   // Stores ALL slots; the renderers split them (specs → inline on the spec page,
   // requirement/persona → top of the final step), so nothing is ever dropped.
@@ -2315,7 +2464,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     // A10: a one-off / single-unit order shapes the WHOLE plan — tell the planner so it asks
     // one-off-appropriate questions (no bulk-cadence / scale / budget interrogation for a single unit).
     const rmPlan = requirementMode();
-    const rmNote = rmPlan.retailish ? `CURRENT ORDER MODE: ${rmPlan.descriptor}` : '';
+    const rmNote = rmPlan.mode !== 'unknown' ? `CURRENT ORDER MODE = ${rmPlan.mode}: ${rmPlan.descriptor}. Ask only ${rmPlan.mode}-appropriate questions.` : '';
     const sig =
       form.productName.trim().toLowerCase() +
       (buyerProfile ? '|bpf' : '') +
@@ -2377,7 +2526,9 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       mcatType: form.mcatType,
       quantity: form.quantity,
       unit: form.unit,
-      application: [intentApp, qtyNote, rmNote, form.requirementNotes || ''].filter(Boolean).join(' '),
+      // RC: the planner consumes the SAME registry source-of-truth as cascade/refine/help/deduce —
+      // intent + qty + mode lead, then the full active/confirmed registry block (do-not-re-ask).
+      application: [intentApp, qtyNote, rmNote, form.requirementNotes || '', requirementContext()].filter(Boolean).join(' '),
       isqSpecsWithOptions,
       prior: matched
         ? {
@@ -2817,7 +2968,9 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         <div>
         <div className="flex items-center gap-2 mb-2 flex-wrap">
           <p className="text-sm font-semibold text-gray-800">{spec.IM_SPEC_MASTER_DESC}</p>
-          {(knownVal || isSuggested) && (
+          {repostMeta[spec.IM_SPEC_MASTER_DESC] ? (
+            <span className="text-[10px] bg-teal-50 text-teal-700 border border-teal-200 px-1.5 py-0.5 rounded-full">🔁 from last order</span>
+          ) : (knownVal || isSuggested) && (
             <span className="text-[10px] bg-teal-50 text-teal-600 border border-teal-100 px-1.5 py-0.5 rounded-full">
               ✦ {isSuggested ? 'Suggested' : 'Detected'}
             </span>
@@ -3191,10 +3344,12 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // exempt source (they come from the IndiaMART ISQ API). An ungrounded card here is a bug.
   const renderOptionProvenance = () => {
     const qs = dynQuestions.filter((q) => q.source === 'llm');
-    if (!qs.length && !reqPlan) return null;
+    if (!qs.length && !reqPlan && !repostSource) return null;
     return (
       <div className="border border-violet-200 bg-violet-50 rounded-xl p-3 text-[11px] text-violet-900 space-y-1">
         <p className="font-bold">🧭 Option Provenance — non-spec questions must derive from the registry (A1)</p>
+        {(() => { const rm = requirementMode(); return <p className="text-violet-700">🧠 Requirement Mode (R): <b>{rm.mode}</b> · payment-lean <b>{rm.paymentLean}</b> <span className="text-violet-400">— {rm.descriptor || 'awaiting qty/intent'} · EPHEMERAL (this order only; persona is a prior, not the driver)</span></p>; })()}
+        {repostSource && (() => { const ms = Object.values(repostMeta); const matched = ms.filter((m) => !m.custom).length; const custom = ms.filter((m) => m.custom).length; return <p className="text-teal-700">🔁 Re-post (P): <b>{repostSource.title}</b> from {agoLabel(repostSource.recencyDays)} · {matched} spec{matched === 1 ? '' : 's'} prefilled + {custom} drift-added · intent SKIPPED · cadence=recurring (History, auth 75)</p>; })()}
         <p className="text-violet-500">Spec fields + their options = IndiaMART ISQ API [exempt]. EVERY other question/chip must be grounded in qty / category / profile / history.</p>
         {qs.length ? qs.map((q) => (
           <p key={q.id}>
@@ -3414,6 +3569,22 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // ── P0.4: who's-buying is AUTO-RESOLVED (no longer a question). Show it as a glanceable,
   //    confirmable note so a buyer can still correct it (e.g. a manufacturer buying gifts). ──
   const renderBuyerKindNote = () => {
+    // V3 recovery: a role we DEDUCED (from the Twin/profile, or a spec the buyer picked) is shown
+    // as a confirmable note — NEVER silently applied — so the buyer can correct it. "change" clears
+    // it + flags manual, which re-opens the role card in the wizard and stops re-derivation.
+    const deducedRole = !!form.buyerType && !!buyerTypeDeducedFrom && !buyerTypeManual.current
+      && page1Choice !== 'personal' && !/individual|end[\s-]?user|personal|consumer/i.test(form.buyerType);
+    if (deducedRole) {
+      const fromLabel = buyerTypeDeducedFrom.includes('=') ? 'from your answer' : 'from your profile';
+      return (
+        <p className="text-[11px] text-gray-400 mt-3">
+          Buying as <span className="font-medium text-gray-600">{form.buyerType}</span> <span className="text-gray-300">· {fromLabel}</span>
+          <button type="button"
+            onClick={() => { buyerTypeManual.current = true; setBuyerTypeDeducedFrom(''); setField('buyerType', ''); }}
+            className="ml-1.5 text-gray-400 underline underline-offset-2 hover:text-gray-600">change</button>
+        </p>
+      );
+    }
     if (!page1Choice) return null; // unknown/cold → the chosen intent journey infers it
     const isBiz = page1Choice === 'business';
     return (
@@ -3423,6 +3594,43 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           onClick={() => { const next = isBiz ? 'personal' : 'business'; setPage1Choice(next); setField('buyerType', next === 'personal' ? 'End User' : ''); }}
           className="ml-1.5 text-gray-400 underline underline-offset-2 hover:text-gray-600">switch to {isBiz ? 'personal' : 'business'}</button>
       </p>
+    );
+  };
+
+  // ── P (Quick Re-post): "Buy again" cards on step 0. Once a GLID is pulled and the buyer has
+  //    prior requirements, surface them as one-tap re-post cards (title · how long ago · #specs
+  //    saved). Tapping runs handleRepost → prefill + fast-forward to the Re-post Review. Hidden
+  //    once a re-post is in progress, and for cold buyers with no history. ──
+  const agoLabel = (d?: number) =>
+    d == null ? 'previously' : d < 1 ? 'today' : d < 30 ? `${d}d ago` : d < 365 ? `${Math.round(d / 30)}mo ago` : `${Math.round(d / 365)}y ago`;
+  const renderRepostCards = () => {
+    if (repostSource) return null; // already re-posting
+    const prs = priorRequirements();
+    if (!prs.length) return null;
+    return (
+      <div className="mt-4">
+        <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">🔁 Buy again — your past requirements</label>
+        <div className="space-y-2">
+          {prs.map((pr, i) => (
+            <button
+              key={pr.title + i}
+              type="button"
+              onClick={() => handleRepost(pr)}
+              className="w-full text-left rounded-xl border border-teal-200 bg-teal-50/40 hover:bg-teal-50 hover:border-teal-300 px-3 py-2.5 transition-colors"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-sm text-gray-800 truncate">{pr.title}</span>
+                <span className="shrink-0 text-[11px] text-teal-700 font-semibold">Re-post →</span>
+              </div>
+              <p className="text-[11px] text-gray-500 mt-0.5">
+                {agoLabel(pr.recencyDays)}
+                {pr.specCount ? ` · ${pr.specCount} spec${pr.specCount > 1 ? 's' : ''} saved` : ' · no saved specs'}
+              </p>
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-gray-400 mt-1.5">Tap to re-post — we’ll prefill what you told us last time, you just review &amp; post.</p>
+      </div>
     );
   };
 
@@ -3747,6 +3955,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       if (d && d.value) return { src: 'Deduced', icon: '🧠', conf: Math.round((d.confidence || 0) * 100), evidence: d.reason || 'inferred from known signals' };
       if (preferenceSpecs.has(key) && !(value && value.trim())) return { src: 'Gate', icon: '🔒', conf: null, evidence: 'preference field — left open for more quotes' };
       if (manualSpecs.has(key)) return { src: 'User', icon: '👤', conf: 100, evidence: 'picked by buyer' };
+      if (repostMeta[key]) return { src: 'History', icon: '🔁', conf: 90, evidence: `re-posted from your ${agoLabel(repostMeta[key].recencyDays)} order${repostMeta[key].custom ? ' (added — not in this category)' : ''}` };
       if (enrichedSpecs.has(key)) return { src: 'Twin/History', icon: '🧬', conf: 90, evidence: 'from past requirements' };
       if (cascadeSpecs.has(key)) return { src: 'Cascade', icon: '✨', conf: 82, evidence: cascadeRationale || (cascadeFrom ? `inferred from ${cascadeFrom}` : 'inferred from your answers') };
       if (autoFilledSpecs.has(key)) return { src: 'AI', icon: '✨', conf: 75, evidence: 'AI-suggested' };
@@ -3912,6 +4121,13 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     const eligible = isqSpecs.filter(
       (s) => !redundantISQSpecs.includes(s.IM_SPEC_MASTER_DESC) && !coveredByQuestion(s.IM_SPEC_MASTER_DESC)
     );
+    // V1 recovery: specs A5b HID because a question (Intent/Planner) already covered the concept.
+    // Hidden by default is correct (don't re-ask what the buyer told us) — but if that inference was
+    // WRONG the buyer must be able to reach them. Surface under the "+more" expander as an editable
+    // "set from your answer — adjust" section so a deduped spec is never silently unrecoverable.
+    const coveredSpecs = isqSpecs.filter(
+      (s) => !redundantISQSpecs.includes(s.IM_SPEC_MASTER_DESC) && coveredByQuestion(s.IM_SPEC_MASTER_DESC)
+    );
     // Use the LOCKED order if set; otherwise the live plan-applied order (the lock
     // effect freezes it on plan-apply / first touch so it never reshuffles after).
     const planReady = !!(reqPlan && ((reqPlan.specOrder?.length ?? 0) || (reqPlan.mustHaveSpecs?.length ?? 0)));
@@ -3933,8 +4149,23 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     // user-driven re-rank (replanPending) is intentionally NOT held — it animates in place after
     // the buyer answers a panel question (an expected adapt), via the existing rank-move anim.
     const plannerPending = dynLoading && isqSpecs.length > 0;
+    // P (Re-post): specs the buyer cared about last time that THIS category's ISQ schema doesn't
+    // expose (drift) — they were applied as custom keys (repostMeta[].custom) and aren't in the
+    // normal spec list, so render them in their own "added from your last order" section.
+    const isqNames = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC));
+    const repostCustom = repostSource
+      ? Object.entries(repostMeta).filter(([k, m]) => m.custom && !isqNames.has(k) && (form.dynamicSpecs[k] || '').trim())
+      : [];
     return (
       <div className="space-y-5">
+        {repostSource && (
+          <div className="rounded-xl border border-teal-200 bg-teal-50 px-3 py-2.5 text-[12px] text-teal-900 animate-[fadeIn_0.3s_ease]">
+            <div className="flex items-center gap-2">
+              <span className="text-base">🔁</span>
+              <span>Re-posting <b>{repostSource.title}</b> from your {agoLabel(repostSource.recencyDays)} order — we prefilled what you told us last time. Review &amp; update below, then post.</span>
+            </div>
+          </div>
+        )}
         {replanFlash && (
           <div className="flex items-center gap-2 rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-[12px] text-orange-800 animate-[fadeIn_0.3s_ease]">
             <span className="text-base">🔄</span>
@@ -4087,19 +4318,52 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           <>
             {topSpecs.map(renderSpecField)}
 
-            {/* The long tail of specs stays hidden behind an opt-in expander. */}
-            {moreSpecs.length > 0 &&
+            {/* The long tail of specs + any A5b-hidden (covered-by-answer) specs stay behind an
+                opt-in expander, so a deduped spec is reachable for recovery, never silently lost. */}
+            {(moreSpecs.length > 0 || coveredSpecs.length > 0) &&
               (showAllSpecs ? (
-                <div className="space-y-5">{moreSpecs.map(renderSpecField)}</div>
+                <div className="space-y-5">
+                  {moreSpecs.map(renderSpecField)}
+                  {coveredSpecs.length > 0 && (
+                    <div className="space-y-5 pt-1 border-t border-dashed border-gray-200">
+                      <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide pt-2">Set from your earlier answers — adjust if we got it wrong</p>
+                      {coveredSpecs.map(renderSpecField)}
+                    </div>
+                  )}
+                </div>
               ) : (
                 <button
                   type="button"
                   onClick={() => setShowAllSpecs(true)}
                   className="text-sm text-teal-600 hover:text-teal-700 font-medium"
                 >
-                  + {moreSpecs.length} more spec{moreSpecs.length > 1 ? 's' : ''} (optional)
+                  {moreSpecs.length > 0
+                    ? `+ ${moreSpecs.length} more spec${moreSpecs.length > 1 ? 's' : ''} (optional)`
+                    : `Adjust ${coveredSpecs.length} detail${coveredSpecs.length > 1 ? 's' : ''} we set from your answers`}
                 </button>
               ))}
+
+            {/* P (Re-post): spec-drift — values from the past order that this category's schema
+                doesn't have a field for. Shown as editable custom specs with an "added" badge. */}
+            {repostCustom.length > 0 && (
+              <div className="space-y-3 pt-1">
+                <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Also from your last order</p>
+                {repostCustom.map(([name, m]) => (
+                  <div key={name} className="animate-field-in">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <label className="text-sm font-semibold text-gray-800">{name}</label>
+                      <span className="text-[10px] font-medium text-teal-700 bg-teal-50 border border-teal-200 rounded-full px-1.5 py-0.5">🔁 added from your {agoLabel(m.recencyDays)} order</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={form.dynamicSpecs[name] || ''}
+                      onChange={(e) => markManualSpec(name, e.target.value)}
+                      className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
 
@@ -5058,6 +5322,9 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
                 {/* Debug: full raw fetch dump — audit every source BEFORE the spec step. */}
                 {debug && enrichmentRaw != null && <div className="mt-3">{renderRawFetchDump()}</div>}
               </div>
+
+              {/* P (Quick Re-post): "Buy again" cards — appear once a GLID with prior requirements is pulled. */}
+              {renderRepostCards()}
 
               {/* Quantity + Unit — only when the API provides quantity units */}
               {unitOptions.length > 0 && (

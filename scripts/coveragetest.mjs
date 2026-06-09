@@ -2,7 +2,7 @@
 // Mirrors src/lib/coverage.ts logic (repo harness pattern) — proves concept-folding
 // + the fact lifecycle (active/confirmed/overridden/rejected) without the LLM/webhook.
 
-const AUTHORITY = { User: 100, LastPage: 95, Intent: 92, Spec: 85, Verified: 78, Planner: 70, Cascade: 55, Enrichment: 52, Twin: 50, Deduced: 40 };
+const AUTHORITY = { User: 100, LastPage: 95, Intent: 92, Spec: 85, Verified: 78, History: 75, Planner: 70, Cascade: 55, Enrichment: 52, Twin: 50, Deduced: 40 };
 const CONCEPT_GROUPS = {
   intent: ['use case', 'use-case', 'usage', 'application', 'purpose', 'end use', 'end-use', 'suitable for', 'meant for', 'used for', 'primary use', 'requirement type', 'what will you use', 'what is this for'],
   cadence: ['frequency', 'how often', 'cadence', 'repeat order', 'recurring', 'replenish', 'reorder', 'purchase frequency'],
@@ -136,6 +136,18 @@ rV3.record('business domain', 'Manufacturer', 'Verified', 95);
 rV3.record('business domain', 'Trader', 'User', 100);
 ok('USER overrides Verified (GST) fact', rV3.coveredBy('business_domain')?.value === 'Trader' && rV3.coveredBy('business_domain')?.source === 'User');
 ok('overridden Verified fact kept in trail', rV3.facts().some((f) => f.value === 'Manufacturer' && f.status === 'overridden'));
+
+// 11b. History (re-post / prior requirement) lifecycle — a prior user-stated value beats ALL AI
+// guesses (Planner/Cascade/Enrichment/Twin/Deduced), but the CURRENT-session answer overrides it.
+const rH = createCoverageRegistry();
+rH.record('cadence', 'Recurring / re-order', 'History', 85); // re-post sets this
+rH.record('cadence', 'Monthly', 'Twin', 60); // a weaker Twin guess cannot displace the re-post fact
+ok('History fact beats a Twin guess (re-post cadence survives)', rH.coveredBy('cadence')?.source === 'History' && rH.coveredBy('cadence')?.value === 'Recurring / re-order');
+const rH2 = createCoverageRegistry();
+rH2.record('Brand', 'Polycab', 'History', 80); // prefilled from last order
+rH2.record('Brand', 'Havells', 'User', 100); // buyer changes it on the re-post review screen
+ok('current USER answer overrides a History (re-posted) value', rH2.coveredBy('brand')?.value === 'Havells' && rH2.coveredBy('brand')?.source === 'User');
+ok('overridden History value kept in the trail', rH2.facts().some((f) => f.value === 'Polycab' && f.status === 'overridden'));
 
 // 12. camelCase folds to the spaced label's concept (fixes the Truth-Table double-row bug)
 ok('paymentTerms ↔ Payment Terms same concept', normalizeConcept('paymentTerms') === normalizeConcept('Payment Terms'));
