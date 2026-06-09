@@ -640,6 +640,7 @@ export async function refineQuestions(args: {
   if (!args.upcoming.length) return {};
   const prompt = `${INDIA_CTX}
 You are tightening the REMAINING questions of an IndiaMART RFQ for "${args.productName}" using what the buyer has ALREADY told us. Make each upcoming question maximally RELEVANT and SPECIFIC to THIS buyer, in their own trade terms.
+PRIORITY OF TRUTH (when signals conflict): the buyer's EXPLICIT current values (product/qty/unit/specs) > the current order mode > the stated intent > verified business facts > the buyer Twin/persona > historical behaviour. Never re-ask what is already known; when unsure, prefer a CONFIRM over a fresh question; PREFER changing a question's options over adding a question. Question budget is scarce — every question must earn its place.
 Already known — never ask these again, but USE them to specialise: ${JSON.stringify(args.known)}
 Upcoming questions to revise (keep each "id" EXACTLY): ${JSON.stringify(args.upcoming)}
 
@@ -1093,6 +1094,7 @@ Allowed options per field: ${JSON.stringify(isqSpecsWithOptions)}
 
 Infer the most likely value for each spec field FROM THE USE-CASE.
 Rules:
+- PRIORITY OF TRUTH: the buyer's EXPLICIT current values (product/qty/unit/specs) and their stated intent OUTRANK any inference. Only fill GAPS — never override or contradict a value the buyer actually stated; when in doubt, leave it for the buyer to answer.
 - Only fill a field if the use-case gives reasonable signal; skip the rest.
 - Prefer an EXACT option string when one fits.
 - If the buyer EXPLICITLY stated a specific value for a listed field that isn't among its options (e.g., a brand/material/size not in the list), return that exact stated value — it will be saved as a custom "Other" entry. Never invent off-list values the buyer didn't actually state.

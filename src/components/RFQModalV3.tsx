@@ -571,6 +571,8 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   const refineSig = useRef(''); // de-dupes refine per knowledge-state
   const panelIndexRef = useRef(0); // live cursor — refine never mutates cards ≤ this (anti-jitter)
   const buyerTypeManual = useRef(false); // buyer explicitly picked a role → never auto-override
+  const offProfileTracked = useRef(''); // analytics: fire rfq_off_profile once per product
+  const questionsResolvedSig = useRef(''); // analytics: fire the shown/hidden summary once per plan signature
   const [buyerTypeDeducedFrom, setBuyerTypeDeducedFrom] = useState(''); // debug: which spec implied the role
   // Last-page belief: deduced logistics/profile (timeline/payment) + confidence.
   const [deducedLogistics, setDeducedLogistics] = useState<Record<string, { value: string; confidence: number; reason: string }>>({});
@@ -659,6 +661,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // its "Suggested" badge is cleared.
   const markManualSpec = useCallback((key: string, value: string) => {
     specTouched.current = true; // lock spec order to what the buyer currently sees
+    track('rfq_spec_edited', { spec: key }); // buyer set/changed a spec by hand (accepted or overrode a suggestion)
     setSpec(key, value);
     setManualSpecs((prev) => new Set(prev).add(key));
     setAutoFilledSpecs((prev) => {
@@ -867,14 +870,18 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // not just Intent (broadened from the old Intent-only guard). Self-hide guard: a fact whose
   // rawKey IS this question's own label is the question's OWN answer, so it must NOT hide it
   // (else an answered card vanishes). Never yank a card the buyer already answered.
-  const COVER_HIDE_SOURCES = ['User', 'LastPage', 'Intent', 'Spec', 'Verified', 'Planner', 'Cascade'];
+  // SUPPRESSION POLICY (pilot audit, the #1 over-personalisation guard): only EXPLICIT,
+  // current-session sources may fully HIDE a question — the buyer's own answers (User/LastPage),
+  // the page-1 Intent, a directly-answered Spec, or the question engine itself (Planner).
+  // INFERRED / standing-pattern sources (Twin, History, Cascade, Verified, Enrichment, Deduced)
+  // may PREFILL, suggest, or shape options — but NEVER silently suppress a question on their own.
+  // This kills "History says monthly → cadence hidden → buyer changed business → never asked".
+  // A deduced cadence/budget still reaches the planner via requirementContext (so the planner
+  // PROMPT can soft-skip it and pre-rank), but it stays visible + confirmable, never silently dropped.
+  const COVER_HIDE_SOURCES = ['User', 'LastPage', 'Intent', 'Spec', 'Planner'];
   const coverHides = (label: string): boolean => {
     const f = coverage.current.coveredBy(label);
     if (!f || f.rawKey === label) return false; // self-hide guard: a question never hides itself
-    // #8: a HIGH-confidence Deduced commercial fact (cadence/budget from the buyer's standing
-    // pattern, ≥80) also hides its planner question — don't re-ask what the profile already
-    // answers. Otherwise only the authoritative sources hide (a low-conf guess never does).
-    if (f.source === 'Deduced') return (f.confidence || 0) >= 80;
     return COVER_HIDE_SOURCES.includes(f.source);
   };
   // A3 / G1: off-profile is true ONLY if the product misses BOTH the Twin's history AND the
@@ -1548,6 +1555,30 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.buyerType, personaSpecMatch?.buyerType, showProfile, page1Choice, buyerTwin]);
+
+  // ── Analytics (pilot diagnostics) ────────────────────────────────────────────
+  // rfq_off_profile: fires once when the current product diverges from the buyer's history
+  // (discovery mode) — lets us measure off-profile success/abandonment in the pilot.
+  useEffect(() => {
+    const p = form.productName.trim().toLowerCase();
+    if (!p || offProfileTracked.current === p) return;
+    if (offProfileNow()) { offProfileTracked.current = p; track('rfq_off_profile', { product: form.productName, glid: enrichment?.glid || glidInput || '' }); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.productName, buyerTwin, enrichment]);
+  // rfq_questions_resolved: once per plan signature, how many planner questions are SHOWN vs
+  // HIDDEN-by-coverage — the duplicate-question + suppression-correctness metric both audits asked for.
+  useEffect(() => {
+    if (step !== 1 || dynLoading) return;
+    const llmQs = dynQuestions.filter((q) => q.slot === 'specs' || q.slot === 'requirement' || q.slot === 'persona');
+    if (!llmQs.length) return;
+    const hidden = llmQs.filter((q) => !dynAnswers[q.id] && coverHides(q.label));
+    const shown = llmQs.length - hidden.length;
+    const sig = `${form.productName}|${llmQs.map((q) => q.id).join(',')}|${shown}/${hidden.length}`;
+    if (questionsResolvedSig.current === sig) return;
+    questionsResolvedSig.current = sig;
+    track('rfq_questions_resolved', { shown, hidden: hidden.length, hiddenLabels: hidden.map((q) => q.label).slice(0, 8) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, dynLoading, dynQuestions, dynAnswers, form.productName]);
 
   // ── Last-page belief (the Dumbledore payoff) ─────────────────────────────────
   // On reaching the last step, deduce the logistics we'd otherwise ask BLANK
@@ -2252,6 +2283,10 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       // #1: don't leave page 1 until the intent question has been TRIGGERED (shown) — the buyer
       // should see it (they may skip it). Only blocks while the derivation is genuinely in-flight;
       // releases on answer (requirementIntent set), Skip, or a failed/empty derivation (intentResolved).
+      // INTENT ASK/CONFIRM/SKIP MATRIX (precedence, first match wins) — pinned by scripts/intentskiptest.mjs:
+      //   repost → skip · explicit-purpose-in-product-text → skip · off-profile → ask · contradiction → ask
+      //   · Twin confidence ≥80 → confirm · product implies intent → confirm · else (cold/new) → ask.
+      // handleRepost + the Skip button set intentGateSkipped; deriveIntent decides ask-vs-confirm via confidence.
       if (QUESTION_ENGINE && hasGeminiKey() && isqSpecs.length > 0 && qtyReady && !requirementIntent && !intentGateSkipped && !intentResolved.current) {
         toast.show('One quick question first — tell us the planned use', 'info');
         return;
@@ -3668,7 +3703,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
             {ri.chips.map((c) => (
               <RadioChip key={c} label={c} selected={false} onClick={() => answerIntent(c)} />
             ))}
-            <button type="button" onClick={() => setIntentGateSkipped(true)} className="rounded-full border border-dashed border-gray-300 px-4 py-2 text-sm text-gray-400 hover:text-gray-600">Skip</button>
+            <button type="button" onClick={() => { setIntentGateSkipped(true); track('rfq_intent_skipped', { reason: 'user_skip', product: form.productName }); }} className="rounded-full border border-dashed border-gray-300 px-4 py-2 text-sm text-gray-400 hover:text-gray-600">Skip</button>
           </div>
           {renderPage1TwinNote()}
           {debug && <p className="text-[10px] text-teal-600 mt-1.5">🎯 page-1 intent · journey {ri.journey} · deriveIntent (Twin-seeded)</p>}
@@ -3704,7 +3739,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           {ri.chips.map((c) => (
             <button key={c} type="button" onClick={() => answerIntent(c)} className="rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:border-teal-400 hover:bg-teal-50 transition-colors">{c}</button>
           ))}
-          <button type="button" onClick={() => setIntentGateSkipped(true)} className="rounded-full border border-dashed border-gray-300 px-4 py-2 text-sm text-gray-400 hover:text-gray-600">Skip</button>
+          <button type="button" onClick={() => { setIntentGateSkipped(true); track('rfq_intent_skipped', { reason: 'user_skip', product: form.productName }); }} className="rounded-full border border-dashed border-gray-300 px-4 py-2 text-sm text-gray-400 hover:text-gray-600">Skip</button>
         </div>
         {debug && <p className="text-[10px] text-teal-600">🎯 A6 intent gate · journey {ri.journey} · deriveIntent</p>}
       </div>
