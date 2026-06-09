@@ -1,0 +1,158 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Auto-hiding scrollbar: invisible at rest, thin bar appears only while scrolling ── */
+.scroll-auto-hide {
+  scrollbar-width: none;            /* Firefox: hidden by default */
+  -ms-overflow-style: none;
+}
+.scroll-auto-hide::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-auto-hide::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999px;
+}
+.scroll-auto-hide.is-scrolling {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.4) transparent;
+}
+.scroll-auto-hide.is-scrolling::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.4);
+}
+
+/* ── Modal entrance ── */
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.95) translateY(10px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+/* ── Field slide-up ── */
+@keyframes field-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* ── Page transitions ── */
+@keyframes slide-left-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes slide-right-in {
+  from { opacity: 0; transform: translateX(-24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+/* ── Chip interactions ── */
+@keyframes chip-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+/* ── Score ── */
+@keyframes score-pulse {
+  0%,100% { transform: scale(1); }
+  50%      { transform: scale(1.08); }
+}
+@keyframes score-delta {
+  0%   { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-20px); }
+}
+/* ── CTA heartbeat ── */
+@keyframes cta-heartbeat {
+  0%,100% { box-shadow: 0 0 0 0 rgba(13,148,136,0.4); }
+  50%     { box-shadow: 0 0 0 10px rgba(13,148,136,0); }
+}
+/* ── Voice waveform bars ── */
+@keyframes voice-bar {
+  0%,100% { height: 4px; }
+  50%     { height: 20px; }
+}
+/* ── Recording indicator ── */
+@keyframes recording-dot {
+  0%,100% { opacity: 1; }
+  50%     { opacity: 0.2; }
+}
+/* ── Voice card entrance ── */
+@keyframes voice-slide-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+/* ── Voice field pop ── */
+@keyframes voice-field-pop {
+  0%   { opacity: 0; transform: scale(0.85); }
+  70%  { transform: scale(1.05); }
+  100% { opacity: 1; transform: scale(1); }
+}
+/* ── Voice processing spinner ── */
+@keyframes voice-processing {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+/* ── Toast ── */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+/* ── AI scan bob ── */
+@keyframes ai-scan {
+  0%,100% { transform: translateY(0); }
+  50%     { transform: translateY(-4px); }
+}
+/* ── Field highlight glow ── */
+@keyframes field-highlight {
+  0%,100% { box-shadow: 0 0 0 2px rgba(13,148,136,0.3); }
+  50%     { box-shadow: 0 0 0 4px rgba(13,148,136,0.15); }
+}
+/* ── Glow ring (mic) ── */
+@keyframes glow-ring {
+  0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
+  50%     { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+}
+/* ── Shimmer skeleton ── */
+@keyframes shimmer {
+  from { background-position: -400px 0; }
+  to   { background-position: 400px 0; }
+}
+/* ── Float gentle ── */
+@keyframes float-gentle {
+  0%,100% { transform: translateY(0); }
+  50%     { transform: translateY(-6px); }
+}
+/* ── Confetti burst ── */
+@keyframes confetti-burst {
+  0%   { opacity: 1; transform: translateY(0) scale(1) rotate(0deg); }
+  100% { opacity: 0; transform: translateY(-50px) scale(0.3) rotate(180deg); }
+}
+/* ── Progress indeterminate ── */
+@keyframes progress-bar {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+/* ── Utility classes ── */
+.animate-modal-in          { animation: modal-in 0.22s cubic-bezier(0.16,1,0.3,1) both; }
+.animate-field-in          { animation: field-in 0.2s ease-out both; }
+.animate-slide-left-in     { animation: slide-left-in 0.22s ease-out both; }
+.animate-slide-right-in    { animation: slide-right-in 0.22s ease-out both; }
+.animate-chip-pop          { animation: chip-pop 0.18s ease-out; }
+.animate-score-pulse       { animation: score-pulse 0.4s ease-out; }
+.animate-score-delta       { animation: score-delta 0.8s ease-out forwards; }
+.animate-cta-heartbeat     { animation: cta-heartbeat 2s ease-in-out infinite; }
+.animate-voice-bar         { animation: voice-bar 0.6s ease-in-out infinite; }
+.animate-recording-dot     { animation: recording-dot 1s ease-in-out infinite; }
+.animate-voice-slide-in    { animation: voice-slide-in 0.3s cubic-bezier(0.16,1,0.3,1) both; }
+.animate-voice-field-pop   { animation: voice-field-pop 0.3s ease-out both; }
+.animate-voice-processing  { animation: voice-processing 0.9s linear infinite; }
+.animate-toast-in          { animation: toast-in 0.22s cubic-bezier(0.16,1,0.3,1) both; }
+.animate-ai-scan           { animation: ai-scan 1.5s ease-in-out infinite; }
+.animate-field-highlight   { animation: field-highlight 1s ease-in-out 3; }
+.animate-glow-ring         { animation: glow-ring 1s ease-in-out infinite; }
+.animate-float-gentle      { animation: float-gentle 3s ease-in-out infinite; }
+.animate-confetti-burst    { animation: confetti-burst 0.8s ease-out forwards; }
+.animate-progress-bar      { animation: progress-bar 1.2s linear infinite; }
+
+.shimmer-loading {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}

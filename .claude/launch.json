@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rfq-dev",
+      "runtimeExecutable": "/Users/tarbrinder/Desktop/rfq-form/node_modules/.bin/vite",
+      "runtimeArgs": ["--port", "5173"],
+      "cwd": "/Users/tarbrinder/Desktop/rfq-form",
+      "port": 5173
+    }
+  ]
+}
