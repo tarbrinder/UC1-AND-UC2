@@ -449,6 +449,8 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   const [requirementIntent, setRequirementIntent] = useState<RequirementIntent | null>(null);
   const intentSig = useRef(''); // fire deriveIntent once per product+kind
   const intentResolved = useRef(false); // deriveIntent finished (success OR fail) → Continue may pass
+  // A1 safety (G): time-box waiting for the Twin so a missing/slow Twin never blocks the intent.
+  const [twinWaitTimedOut, setTwinWaitTimedOut] = useState(false);
   // When the tester flips it ON mid-session, drop the live Twin/Profile + concierge so
   // the form goes cold immediately (re-pulling a GLID with it OFF rebuilds normally).
   useEffect(() => {
@@ -1397,14 +1399,21 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     // T1: wait for the qty to be COMMITTED (blur / Enter / Continue), not mid-typing, so we don't
     // derive on a partial "1" of "100". (No unit → nothing to commit, fires immediately.)
     if (unitOptions.length > 0 && !qtyCommitted) return;
-    // Fire ONCE with FULL context — wait for the Twin if a GLID pull is producing one
-    // (don't jump the gun with twin=none). Avoids the double-fire + stale qty seen in the trace.
-    const twinPending = !ignoreTwin && !!pull?.ok && !pull?.profileAuthFailed && !buyerTwin;
+    // A1 (G): WAIT for the Twin even when buyer_profile auth FAILED — the Twin is built from the
+    // OTHER six sources (PNS/BL/ISQ/WhatsApp/CSL) and is exactly the rich signal the intent needs.
+    // The old `!pull?.profileAuthFailed` term fired deriveIntent twin-BLIND for profile-fail buyers
+    // (common on this flaky webhook), so a conf-95 "Notebook Manufacturing Inputs" was missed and the
+    // intent fell back to a generic product-surface guess ("Record keeping"). Only skip after a short
+    // safety timeout, so a Twin that never lands can't permanently block Continue.
+    const twinPending = !ignoreTwin && !!pull?.ok && !buyerTwin && !twinWaitTimedOut;
     if (twinPending) return;
     const kind = page1Choice === 'business' || page1Choice === 'personal' ? page1Choice : undefined;
     // T4: key on the requirement-mode bucket + unit so a committed qty/unit CHANGE (retail↔bulk,
     // Piece→Tonne) re-derives the intent chips. A locked (answered) intent still persists below.
-    const sig = `${form.productName.trim().toLowerCase()}|${kind || ''}|${requirementMode().mode}|${(form.unit || '').toLowerCase()}`;
+    // A2 (G): include the Twin's high-conf active-intent in the signature so a Twin that lands AFTER
+    // a (timed-out) twin-blind derivation RE-DERIVES rather than freezing the stale generic guess.
+    const twAiSig = String((ignoreTwin ? null : liveTwin())?.layer_c_commercial_intelligence?.current_active_intent?.value || '');
+    const sig = `${form.productName.trim().toLowerCase()}|${kind || ''}|${requirementMode().mode}|${(form.unit || '').toLowerCase()}|${twAiSig}`;
     if (intentSig.current === sig) return;
     intentSig.current = sig;
     intentResolved.current = false; // a fresh intent derivation is now in-flight (gates Continue)
@@ -1429,9 +1438,17 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         const reg = coverage.current.coveredBy('intent');
         const regKnown = !!reg && reg.confidence >= 80;
         const derivedKnown = !!res.derivedIntent && res.confidence >= 80;
-        const value = regKnown ? reg!.value : derivedKnown ? res.derivedIntent : null;
-        const conf = regKnown ? reg!.confidence : derivedKnown ? res.confidence : 0;
+        // A3 (G): if neither the registry nor the LLM produced a confident intent, but the Twin holds a
+        // HIGH-confidence current_active_intent (built from this buyer's PNS/BL/ISQ history), surface
+        // THAT as the derived guess. Shown as a one-tap CONFIRMATION (source 'derived', NOT locked) and
+        // recorded as History (a prior — it must NOT suppress questions), NEVER auto-accepted: the
+        // CURRENT requirement always wins — the buyer confirms or changes it on the page-1 hero.
+        const twAI = (ignoreTwin ? null : liveTwin())?.layer_c_commercial_intelligence?.current_active_intent;
+        const twinKnown = !!twAI && typeof twAI.confidence === 'number' && twAI.confidence >= 80 && !!twAI.value;
+        const value = regKnown ? reg!.value : derivedKnown ? res.derivedIntent : twinKnown ? String(twAI!.value) : null;
+        const conf = regKnown ? reg!.confidence : derivedKnown ? res.confidence : twinKnown ? (twAI!.confidence as number) : 0;
         if (derivedKnown && !regKnown) coverage.current.record('primary use', res.derivedIntent, 'Intent', res.confidence);
+        else if (twinKnown && !regKnown && !derivedKnown) coverage.current.record('primary use', String(twAI!.value), 'History', twAI!.confidence as number);
         setRequirementIntent((prev) => (prev && prev.locked ? prev : {
           value, journey: res.journey, question: res.question, chips: res.chips,
           confidence: conf, source: 'derived', locked: false,
@@ -1439,7 +1456,16 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       })
       .catch(() => { intentResolved.current = true; });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, isqSpecs, form.productName, form.quantity, form.unit, qtyCommitted, unitOptions, page1Choice, ignoreTwin, pull, buyerTwin]);
+  }, [step, isqSpecs, form.productName, form.quantity, form.unit, qtyCommitted, unitOptions, page1Choice, ignoreTwin, pull, buyerTwin, twinWaitTimedOut]);
+
+  // A1 safety (G): time-box the wait for the Twin. If a pull succeeded but the Twin hasn't landed in
+  // 2.5s (slow/failed derivation), let the intent derive twin-blind rather than hang Continue. Resets
+  // the moment the Twin arrives (so the intent effect re-runs WITH the Twin) or when there's no pull.
+  useEffect(() => {
+    if (ignoreTwin || !pull?.ok || buyerTwin) { setTwinWaitTimedOut(false); return; }
+    const t = setTimeout(() => setTwinWaitTimedOut(true), 2500);
+    return () => clearTimeout(t);
+  }, [pull?.ok, buyerTwin, ignoreTwin]);
 
   // ── Auto-resolve "who's buying" from the Twin/persona ────────────────────────
   // The page-1 business/personal toggle is GONE (intent replaces it). When a GLID is

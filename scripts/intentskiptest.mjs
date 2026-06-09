@@ -44,5 +44,12 @@ ok('explicit-in-text BEATS off-profile (already stated → skip)', intentDecisio
 ok('high Twin conf BEATS productImpliesIntent (both → confirm, no double)', intentDecision({ twinConf: 85, productImpliesIntent: true }) === 'confirm');
 ok('no signals at all → ask (safe default)', intentDecision({}) === 'ask');
 
+// G (notebook-paper bug): a high-conf Twin active-intent must WIN over an ambiguous product surface
+// ("notebook paper" could read as retail/record-keeping), shown as a one-tap CONFIRMATION — and it
+// must NEVER auto-skip the question. 'confirm' = a derived, editable suggestion; the CURRENT
+// requirement always overrides (the buyer can Change it). It is never silently auto-accepted.
+ok('G: Twin active-intent (95) wins over ambiguous product surface → confirm', intentDecision({ twinConf: 95 }) === 'confirm');
+ok('G: a confident Twin NEVER auto-skips the intent (stays confirmable)', intentDecision({ twinConf: 99 }) !== 'skip');
+
 console.log(`\nintentskiptest (intent ask/confirm/skip policy matrix): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);
