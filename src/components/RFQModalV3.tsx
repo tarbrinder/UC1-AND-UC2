@@ -1481,9 +1481,12 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     intentResolved.current = false; // a fresh intent derivation is now in-flight (gates Continue)
     const tw = ignoreTwin ? null : liveTwin();
     const tb = tw ? buildTwinPlanInput(tw, form.productName) : undefined;
-    // #2: feed the buyer context (distilled from profile/PNS/WhatsApp/CSL/BL) to the chips at
-    // MODERATE confidence too (≥40), not just ≥60 — so the intent options are buyer-aware more often.
-    const twinTruths = tb && tb.confidence >= 40 ? tb.known : '';
+    // #2 + G3: feed the buyer's distilled context to the chips at MODERATE confidence (≥40) — but
+    // ONLY when the current product is ON-PROFILE (relates to their history). OFF-PROFILE (a new area,
+    // e.g. an electronics buyer asking for "potatoes"), pass NOTHING so the LLM derives PURELY from the
+    // current product — never anchoring the new requirement on the unrelated historical domain.
+    // ("Weight what they're asking now; stitch history only if related; else persist with current.")
+    const twinTruths = tb && tb.confidence >= 40 && !tb.offProfile ? tb.known : '';
     logPrompt({ prompt: 'deriveIntent (A6)', model: 'gemini-2.5-flash-lite', purpose: 'journey-adapted purpose question, asked before the planner', inputs: `product="${form.productName}" · qty=${form.quantity || 'unspecified'} · kind=${kind || '?'} · twin=[${twinTruths || 'none'}]` });
     // #7: pass the REAL quantity (or empty → "not specified"); never fabricate a "1" that the
     // buyer didn't type — the journey/derivation must not reason on a phantom order size.
@@ -1511,15 +1514,19 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         // wins — the historical active-intent doesn't apply. Either way it stays a one-tap CONFIRMATION
         // (source 'derived', NOT locked), recorded as History (a prior — never suppresses). The CURRENT
         // requirement always wins: the buyer confirms or changes it on the page-1 hero.
+        // G3: the Twin's active-intent is used ONLY on-profile (preferTwin). OFF-PROFILE it is NEVER
+        // used — not even as a fallback — so an unrelated product (potatoes) can't inherit a historical
+        // intent (desktop peripherals). Precedence: current registry answer > on-profile Twin intent >
+        // the LLM's product derivation > ask the chip question (value null). No off-profile twin leak.
         const preferTwin = twinKnown && !offProfile;
-        const value = regKnown ? reg!.value : preferTwin ? String(twAI!.value) : derivedKnown ? res.derivedIntent : twinKnown ? String(twAI!.value) : null;
-        const conf = regKnown ? reg!.confidence : preferTwin ? (twAI!.confidence as number) : derivedKnown ? res.confidence : twinKnown ? (twAI!.confidence as number) : 0;
+        const value = regKnown ? reg!.value : preferTwin ? String(twAI!.value) : derivedKnown ? res.derivedIntent : null;
+        const conf = regKnown ? reg!.confidence : preferTwin ? (twAI!.confidence as number) : derivedKnown ? res.confidence : 0;
         // Correct the journey when the Twin-preferred intent reads as a manufacturing/processing INPUT,
         // so requirement-mode + planner don't treat a manufacturing input as resale.
         const journey = preferTwin && /manufactur|production|raw material|\binput|industrial|processing/i.test(String(twAI!.value)) ? 'industrial' : res.journey;
-        // A confident LLM derivation records as Intent; a Twin-preferred value records as History (prior).
+        // A confident LLM derivation records as Intent; an on-profile Twin-preferred value records as History (prior).
         if (derivedKnown && !regKnown && !preferTwin) coverage.current.record('primary use', res.derivedIntent, 'Intent', res.confidence);
-        else if ((preferTwin || (twinKnown && !derivedKnown)) && !regKnown) coverage.current.record('primary use', String(twAI!.value), 'History', twAI!.confidence as number);
+        else if (preferTwin && !regKnown) coverage.current.record('primary use', String(twAI!.value), 'History', twAI!.confidence as number);
         setRequirementIntent((prev) => (prev && prev.locked ? prev : {
           value, journey, question: res.question, chips: res.chips,
           confidence: conf, source: 'derived', locked: false,
@@ -3821,26 +3828,29 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     return (
       <div className="mt-4">
         <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">🔁 Buy again — your past requirements</label>
-        <div className="space-y-2">
-          {prs.map((pr, i) => (
-            <button
-              key={pr.title + i}
-              type="button"
-              onClick={() => handleRepost(pr)}
-              className="w-full text-left rounded-xl border border-teal-200 bg-teal-50/40 hover:bg-teal-50 hover:border-teal-300 px-3 py-2.5 transition-colors"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-sm text-gray-800 truncate">{pr.title}</span>
-                <span className="shrink-0 text-[11px] text-teal-700 font-semibold">Re-post →</span>
-              </div>
-              <p className="text-[11px] text-gray-500 mt-0.5">
-                {agoLabel(pr.recencyDays)}
-                {pr.specCount ? ` · ${pr.specCount} spec${pr.specCount > 1 ? 's' : ''} saved` : ' · no saved specs'}
-              </p>
-            </button>
-          ))}
+        {/* Horizontal CAROUSEL — a long vertical list doesn't fit mSite; fixed-width cards scroll-snap.
+            Each card carries the title, age + spec count, and a couple of saved spec values for context. */}
+        <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 snap-x snap-mandatory [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {prs.map((pr, i) => {
+            const specHints = Object.entries(pr.specs).slice(0, 2).map(([k, v]) => `${k}: ${v}`);
+            return (
+              <button
+                key={pr.title + i}
+                type="button"
+                onClick={() => handleRepost(pr)}
+                className="snap-start shrink-0 w-[200px] text-left rounded-xl border border-teal-200 bg-teal-50/40 hover:bg-teal-50 hover:border-teal-300 px-3 py-2.5 transition-colors flex flex-col"
+              >
+                <span className="font-semibold text-sm text-gray-800 leading-snug line-clamp-2">{pr.title}</span>
+                <span className="text-[11px] text-gray-500 mt-1">
+                  {agoLabel(pr.recencyDays)}{pr.specCount ? ` · ${pr.specCount} spec${pr.specCount > 1 ? 's' : ''}` : ''}
+                </span>
+                {specHints.length ? <span className="text-[10px] text-teal-700/80 mt-1 line-clamp-2">{specHints.join(' · ')}</span> : null}
+                <span className="mt-auto pt-1.5 text-[11px] text-teal-700 font-semibold">Re-post →</span>
+              </button>
+            );
+          })}
         </div>
-        <p className="text-[11px] text-gray-400 mt-1.5">Tap to re-post — we’ll prefill what you told us last time, you just review &amp; post.</p>
+        <p className="text-[11px] text-gray-400 mt-1.5">← swipe · tap to re-post — we’ll prefill what you told us last time, you just review &amp; post.</p>
       </div>
     );
   };

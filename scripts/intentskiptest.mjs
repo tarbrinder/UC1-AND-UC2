@@ -58,8 +58,7 @@ function pickIntentValue(c = {}) {
   if (c.regKnown) return c.regVal;                       // current/registry answer always wins
   if (c.twinKnown && !c.offProfile) return c.twinVal;    // on-profile: evidence-backed Twin beats LLM
   if (c.derivedKnown) return c.derivedVal;               // off-profile / no twin: product-specific LLM
-  if (c.twinKnown) return c.twinVal;
-  return null;
+  return null;                                            // G3: OFF-profile → NEVER fall back to the Twin (ask)
 }
 ok('G2: on-profile, Twin "Notebook Manufacturing Inputs" beats LLM "resale"',
   pickIntentValue({ twinKnown: true, twinVal: 'Notebook Manufacturing Inputs', offProfile: false, derivedKnown: true, derivedVal: 'resale' }) === 'Notebook Manufacturing Inputs');
@@ -69,6 +68,17 @@ ok('G2: a CURRENT (registry) answer overrides both Twin and LLM',
   pickIntentValue({ regKnown: true, regVal: 'Custom printed notebooks', twinKnown: true, twinVal: 'Notebook Manufacturing Inputs', derivedKnown: true, derivedVal: 'resale' }) === 'Custom printed notebooks');
 ok('G2: no Twin, LLM only → LLM derivation', pickIntentValue({ derivedKnown: true, derivedVal: 'School notebooks' }) === 'School notebooks');
 ok('G2: nothing confident → null (ask the chip question)', pickIntentValue({}) === null);
+
+// G3 (potatoes bug): OFF-profile, the Twin's historical intent must NEVER be used — not even as a
+// fallback when the LLM is unsure. An electronics buyer asking for "potatoes" must NOT autofill
+// "desktop peripherals"; with no confident product derivation, we ASK (value null). Weight current →
+// stitch history only if related → else persist with the current requirement.
+ok('G3: off-profile + Twin known + LLM unsure → ask (NO twin leak, was "potatoes for desktop peripherals")',
+  pickIntentValue({ twinKnown: true, twinVal: 'Desktop Peripherals', offProfile: true, derivedKnown: false }) === null);
+ok('G3: off-profile + Twin known + LLM confident → LLM product derivation (still no twin)',
+  pickIntentValue({ twinKnown: true, twinVal: 'Desktop Peripherals', offProfile: true, derivedKnown: true, derivedVal: 'Processing for snacks' }) === 'Processing for snacks');
+ok('G3: on-profile + Twin known → Twin still wins (relation exists)',
+  pickIntentValue({ twinKnown: true, twinVal: 'Notebook Manufacturing Inputs', offProfile: false, derivedKnown: true, derivedVal: 'resale' }) === 'Notebook Manufacturing Inputs');
 
 console.log(`\nintentskiptest (intent ask/confirm/skip policy matrix): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);
