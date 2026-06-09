@@ -51,5 +51,24 @@ ok('no signals at all → ask (safe default)', intentDecision({}) === 'ask');
 ok('G: Twin active-intent (95) wins over ambiguous product surface → confirm', intentDecision({ twinConf: 95 }) === 'confirm');
 ok('G: a confident Twin NEVER auto-skips the intent (stays confirmable)', intentDecision({ twinConf: 99 }) !== 'skip');
 
+// G2 (notebook-paper "resale" bug): which derived VALUE is shown as the confirmation. ON-PROFILE the
+// evidence-backed Twin active-intent beats a one-shot LLM guess; OFF-PROFILE the LLM wins; a CURRENT
+// (registry) answer always wins. Mirrors the precedence in the deriveIntent result handler.
+function pickIntentValue(c = {}) {
+  if (c.regKnown) return c.regVal;                       // current/registry answer always wins
+  if (c.twinKnown && !c.offProfile) return c.twinVal;    // on-profile: evidence-backed Twin beats LLM
+  if (c.derivedKnown) return c.derivedVal;               // off-profile / no twin: product-specific LLM
+  if (c.twinKnown) return c.twinVal;
+  return null;
+}
+ok('G2: on-profile, Twin "Notebook Manufacturing Inputs" beats LLM "resale"',
+  pickIntentValue({ twinKnown: true, twinVal: 'Notebook Manufacturing Inputs', offProfile: false, derivedKnown: true, derivedVal: 'resale' }) === 'Notebook Manufacturing Inputs');
+ok('G2: OFF-profile, the product-specific LLM derivation wins (Twin irrelevant to a new area)',
+  pickIntentValue({ twinKnown: true, twinVal: 'Notebook Manufacturing Inputs', offProfile: true, derivedKnown: true, derivedVal: 'Office furniture' }) === 'Office furniture');
+ok('G2: a CURRENT (registry) answer overrides both Twin and LLM',
+  pickIntentValue({ regKnown: true, regVal: 'Custom printed notebooks', twinKnown: true, twinVal: 'Notebook Manufacturing Inputs', derivedKnown: true, derivedVal: 'resale' }) === 'Custom printed notebooks');
+ok('G2: no Twin, LLM only → LLM derivation', pickIntentValue({ derivedKnown: true, derivedVal: 'School notebooks' }) === 'School notebooks');
+ok('G2: nothing confident → null (ask the chip question)', pickIntentValue({}) === null);
+
 console.log(`\nintentskiptest (intent ask/confirm/skip policy matrix): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

@@ -1497,19 +1497,28 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         const reg = coverage.current.coveredBy('intent');
         const regKnown = !!reg && reg.confidence >= 80;
         const derivedKnown = !!res.derivedIntent && res.confidence >= 80;
-        // A3 (G): if neither the registry nor the LLM produced a confident intent, but the Twin holds a
-        // HIGH-confidence current_active_intent (built from this buyer's PNS/BL/ISQ history), surface
-        // THAT as the derived guess. Shown as a one-tap CONFIRMATION (source 'derived', NOT locked) and
-        // recorded as History (a prior — it must NOT suppress questions), NEVER auto-accepted: the
-        // CURRENT requirement always wins — the buyer confirms or changes it on the page-1 hero.
-        const twAI = (ignoreTwin ? null : liveTwin())?.layer_c_commercial_intelligence?.current_active_intent;
+        const twNow = ignoreTwin ? null : liveTwin();
+        const twAI = twNow?.layer_c_commercial_intelligence?.current_active_intent;
         const twinKnown = !!twAI && typeof twAI.confidence === 'number' && twAI.confidence >= 80 && !!twAI.value;
-        const value = regKnown ? reg!.value : derivedKnown ? res.derivedIntent : twinKnown ? String(twAI!.value) : null;
-        const conf = regKnown ? reg!.confidence : derivedKnown ? res.confidence : twinKnown ? (twAI!.confidence as number) : 0;
-        if (derivedKnown && !regKnown) coverage.current.record('primary use', res.derivedIntent, 'Intent', res.confidence);
-        else if (twinKnown && !regKnown && !derivedKnown) coverage.current.record('primary use', String(twAI!.value), 'History', twAI!.confidence as number);
+        const offProfile = twNow ? buildTwinPlanInput(twNow, form.productName).offProfile : false;
+        // G2: ON-PROFILE, the Twin's evidence-backed active-intent (many signals, conf ≥80) is a BETTER
+        // derived default than a one-shot LLM guess — PREFER it. The LLM is given the Twin but can still
+        // misfire (e.g. it read a notebook MANUFACTURER's "notebook paper" as "resale" when it's a
+        // manufacturing INPUT). OFF-PROFILE (a genuinely new area), the product-specific LLM derivation
+        // wins — the historical active-intent doesn't apply. Either way it stays a one-tap CONFIRMATION
+        // (source 'derived', NOT locked), recorded as History (a prior — never suppresses). The CURRENT
+        // requirement always wins: the buyer confirms or changes it on the page-1 hero.
+        const preferTwin = twinKnown && !offProfile;
+        const value = regKnown ? reg!.value : preferTwin ? String(twAI!.value) : derivedKnown ? res.derivedIntent : twinKnown ? String(twAI!.value) : null;
+        const conf = regKnown ? reg!.confidence : preferTwin ? (twAI!.confidence as number) : derivedKnown ? res.confidence : twinKnown ? (twAI!.confidence as number) : 0;
+        // Correct the journey when the Twin-preferred intent reads as a manufacturing/processing INPUT,
+        // so requirement-mode + planner don't treat a manufacturing input as resale.
+        const journey = preferTwin && /manufactur|production|raw material|\binput|industrial|processing/i.test(String(twAI!.value)) ? 'industrial' : res.journey;
+        // A confident LLM derivation records as Intent; a Twin-preferred value records as History (prior).
+        if (derivedKnown && !regKnown && !preferTwin) coverage.current.record('primary use', res.derivedIntent, 'Intent', res.confidence);
+        else if ((preferTwin || (twinKnown && !derivedKnown)) && !regKnown) coverage.current.record('primary use', String(twAI!.value), 'History', twAI!.confidence as number);
         setRequirementIntent((prev) => (prev && prev.locked ? prev : {
-          value, journey: res.journey, question: res.question, chips: res.chips,
+          value, journey, question: res.question, chips: res.chips,
           confidence: conf, source: 'derived', locked: false,
         }));
       })
