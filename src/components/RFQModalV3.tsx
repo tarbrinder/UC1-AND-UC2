@@ -1698,7 +1698,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   };
 
   const handleProductCommit = useCallback(
-    async (name: string): Promise<{ valid: boolean; specs: ISQSpec[] }> => {
+    async (name: string, opts?: { trusted?: boolean }): Promise<{ valid: boolean; specs: ISQSpec[] }> => {
       setField('productName', name);
       setShowDropdown(false);
       setQtyCommitted(false); // T1: a new product → qty must be re-entered/committed before intent fires
@@ -1710,22 +1710,28 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       // real suggestions, while junk returns nothing. Buyers also type the quantity
       // inline ("100 m jute rope") which breaks raw autosuggest, so we also try a
       // quantity-stripped variant before deciding it's invalid.
+      // TRUSTED bypass (re-post): a "Buy again" title is a GENUINE prior requirement of THIS
+      // buyer (from their BL/ISQ history) — it must NOT be re-validated through the autosuggest
+      // gate, which wrongly rejects long/qualified historical titles ("1300Pcs/Hr Notebook
+      // Making Machine") that return no clean autosuggest match. Trust it and resolve its mcat.
       let valid = true;
-      try {
-        const cleaned = stripQuantityPrefix(name);
-        const lists = await Promise.all([
-          fetchProductSuggestions(name),
-          cleaned.toLowerCase() !== name.toLowerCase()
-            ? fetchProductSuggestions(cleaned)
-            : Promise.resolve([] as string[]),
-        ]);
-        const real = lists.flat().filter((s) => {
-          const t = s.toLowerCase().trim();
-          return t !== name.toLowerCase().trim() && t !== cleaned.toLowerCase().trim();
-        });
-        valid = real.length > 0;
-      } catch {
-        valid = true; // never block on a network error
+      if (!opts?.trusted) {
+        try {
+          const cleaned = stripQuantityPrefix(name);
+          const lists = await Promise.all([
+            fetchProductSuggestions(name),
+            cleaned.toLowerCase() !== name.toLowerCase()
+              ? fetchProductSuggestions(cleaned)
+              : Promise.resolve([] as string[]),
+          ]);
+          const real = lists.flat().filter((s) => {
+            const t = s.toLowerCase().trim();
+            return t !== name.toLowerCase().trim() && t !== cleaned.toLowerCase().trim();
+          });
+          valid = real.length > 0;
+        } catch {
+          valid = true; // never block on a network error
+        }
       }
       committedValid.current = valid;
 
@@ -1749,12 +1755,21 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       if (parsedQty?.quantity) setField('quantity', parsedQty.quantity);
 
       try {
-        const data = await getJSON<Record<string, string> | Array<Record<string, string>>>(
-          `/api/imimg/models/mcatid-suggestion.php?search_param=${encodeURIComponent(name)}&modid=MY`
-        );
-        // API may return array or single object; key may be mcat_id, MID, or mcatid
-        const item = Array.isArray(data) ? data[0] : data;
-        const mcatId: string = item?.mcat_id ?? item?.MID ?? item?.mcatid ?? item?.mcatId ?? '';
+        const resolveMcat = async (q: string): Promise<string> => {
+          const data = await getJSON<Record<string, string> | Array<Record<string, string>>>(
+            `/api/imimg/models/mcatid-suggestion.php?search_param=${encodeURIComponent(q)}&modid=MY`
+          );
+          // API may return array or single object; key may be mcat_id, MID, or mcatid
+          const it = Array.isArray(data) ? data[0] : data;
+          return String(it?.mcat_id ?? it?.MID ?? it?.mcatid ?? it?.mcatId ?? '');
+        };
+        // A verbose historical/re-post title ("1300Pcs/Hr Notebook Making Machine") resolves to a
+        // category better once the qty/qualifier prefix is stripped — fall back to the cleaned form.
+        let mcatId = await resolveMcat(name);
+        const cleanedName = stripQuantityPrefix(name);
+        if (!mcatId && cleanedName && cleanedName.toLowerCase() !== name.toLowerCase()) {
+          mcatId = await resolveMcat(cleanedName);
+        }
 
         if (mcatId && mcatId !== committedMcatId.current) {
           // Product changed → invalidate any in-flight image/text analysis and
@@ -2357,7 +2372,8 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     track('rfq_repost_selected', { title: pr.title, specs: pr.specCount, recencyDays: pr.recencyDays ?? -1 });
     // 1) Commit the product — this fetches the live ISQ schema AND resets enrichedSpecs/manual/
     //    intent/qty (so we apply onto a clean slate). Everything below runs AFTER the reset.
-    const result = await handleProductCommit(pr.title);
+    //    trusted:true — a re-post title is a genuine prior requirement, so skip the autosuggest gate.
+    const result = await handleProductCommit(pr.title, { trusted: true });
     if (!result.valid) {
       toast.show('Couldn’t load that product just now — please type it', 'warning');
       return;
