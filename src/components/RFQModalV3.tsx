@@ -1401,12 +1401,15 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     for (const [k, d] of Object.entries(deducedLogistics)) {
       if (d && d.value && (d.confidence || 0) >= 0.8) cov.record(k, d.value, 'Deduced', Math.round((d.confidence || 0) * 100));
     }
-    // External → Registry bridge (ChatGPT "Missing #3"): consume Tier-1 VERIFIED business
-    // facts from window.__ebi (GST/HSN/Udyam/NIC/World-OSINT) — NEVER Sign3/identity, which
-    // stays observed-only. Recorded as 'Verified' (outranks Twin, below User), so a buyer
-    // correction still overrides a GST guess. Works from the sandbox today, the live API later.
+    // External → Registry bridge: consume ONLY Tier-1 VERIFIED, STRUCTURED business facts from
+    // window.__ebi — GST / HSN / Udyam / NIC (unique, government-grade identifiers). World/OSINT and
+    // Befisc/Sign3 identity stay OBSERVED-ONLY (shown in debug, never a planning input): a web match
+    // on a generic name (e.g. "M Enterprises") could be the WRONG company, so promoting it to a
+    // 'Verified' fact would manufacture bogus truth. World/OSINT graduates to Verified only once it
+    // carries a real anchor-strength/confidence score (post-pilot). Recorded as 'Verified' (outranks
+    // Twin, below User) so a buyer correction still overrides a GST guess.
     const ebi = (window as unknown as { __ebi?: { externalEvidenceLedger?: Array<Record<string, unknown>> } }).__ebi;
-    const TIER1 = /gst|hsn|udyam|nic|world|osint/i;
+    const TIER1 = /gst|hsn|udyam|nic/i; // NOT world/osint (observed-only until confidence-scored)
     for (const e of ebi?.externalEvidenceLedger || []) {
       const src = String(e?.source || '');
       const val = String((e?.value_summary as string) || (e?.value as string) || '').trim();
@@ -3585,6 +3588,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
             {src.ms ? ` · ${src.ms}ms` : ''}{src.anchor ? ` · via ${src.anchor}` : ''}{src.confidence != null ? ` · conf ${src.confidence}` : ''}
             {src.detail ? <span className="text-fuchsia-500"> — {src.detail}</span> : ''}
             {src.status === 'ok' && src.source === 'World' && !!(src.value as { summary?: string })?.summary ? <span className="text-emerald-700"> → “{String((src.value as { summary?: string }).summary).slice(0, 120)}”</span> : null}
+            {src.source === 'World' && Array.isArray((src.value as { match_basis?: string[] })?.match_basis) && (src.value as { match_basis?: string[] }).match_basis!.length ? <span className="text-fuchsia-500"> · matched on: [{(src.value as { match_basis: string[] }).match_basis.join(', ')}]</span> : null}
           </p>
         ))}
         {(() => { const verified = (() => { try { return (coverage.current.facts() || []).filter((f) => f.source === 'Verified'); } catch { return []; } })(); return verified.length ? (
@@ -3592,7 +3596,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         ) : (
           <p className="text-fuchsia-400">No Verified external facts recorded yet — run World (demo) above, or wire a real provider.</p>
         ); })()}
-        <p className="text-fuchsia-400">Stitch rule: VERIFIED business truths (GST/HSN/Udyam/NIC/World-OSINT, anti-bogus-gated) → recorded as <b>Verified</b> facts → feed the Twin/planner/Truth-Table. Befisc/Sign3 <i>identity</i> stays observed-only. mobile→GST→HSN chain (Part C). World runs via window.__osintProvider (Claude/WebSearch/backend); the demo button uses a synthetic [DEMO] provider.</p>
+        <p className="text-fuchsia-400">Stitch rule: ONLY structured government-grade truths (GST/HSN/Udyam/NIC, anti-bogus-gated) → recorded as <b>Verified</b> facts → feed the planner/Truth-Table. <b>World/OSINT + Befisc/Sign3 identity stay OBSERVED-only</b> (shown here, NOT a planning input) — a web match on a generic name could be the wrong company; World graduates to Verified only once confidence-scored (post-pilot). mobile→GST→HSN chain (Part C). World runs via window.__osintProvider; the demo button uses a synthetic [DEMO] provider so you can see the fetch shape.</p>
       </div>
     );
   };

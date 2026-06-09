@@ -85,13 +85,18 @@ export function anchorStrength(seed: ExternalSeed): { osintEligible: boolean; st
     return { osintEligible: true, strongest: 'GSTIN', reason: 'GSTIN is a unique business identifier' };
   if (seed.website && /\./.test(seed.website))
     return { osintEligible: true, strongest: 'website', reason: 'a website resolves to exactly one business' };
-  if (seed.companyName && seed.companyName.trim().length >= 4)
-    return { osintEligible: true, strongest: 'company_name', reason: seed.city ? 'company name + city is specific enough' : 'company name is specific enough' };
-  const have = [seed.mobile && 'mobile', seed.name && 'name', seed.city && 'city'].filter(Boolean).join('+') || 'nothing';
+  // A company name ALONE is too generic ("M Enterprises" → dozens of cities) — require company + city
+  // before the open web is searched, else a match is likely the WRONG business. GSTIN/website above
+  // are unique anchors and don't need a city.
+  if (seed.companyName && seed.companyName.trim().length >= 4 && seed.city && seed.city.trim())
+    return { osintEligible: true, strongest: 'company_name', reason: 'company name + city is specific enough' };
+  const have = [seed.mobile && 'mobile', seed.name && 'name', seed.companyName && 'company(no city)', seed.city && 'city'].filter(Boolean).join('+') || 'nothing';
   return {
     osintEligible: false,
     strongest: have,
-    reason: 'only a mobile/first-name — too weak to search the open web without returning the wrong company',
+    reason: seed.companyName
+      ? 'company name without a city is too generic — could match the wrong business'
+      : 'only a mobile/first-name — too weak to search the open web without returning the wrong company',
   };
 }
 
