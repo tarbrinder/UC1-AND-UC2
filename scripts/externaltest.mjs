@@ -65,5 +65,24 @@ ok('World not_run when eligible but no provider wired', statusOf(runExternal({ c
 ok('World ok when eligible + provider returns a summary', statusOf(runExternal({ companyName: 'Trident Electro Components' }, {}, { summary: 'Electronic components distributor in Mumbai', match_basis: ['company_name'] }), 'World') === 'ok');
 ok('World no_record when eligible + provider returns nothing', statusOf(runExternal({ companyName: 'Trident Electro Components' }, {}, {}), 'World') === 'no_record');
 
-console.log(`\nexternaltest (anti-bogus gate + source status): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// 4. osintDemoProvider — mirror: returns a [DEMO] summary for a real company anchor; nothing for a weak one.
+function osintDemoProvider(seed) {
+  const co = (seed.companyName || '').trim();
+  if (co.length < 4) return {}; // anti-bogus: never guess off a weak anchor
+  return { summary: `[DEMO] ${co}${seed.city ? `, ${seed.city}` : ''} — registered business (synthetic).`, match_basis: ['company_name', seed.city ? 'city' : ''].filter(Boolean) };
+}
+ok('demo provider: real company anchor → [DEMO] summary', /^\[DEMO\]/.test(osintDemoProvider({ companyName: 'M Enterprises', city: 'Noida' }).summary || ''));
+ok('demo provider: weak anchor (no company) → nothing (anti-bogus)', Object.keys(osintDemoProvider({ mobile: '8527610141', name: 'Mohak' })).length === 0);
+ok('demo provider drives World → ok via the runner', statusOf(runExternal({ companyName: 'M Enterprises', city: 'Noida' }, {}, osintDemoProvider({ companyName: 'M Enterprises', city: 'Noida' })), 'World') === 'ok');
+
+// 5. The Verified-stitch bridge — which ledger sources feed the engine (recorded as 'Verified').
+const TIER1 = /gst|hsn|udyam|nic|world|osint/i;
+const stitches = (source, value) => !!(value && TIER1.test(source)); // mirror of the registry bridge gate
+ok('OSINT ledger entry → stitches as Verified', stitches('OSINT', '[DEMO] M Enterprises, Noida — registered business') === true);
+ok('GST/HSN ledger entry → stitches as Verified', stitches('GST', 'Manufacturer') === true);
+ok('Sign3 IDENTITY → does NOT stitch (observed-only)', stitches('Sign3', 'Mohak Saxena') === false);
+ok('Befisc IDENTITY → does NOT stitch (observed-only)', stitches('Befisc', '8527610141') === false);
+ok('empty value → never stitches', stitches('World', '') === false);
+
+console.log(`\nexternaltest (anti-bogus gate + source status + demo provider + Verified stitch): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

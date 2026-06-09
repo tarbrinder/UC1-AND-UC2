@@ -207,3 +207,25 @@ export async function runExternal(
 
   return { sources, externalEvidenceLedger: ledger, ranAt: opts.nowIso, seed, gate };
 }
+
+// ── DEMO / synthetic OSINT provider ─────────────────────────────────────────
+// Lets you SEE the World→Verified→Twin stitch end-to-end WITHOUT a real web-search backend and
+// WITHOUT compiling any real person's footprint. It returns a representative BUSINESS profile from
+// the seed's company anchor only (clearly tagged [DEMO]); it never fabricates a specific company.
+// It mirrors the anti-bogus bar — a weak anchor (no company / <4 chars) returns nothing, exactly as
+// a real provider should. For LIVE data, set window.__osintProvider to a real WebSearch/backend
+// provider of the same (seed) => WorldOsint shape; runExternal consumes it identically.
+export async function osintDemoProvider(seed: ExternalSeed): Promise<WorldOsint> {
+  const co = (seed.companyName || '').trim();
+  if (co.length < 4) return {}; // anti-bogus: never guess off a weak anchor
+  const city = (seed.city || '').trim();
+  const matchBasis = ['company_name', seed.city ? 'city' : ''].filter(Boolean);
+  return {
+    summary: `[DEMO] ${co}${city ? `, ${city}` : ''} — registered business; representative public profile (synthetic OSINT — wire window.__osintProvider to a real backend for live data).`,
+    productLines: ['[DEMO] representative product line'],
+    isAlsoSeller: false,
+    sourceUrls: [`demo://osint/${encodeURIComponent(co)}`],
+    match_basis: matchBasis,
+    confidence: osintMatchConfidence(matchBasis),
+  };
+}

@@ -13,7 +13,7 @@ import { DEPTH_BY_SEGMENT } from '../lib/questions/types';
 import type { DynQuestion, RequirementPlan, RequirementIntent } from '../lib/questions/types';
 import { fetchEnrichment, matchCategory, debugFallbackMobile, coreTokens } from '../lib/enrichment';
 import type { EnrichmentProfile, BuyerProfile, BuyerTwin } from '../lib/enrichment';
-import { runExternal } from '../lib/externalRun';
+import { runExternal, osintDemoProvider } from '../lib/externalRun';
 import type { ExternalRunResult, ExternalSeed } from '../lib/externalRun';
 import type { WorldOsint } from '../lib/worldEnrichment';
 import { SEED_QUESTIONS } from '../lib/questions/seed';
@@ -1413,7 +1413,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       if (val && TIER1.test(src)) cov.record(src, val, 'Verified', typeof e?.confidence === 'number' ? (e.confidence as number) : 90);
     }
     (window as unknown as { __coverage?: unknown }).__coverage = cov; // debug introspection (window.__coverage.facts())
-  }, [dynQuestions, dynAnswers, form.dynamicSpecs, manualSpecs, cascadeSpecs, enrichedSpecs, autoFilledSpecs, deducedLogistics, buyerTwin]);
+  }, [dynQuestions, dynAnswers, form.dynamicSpecs, manualSpecs, cascadeSpecs, enrichedSpecs, autoFilledSpecs, deducedLogistics, buyerTwin, external]);
 
   // #8: pre-record the buyer's STANDING cadence (and, only on a same-category repeat, budget)
   // from the persistent profile / prior order — so the planner doesn't re-ask "how often?" /
@@ -3533,8 +3533,40 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     );
   };
 
+  // Run World/OSINT with the SYNTHETIC demo provider so the World→Verified→Twin stitch is visible
+  // without a real backend (and without compiling any real person). Uses the REAL seed from the pull
+  // (company/city) so the anti-bogus anchor is genuine; only the OSINT result is synthetic ([DEMO]).
+  const runWorldDemo = async () => {
+    const b = enrichment?.buyer;
+    const seed: ExternalSeed = {
+      mobile: b?.mobile,
+      companyName: b?.companyName || (form.additionalDetails || '').trim() || undefined,
+      website: b?.website,
+      name: b?.fullName || b?.firstName,
+      city: b?.city || enrichment?.cslCity,
+      glid: enrichment?.glid || glidInput || undefined,
+    };
+    try {
+      const res = await runExternal(seed, { nowIso: new Date().toISOString(), osintFn: osintDemoProvider });
+      setExternal(res);
+      const w = window as unknown as { __ebi?: unknown; __externalSeed?: unknown };
+      w.__ebi = { externalEvidenceLedger: res.externalEvidenceLedger, sources: res.sources, gate: res.gate, ran_at: res.ranAt };
+      w.__externalSeed = seed;
+      track('rfq_world_demo_run', { hasCompany: !!seed.companyName });
+    } catch { /* no-op */ }
+  };
   const renderExternalPullHealth = () => {
-    if (!external) return null;
+    const demoBtn = (
+      <button type="button" onClick={runWorldDemo} className="rounded-full border border-fuchsia-300 px-2 py-0.5 text-fuchsia-700 hover:bg-fuchsia-100 font-medium">▶ Run World OSINT (demo)</button>
+    );
+    if (!external) {
+      return (
+        <div className="border border-fuchsia-200 bg-fuchsia-50 rounded-xl p-3 text-[11px] text-fuchsia-900 space-y-1">
+          <p className="font-bold">🌐 External Pull Health — Befisc · Sign3 · World</p>
+          <p className="text-fuchsia-600">No external run yet. {demoBtn} <span className="text-fuchsia-400">— synthetic OSINT to SEE the World → Verified → Twin/registry stitch end-to-end; wire <b>window.__osintProvider</b> to a real WebSearch/backend for live data.</span></p>
+        </div>
+      );
+    }
     const ICON: Record<string, string> = { ok: '🟢', no_record: '🟡', failed: '🔴', creds_pending: '⏸', skipped_low_confidence: '⏭', not_run: '⏸', blocked: '🔒' };
     const LABEL: Record<string, string> = {
       ok: '✓ ok', no_record: '∅ ran · nothing found', failed: '✗ failed', creds_pending: 'creds pending (Part C — add env keys)',
@@ -3544,7 +3576,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     const seedBits = [sd.mobile && `mobile ${sd.mobile}`, sd.companyName && `company "${sd.companyName}"`, sd.gstin && `GST ${sd.gstin}`, sd.website, sd.city].filter(Boolean).join(' · ') || '—';
     return (
       <div className="border border-fuchsia-200 bg-fuchsia-50 rounded-xl p-3 text-[11px] text-fuchsia-900 space-y-1">
-        <p className="font-bold">🌐 External Pull Health — Befisc · Sign3 · World (status · latency · anchor)</p>
+        <p className="font-bold flex items-center gap-2 flex-wrap">🌐 External Pull Health — Befisc · Sign3 · World (status · latency · anchor) {demoBtn}</p>
         <p className="text-fuchsia-600">seed: {seedBits}</p>
         <p>OSINT gate: <b className={external.gate.osintEligible ? 'text-emerald-700' : 'text-amber-600'}>{external.gate.osintEligible ? `eligible (${external.gate.strongest})` : `skipped (${external.gate.strongest})`}</b> — {external.gate.reason}</p>
         {external.sources.map((src) => (
@@ -3555,7 +3587,12 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
             {src.status === 'ok' && src.source === 'World' && !!(src.value as { summary?: string })?.summary ? <span className="text-emerald-700"> → “{String((src.value as { summary?: string }).summary).slice(0, 120)}”</span> : null}
           </p>
         ))}
-        <p className="text-fuchsia-400">mobile→GST→HSN chain deferred (Part C). World search runs via window.__osintProvider (Claude/WebSearch) or a backend; observed Befisc/Sign3 identity never feeds the Twin/registry.</p>
+        {(() => { const verified = (() => { try { return (coverage.current.facts() || []).filter((f) => f.source === 'Verified'); } catch { return []; } })(); return verified.length ? (
+          <p className="text-emerald-700">↪ STITCHED INTO THE ENGINE: {verified.length} Verified fact(s) recorded from external → fed the planner + Truth Table (Used-By: YES). {verified.slice(0, 3).map((f) => `${f.rawKey}=${f.value}`).join(' · ')}</p>
+        ) : (
+          <p className="text-fuchsia-400">No Verified external facts recorded yet — run World (demo) above, or wire a real provider.</p>
+        ); })()}
+        <p className="text-fuchsia-400">Stitch rule: VERIFIED business truths (GST/HSN/Udyam/NIC/World-OSINT, anti-bogus-gated) → recorded as <b>Verified</b> facts → feed the Twin/planner/Truth-Table. Befisc/Sign3 <i>identity</i> stays observed-only. mobile→GST→HSN chain (Part C). World runs via window.__osintProvider (Claude/WebSearch/backend); the demo button uses a synthetic [DEMO] provider.</p>
       </div>
     );
   };
