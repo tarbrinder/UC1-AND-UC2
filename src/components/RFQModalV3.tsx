@@ -143,6 +143,14 @@ type PanelItem =
 // P (Quick Re-post): one of the buyer's prior requirements, ready to re-post ("Buy again").
 type PriorReq = { title: string; source: 'call' | 'isq' | 'buylead'; recencyDays?: number; specs: Record<string, string>; specCount: number };
 
+// Phase-2/3 FOUNDATION — Requirement Understanding ("Final RFQ Vision"): one explainable persona/
+// requirement dimension. Built from the Twin/profile the system ALREADY computes (no new LLM).
+type RUDim = { dim: string; value: string; confidence: number; source: string; evidence: string; usedBy: string };
+// Deterministic trait → buyer-facing-dimension maps (pure; mirrored by requnderstandingtest.mjs).
+const RU_AWARENESS: Record<string, string> = { spec_driven: 'Specification-driven', brand_driven: 'Brand-driven', catalog_driven: 'Catalog / price-driven', application_driven: 'Solution-driven' };
+const RU_SUPPORT: Record<string, string> = { 'Needs Guidance': 'Needs consultation', 'Self Driven': 'Self-sufficient', Hybrid: 'Some guidance' };
+const RU_COMMS: Record<string, string> = { 'WhatsApp Friendly': 'WhatsApp-first', 'Image Sharing Buyer': 'WhatsApp-first (images)', 'Call First Buyer': 'Phone-first', 'Low Response Buyer': 'Low engagement' };
+
 // Lightweight analytics — pushes to GTM's dataLayer if present, else no-ops.
 // Lets us watch the details-wizard funnel (open / skip / complete) in prod.
 // Funnel context auto-attached to EVERY tracked event. glid = the buyer; bl_id =
@@ -827,6 +835,57 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     if (q > 0) return { mode: 'bulk', paymentLean: 'either', retailish: false, descriptor: `${q} ${unit} — a sized order` };
     return { mode: 'unknown', paymentLean: 'either', retailish: false, descriptor: '' };
   };
+  // ── Phase-2/3 FOUNDATION: Requirement Understanding (the "Final RFQ Vision" spine) ──
+  // Assembles the persona/requirement dimensions the system can ALREADY justify — each as
+  // {value, confidence, source, evidence, usedBy} — from the Twin + profile + registry + mode it
+  // ALREADY computes (NO new LLM call; pure consumption). Dimensions not yet inferable show as
+  // "— (phase 2)" so the gaps are explicit. Debug-only today (does NOT touch the frozen buyer flow);
+  // it is the explainable object the post-pilot Requirement-Understanding-Engine v2 will deepen and
+  // wire into the live flow. Directly realises the roadmap's "every dimension shows in debug:
+  // value · confidence · source · evidence · used-by" requirement.
+  const requirementUnderstanding = (): RUDim[] => {
+    const tw = ignoreTwin ? null : liveTwin();
+    const bp = buyerProfile;
+    const lb = tw?.layer_b_behavioral;
+    const lc = tw?.layer_c_commercial_intelligence;
+    const rm = requirementMode();
+    const ev1 = (t?: { evidence?: Array<{ signal?: string }> }) => (t?.evidence || []).map((e) => e?.signal).filter(Boolean)[0] || '';
+    const out: RUDim[] = [];
+    const add = (dim: string, value: string, confidence: number, source: string, evidence: string, usedBy: string) =>
+      out.push({ dim, value: value || '— (phase 2)', confidence: value ? confidence : 0, source: value ? source : '—', evidence, usedBy });
+
+    // 1 — Who is the buyer (role + lifecycle stage descriptor)
+    const role = canonicalBuyerType();
+    add('Who is the buyer', [role, bp?.maturity].filter(Boolean).join(' · '), role ? (form.buyerType ? 100 : 85) : 0,
+      form.buyerType ? 'User' : 'Twin/Profile', (tw?.layer_a_identity?.company_desc || bp?.summary || '').slice(0, 70), 'GST/Firm gating · planner persona');
+    // 2 — Use case / active intent (CURRENT requirement wins; else the Twin's history-derived intent)
+    const curIntent = requirementIntent?.value || '';
+    const ai = lc?.current_active_intent;
+    add('Use case / intent', curIntent || String(ai?.value || ''), curIntent ? (requirementIntent?.locked ? 100 : requirementIntent?.confidence || 0) : ai?.confidence || 0,
+      curIntent ? (requirementIntent?.locked ? 'User' : 'Derived') : 'Twin', ev1(ai), 'intent question · spec re-rank · planner');
+    // 3 — Procurement stage (maturity)
+    add('Procurement stage', bp?.maturity || '', bp?.maturity ? 85 : 0, 'Profile', 'setup→execution / machine→inputs signals', 'requirement mode · question depth');
+    // 4 — Purchase urgency (inferred from mode + response sensitivity + repeat cadence)
+    const urg = rm.mode === 'emergency' ? 'Immediate' : /low tolerance/i.test(String(lb?.response_sensitivity?.value || bp?.responseSensitivity || '')) ? 'Soon' : repeatSignal() ? 'Recurring cadence' : '';
+    add('Purchase urgency', urg, urg ? 55 : 0, 'Mode/Twin (inferred)', rm.descriptor.slice(0, 50), 'delivery deduction · seller SLA');
+    // 5 — Purchasing power (band only; never exact unless externally verified — phase 4)
+    const power = String(lc?.bulk_orientation?.value || '') || enrichment?.persona?.scale || '';
+    add('Purchasing power', power ? `${power} (band)` : '', power ? 50 : 0, 'History/Twin', 'BL volume + scale · external GST pending (phase 4)', 'budget bands');
+    // 6 — Local supplier preference
+    const loc = String(lb?.local_preference?.value || '') || bp?.localityPreference || '';
+    add('Local supplier preference', loc, loc ? 70 : 0, 'Twin/Profile', tw?.layer_a_identity?.city || '', 'supplier matching');
+    // 7 — Buyer awareness
+    const aware = bp?.sourcingStyle ? RU_AWARENESS[bp.sourcingStyle] || bp.sourcingStyle : '';
+    add('Buyer awareness', aware, aware ? 70 : 0, 'Profile', `sourcing: ${bp?.sourcingStyle || '?'} · info-seeking: ${bp?.infoSeeking || '?'}`, 'question tone · supplier matching');
+    // 8 — Preferred communication
+    const comm = bp?.engagement ? RU_COMMS[bp.engagement] || bp.engagement : lb?.whatsapp_affinity?.value ? 'WhatsApp-first' : '';
+    add('Preferred communication', comm, comm ? 75 : 0, 'Twin/Profile', `WA affinity: ${enrichment?.persona?.whatsappAffinity || '?'}`, 'seller routing');
+    // 9 — Support required
+    const sup = bp?.decisionStyle ? RU_SUPPORT[bp.decisionStyle] || bp.decisionStyle : '';
+    add('Support required', sup, sup ? 60 : 0, 'Profile', `decision: ${bp?.decisionStyle || '?'}`, 'quote enrichment');
+    return out;
+  };
+
   // Keyword-based so category-tailored personas (Salon, Distributor, Retailer…)
   // still gate GST/Firm correctly — anything that isn't an individual is business.
   const isBusinessRole = !!form.buyerType && !/individual|personal|end[\s-]?user|consumer|home/i.test(form.buyerType);
@@ -3419,6 +3478,24 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // A1: Option Provenance — prove EVERY surfaced non-spec question/chip traces to the
   // registry (qty / category / profile / history). Spec fields+options are the ONLY
   // exempt source (they come from the IndiaMART ISQ API). An ungrounded card here is a bug.
+  // Phase-2/3 foundation panel — the "Final RFQ Vision" table on existing intelligence.
+  const renderRequirementUnderstanding = () => {
+    const dims = requirementUnderstanding();
+    const known = dims.filter((d) => d.confidence > 0).length;
+    return (
+      <div className="border border-indigo-200 bg-indigo-50 rounded-xl p-3 text-[11px] text-indigo-900 space-y-1">
+        <p className="font-bold">🧠 Requirement Understanding — the “Final RFQ Vision” ({known}/{dims.length} known · existing Twin/profile intelligence, NO new LLM · Phase-2/3 foundation)</p>
+        {dims.map((d) => (
+          <div key={d.dim} className="border-l-2 border-indigo-200 pl-1.5 my-0.5">
+            <p><b>{d.dim}:</b> <span className={d.confidence ? 'text-indigo-800 font-semibold' : 'text-gray-400'}>{d.value}</span>{d.confidence ? <span className="text-indigo-400"> · {d.confidence}% · {d.source}</span> : null}</p>
+            {d.confidence ? <p className="text-indigo-400">{d.evidence ? `evidence: ${d.evidence} · ` : ''}used by: {d.usedBy}</p> : null}
+          </div>
+        ))}
+        <p className="text-indigo-400">value · confidence · source · evidence · used-by. Gaps (“— phase 2”) = Requirement-Understanding-Engine v2 inference targets; purchasing-power exactness waits on external GST (phase 4).</p>
+      </div>
+    );
+  };
+
   const renderOptionProvenance = () => {
     const qs = dynQuestions.filter((q) => q.source === 'llm');
     if (!qs.length && !reqPlan && !repostSource) return null;
@@ -4277,6 +4354,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         {debug && renderPipelineHealth()}
         {debug && renderExternalPullHealth()}
         {debug && renderLLMCallHealth()}
+        {debug && renderRequirementUnderstanding()}
         {debug && renderOptionProvenance()}
         {debug && renderTwinDebug()}
         {debug && renderBuyerIntelligenceLedger()}
