@@ -2656,7 +2656,10 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // Stores ALL slots; the renderers split them (specs → inline on the spec page,
   // requirement/persona → top of the final step), so nothing is ever dropped.
   const ensureDynQuestions = (specs: ISQSpec[]) => {
-    if (!QUESTION_ENGINE || !hasGeminiKey()) return;
+    // EVERY early return must clear dynLoading — this is reached as ensureReqPlan's fallback (which
+    // already set dynLoading=true), so a silent return here would hang the "Finding…" spinner forever
+    // (seen on 0-spec / off-profile products once they started landing on the spec page).
+    if (!QUESTION_ENGINE || !hasGeminiKey()) { setDynLoading(false); return; }
     const segment = classifySegment({
       productName: form.productName,
       mcatType: form.mcatType,
@@ -2665,11 +2668,12 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       hasUnits: unitOptions.length > 0,
     });
     const sig = `${form.productName}|${segment}|${form.quantity}|${form.buyerType}`;
-    if (dynGenSig.current === sig) return; // already generated for this context
+    if (dynGenSig.current === sig) { setDynLoading(false); return; } // already generated for this context
     dynGenSig.current = sig;
     const depth = DEPTH_BY_SEGMENT[segment];
     if (depth.maxQuestions === 0) {
       setDynQuestions([]);
+      setDynLoading(false);
       return;
     }
     setDynLoading(true);
@@ -2765,6 +2769,11 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     if (planSig.current === sig) return;
     planSig.current = sig;
     setDynLoading(true);
+    // SAFETY NET: a hung planRequirement LLM call must never spin "Finding…" forever. If this plan
+    // is still the pending one after ~14s, stop the spinner (the spec page then shows whatever specs
+    // exist + lets the buyer proceed). Resolve/catch clears dynLoading first in the happy path.
+    const thisSig = sig;
+    setTimeout(() => { if (planSig.current === thisSig) setDynLoading(false); }, 14000);
     const isqSpecsWithOptions = specs.reduce<Record<string, string[]>>((acc, s) => {
       acc[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC
         ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean)
