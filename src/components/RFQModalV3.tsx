@@ -2555,21 +2555,21 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         toast.show('Please enter a valid product/service name', 'warning');
         return;
       }
-      if (specs.length > 0) {
-        setStep(1);
-        setShowAllSpecs(false);
-        // Prefetch the plan + panel questions now, ready before the spec page.
-        ensureReqPlan(specs);
-        // If a photo is attached, read it against THIS category's specs now
-        // (covers "added image first, then typed/changed the product").
-        if (form.imageBase64 && hasGeminiKey()) {
-          setImageAnalyzing(true);
-          runImageSpecFill(form.imageBase64, form.imageMimeType, form.productName, specs).finally(() =>
-            setImageAnalyzing(false)
-          );
-        }
-      } else {
-        enterStep2(specs);
+      // ALWAYS go to the spec page for a valid product — even with 0 ISQ specs. The planner is
+      // product-keyed (runs regardless of specs) and produces a clarifying question, so a vague
+      // product like "cord" (no category match) still gets engaged on step 1 instead of being
+      // silently skipped to logistics (the #1 "no planner question" / #3 "no spec page" bug).
+      setStep(1);
+      setShowAllSpecs(false);
+      // Prefetch the plan + panel questions now, ready before the spec page.
+      ensureReqPlan(specs);
+      // If a photo is attached, read it against THIS category's specs now
+      // (covers "added image first, then typed/changed the product").
+      if (specs.length > 0 && form.imageBase64 && hasGeminiKey()) {
+        setImageAnalyzing(true);
+        runImageSpecFill(form.imageBase64, form.imageMimeType, form.productName, specs).finally(() =>
+          setImageAnalyzing(false)
+        );
       }
     } else if (step === 1) {
       // Single spec page now (top-3 + "more" expander), so always advance.
@@ -2895,11 +2895,9 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     if (step === 1) {
       setStep(0);
     } else if (step === 2) {
-      if (isqSpecs.length > 0) {
-        setStep(1);
-      } else {
-        setStep(0);
-      }
+      // Step 1 now always exists for a valid product (even with 0 ISQ specs → planner questions),
+      // so logistics → spec page → product.
+      setStep(committedValid.current ? 1 : 0);
     }
   };
 
