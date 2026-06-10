@@ -2538,7 +2538,10 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       //   repost → skip · explicit-purpose-in-product-text → skip · off-profile → ask · contradiction → ask
       //   · Twin confidence ≥80 → confirm · product implies intent → confirm · else (cold/new) → ask.
       // handleRepost + the Skip button set intentGateSkipped; deriveIntent decides ask-vs-confirm via confidence.
-      if (QUESTION_ENGINE && hasGeminiKey() && isqSpecs.length > 0 && qtyReady && !requirementIntent && !intentGateSkipped && !intentResolved.current) {
+      // Intent comes FIRST — even for a category with NO ISQ specs (a committed valid product like
+      // "cord"), so a vague/no-spec product still gets the clarifying question instead of skipping it.
+      const productCommittedValid = committedValid.current && committedProduct.current === form.productName.trim();
+      if (QUESTION_ENGINE && hasGeminiKey() && (isqSpecs.length > 0 || productCommittedValid) && qtyReady && !requirementIntent && !intentGateSkipped && !intentResolved.current) {
         toast.show('One quick question first — tell us the planned use', 'info');
         return;
       }
