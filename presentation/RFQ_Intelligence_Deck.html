@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RFQ Intelligence — Buyer-Twin–Driven RFQ</title>
+<style>
+  :root { --teal:#0c8e7e; --teal-d:#0a6e62; --ink:#1f2937; --muted:#6b7280; --bg:#f1f5f4; --chip:#e6f4f1; --amber:#b45309; }
+  * { box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:#cbd5d1; color:var(--ink); }
+  .slide { width:1120px; min-height:630px; margin:22px auto; background:#fff; border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,.12);
+           padding:40px 48px; position:relative; overflow:hidden; }
+  .kicker { color:var(--teal); font-weight:800; font-size:13px; letter-spacing:.14em; text-transform:uppercase; }
+  h1 { font-size:40px; line-height:1.1; margin:6px 0 4px; }
+  h2 { font-size:30px; line-height:1.12; margin:4px 0 14px; }
+  .sub { color:var(--muted); font-size:17px; margin:2px 0 16px; }
+  .cols { display:flex; gap:26px; }
+  .col { flex:1; }
+  ul { margin:8px 0; padding-left:20px; } li { margin:7px 0; font-size:15.5px; line-height:1.4; }
+  b { color:var(--teal-d); }
+  .flow { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin:10px 0 14px; }
+  .step { background:var(--chip); color:var(--teal-d); font-weight:700; font-size:13px; padding:7px 11px; border-radius:9px; border:1px solid #cfe9e3; }
+  .arrow { color:var(--teal); font-weight:800; }
+  .callout { background:var(--bg); border-left:4px solid var(--teal); border-radius:8px; padding:12px 14px; font-size:14.5px; margin:10px 0; }
+  .callout .lbl { color:var(--teal); font-weight:800; font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
+  .imgbox { width:100%; min-height:230px; border:2px dashed #b9cfca; border-radius:10px; display:flex; align-items:center; justify-content:center;
+            text-align:center; color:var(--muted); font-size:13px; background:#fafcfb; padding:14px; }
+  .imgbox b { color:var(--teal-d); }
+  img.shot { width:100%; border:1px solid #e2e8f0; border-radius:10px; display:block; }
+  .pill { display:inline-block; background:#fff7ed; color:var(--amber); border:1px solid #fde7c8; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; margin:2px 4px 2px 0; }
+  .pill.ok { background:var(--chip); color:var(--teal-d); border-color:#cfe9e3; }
+  .foot { position:absolute; bottom:14px; left:48px; right:48px; display:flex; justify-content:space-between; color:#9aa3af; font-size:11px; border-top:1px solid #eef2f1; padding-top:8px; }
+  .big { font-size:21px; font-weight:800; color:var(--teal-d); }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+  td,th { border:1px solid #e2e8f0; padding:6px 8px; text-align:left; } th { background:var(--chip); color:var(--teal-d); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px 18px; }
+  @media print { body{background:#fff;} .slide{ margin:0; box-shadow:none; border-radius:0; page-break-after:always; width:100%; min-height:100vh; } }
+</style>
+</head>
+<body>
+
+<!-- ============ SLIDE 1 — TITLE / THESIS ============ -->
+<section class="slide">
+  <div class="kicker">IndiaMART · BuyerMY · Demand Intelligence</div>
+  <h1>RFQ Intelligence — the Buyer-Twin RFQ</h1>
+  <p class="sub">The BL-Enrichment vision (May proposal), now <b>LIVE at the source</b> of the requirement — interactive, while the buyer fills the form.</p>
+  <div class="callout">
+    <div class="lbl">The thesis we proved</div>
+    “We already capture the truth in calls, chats &amp; history. <b>We were not missing data — we were missing interpretation.</b>”
+    The Buyer Twin now interprets it <b>in real time</b>, inside the RFQ.
+  </div>
+  <div class="cols" style="margin-top:14px">
+    <div class="col">
+      <div class="kicker">Outcome (live, GLID 268590579 · notebook-paper)</div>
+      <ul>
+        <li><span class="big">~91%</span> buyer effort reduced (AI Impact panel)</li>
+        <li><b>≤3</b> questions asked — the Twin already knew the rest</li>
+        <li>A <b>richer BL</b>: corrected title · qty · specs · location · buyer persona — every field <b>sourced</b></li>
+      </ul>
+    </div>
+    <div class="col">
+      <div class="imgbox">
+        <img class="shot" src="images/fig1-final-bl.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;text-align:center">
+          📸 <b>LIVE — Final enriched BL</b><br>GLID 268590579 · “Notebook Making Machine” · step&nbsp;2 “Your Requirement” + 🤖 AI Impact (~91%)<br><span style="color:#9aa3af">drop screenshot → images/fig1-final-bl.png</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>RFQ Intelligence · BuyerMY</span><span>1 / 5</span></div>
+</section>
+
+<!-- ============ SLIDE 2 — RFQ WALKTHROUGH ============ -->
+<section class="slide">
+  <div class="kicker">What is being done · How</div>
+  <h2>RFQ Walkthrough — one flow, intelligence at every step</h2>
+  <div class="flow">
+    <span class="step">Product + Qty</span><span class="arrow">→</span>
+    <span class="step">GLID Pull · 7 signals</span><span class="arrow">→</span>
+    <span class="step">Buyer Twin</span><span class="arrow">→</span>
+    <span class="step">Intent-first (1 tap)</span><span class="arrow">→</span>
+    <span class="step">Planner ≤3 Q</span><span class="arrow">→</span>
+    <span class="step">Specs (auto-filled, editable)</span><span class="arrow">→</span>
+    <span class="step">Deduced delivery/payment</span><span class="arrow">→</span>
+    <span class="step">Enriched BL</span>
+  </div>
+  <div class="cols">
+    <div class="col">
+      <ul>
+        <li><b>Pull</b> = PNS · CSL · WhatsApp · prev BL · prev ISQ · buyer profile → one webhook.</li>
+        <li><b>Intent-first:</b> the WHY question comes <i>before</i> any spec — replaces the old “who’s buying” toggle.</li>
+        <li><b>Planner asks only the unknowns</b> — anything the Twin already knows is skipped (and shown in “Why skipped”).</li>
+        <li><b>Specs auto-fill</b> from a single signal (cascade), then <b>re-rank</b> to the buyer’s intent.</li>
+        <li><b>Last page is deduced</b> — delivery/payment pre-filled (confirmable), not asked blank.</li>
+      </ul>
+      <div class="callout">
+        <div class="lbl">Decision hierarchy (locked)</div>
+        Current Requirement &nbsp;&gt;&nbsp; Requirement Mode &nbsp;&gt;&nbsp; Intent &nbsp;&gt;&nbsp; Verified Truths &nbsp;&gt;&nbsp; Persona/History
+      </div>
+    </div>
+    <div class="col">
+      <div class="imgbox">
+        <img class="shot" src="images/fig2-walkthrough.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;text-align:center">
+          📸 <b>LIVE — page 1</b><br>Product + Qty + “Pull” + the journey-adapted Intent question with chips<br><span style="color:#9aa3af">images/fig2-walkthrough.png</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>RFQ Intelligence · BuyerMY</span><span>2 / 5</span></div>
+</section>
+
+<!-- ============ SLIDE 3 — BUYER PROFILE ENRICHMENT ============ -->
+<section class="slide">
+  <div class="kicker">Buyer Profile Enrichment · the Buyer Twin</div>
+  <h2>One pull → a Buyer Twin, every trait with evidence</h2>
+  <div class="cols">
+    <div class="col" style="flex:1.05">
+      <ul>
+        <li><b>Built from 7 signals</b> (PNS/CSL/WhatsApp/BL/ISQ/profile) — the same raw oil from the May proposal, refined into a persistent <b>Buyer Twin</b>.</li>
+        <li>Every trait carries an <b>evidence ledger</b> (which call/RFQ/chat justifies it) — never a black box.</li>
+        <li><b>9 persona dimensions</b> surfaced &amp; auditable in “Requirement Understanding”.</li>
+      </ul>
+      <div class="callout">
+        <div class="lbl">Live — GLID 268590579 (notebook buyer)</div>
+        “<b>Kanpur-based manufacturer, repeat raw-paper buyer for notebook production, WhatsApp-first, prefers local.</b>”<br>
+        active-intent <b>Notebook Manufacturing Inputs · conf 95</b> · maturity <b>Execution Phase</b> · multi-SKU
+      </div>
+      <div class="grid2" style="margin-top:8px;font-size:12.5px">
+        <div><span class="pill ok">Who is the buyer ✓</span></div><div><span class="pill ok">Use case / intent ✓</span></div>
+        <div><span class="pill">Procurement stage</span></div><div><span class="pill">Urgency</span></div>
+        <div><span class="pill">Purchasing power</span></div><div><span class="pill">Local preference</span></div>
+        <div><span class="pill">Awareness</span></div><div><span class="pill">Communication</span></div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="imgbox">
+        <img class="shot" src="images/fig3-twin.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;text-align:center">
+          📸 <b>LIVE — Buyer Twin + Dossier + 🧠 Requirement Understanding</b><br>GLID 268590579 · ?debug=1 · spec step<br><span style="color:#9aa3af">images/fig3-twin.png</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>RFQ Intelligence · BuyerMY</span><span>3 / 5</span></div>
+</section>
+
+<!-- ============ SLIDE 4 — PERSONA QUESTIONS / INTENT / MODE ============ -->
+<section class="slide">
+  <div class="kicker">Persona Questions · Intent · Requirement Mode</div>
+  <h2>Ask the WHY, weight the current order, never re-ask the known</h2>
+  <div class="cols">
+    <div class="col">
+      <ul>
+        <li><b>Intent-first, journey-adapted:</b> one question (“What will these be used for?”) with category-specific chips — derived &amp; <b>one-tap confirmable</b>, never blank.</li>
+        <li><b>Requirement Mode (8):</b> sample · one-off · recurring · bulk · capital · project · emergency — <b>ephemeral, per-order</b>, and it <b>beats the persona</b>.</li>
+        <li><b>Current requirement always beats history</b> (the hard part, proven in pilot):</li>
+      </ul>
+      <table>
+        <tr><th>Case</th><th>RFQ behaviour</th></tr>
+        <tr><td>Notebook paper · notebook mfr (<b>on-profile</b>)</td><td>intent = “Notebook Manufacturing Inputs”</td></tr>
+        <tr><td>Potatoes · electronics buyer (<b>off-profile</b>)</td><td>“new area for you” → fresh Q, <b>history ignored</b></td></tr>
+        <tr><td>Diaper · 1 pc · B2B trader</td><td>End User · <b>sample_trial</b> · advance — persona demoted</td></tr>
+      </table>
+    </div>
+    <div class="col">
+      <div class="imgbox">
+        <img class="shot" src="images/fig4-intent.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;text-align:center">
+          📸 <b>LIVE — Intent question + Requirement Mode line</b><br>GLID 42897602 · “potatoes” → chips (Processing / Retail / Restaurants / Feed) + “Looks like a new area for you” + 🧭 History influence: OFF<br><span style="color:#9aa3af">images/fig4-intent.png</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>RFQ Intelligence · BuyerMY</span><span>4 / 5</span></div>
+</section>
+
+<!-- ============ SLIDE 5 — SPECS / FINAL BL / NEXT ============ -->
+<section class="slide">
+  <div class="kicker">Specs · Final Requirement · What’s next</div>
+  <h2>Decision-grade specs, every field sourced — maps to the CEO proposal</h2>
+  <div class="cols">
+    <div class="col">
+      <ul>
+        <li><b>Specs:</b> IndiaMART ISQ + <b>cascade auto-fill</b> from one signal + <b>intent-driven re-rank</b> + per-spec <b>provenance</b> + buyer can <b>× remove</b> any spec.</li>
+        <li><b>Final BL</b> recovers the May-proposal corrections — at source:</li>
+      </ul>
+      <table>
+        <tr><th>Proposal output</th><th>RFQ today</th></tr>
+        <tr><td>Correct title / category / qty / specs</td><td>✓</td></tr>
+        <tr><td>Application / use-case · buyer persona</td><td>✓</td></tr>
+        <tr><td>Location &amp; supplier preference</td><td>🟡 captured</td></tr>
+        <tr><td>Business model · maturity lifecycle</td><td>🟡 next</td></tr>
+        <tr><td>Purchasing power (GST/turnover)</td><td>🟡 ext. creds</td></tr>
+      </table>
+      <div class="callout" style="margin-top:8px">
+        <div class="lbl">What’s next — Requirement Understanding Engine v2</div>
+        Business-model inference · maturity-as-lifecycle · deep WA/PNS distillation · external GST → the 9 fields become one <b>coherent buyer story</b>.
+      </div>
+    </div>
+    <div class="col">
+      <div class="imgbox">
+        <img class="shot" src="images/fig5-specs-truth.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;text-align:center">
+          📸 <b>LIVE — Spec page (cascade chips + provenance) + 🧾 Truth Table</b><br>GLID 268590579 · every field · source · confidence · evidence<br><span style="color:#9aa3af">images/fig5-specs-truth.png</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>RFQ Intelligence · BuyerMY · “not missing data — interpreting it, live”</span><span>5 / 5</span></div>
+</section>
+
+</body>
+</html>

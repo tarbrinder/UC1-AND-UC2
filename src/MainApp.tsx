@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Zap, ShieldCheck, Clock, Layers, Mic, FileText } from 'lucide-react';
 import RFQModalV3 from './components/RFQModalV3';
+import { isDebug } from './lib/debugFlag';
 
 type ModalVariant = 'v1' | 'v2' | 'v3' | 'smart' | null;
 
@@ -76,6 +77,17 @@ export default function MainApp() {
   const [activeModal, setActiveModal] = useState<ModalVariant>(null);
   const [productIndex, setProductIndex] = useState(0);
   const [fadeIn, setFadeIn] = useState(true);
+  // Step-0 debug staging: the GLID/Pull CTA now lives HERE (on the landing). It stages a GLID and
+  // opens Smart with autoPull → the modal runs its existing pull on mount, so the product screen
+  // stays clean. ?debug-gated (demo prefill). Opening any card directly = a clean cold run.
+  const debug = isDebug(); // sticky within the tab — survives the dep-reopt reload that drops ?debug
+  const [stagedGlid, setStagedGlid] = useState('');
+  const [stagedIgnoreTwin, setStagedIgnoreTwin] = useState(false);
+  const [autoPull, setAutoPull] = useState(false);
+  const [stagingOnly, setStagingOnly] = useState(false); // B-step-2: open Smart in staging mode (debug panels first)
+  // "Pull" → open Smart in STAGING mode (pulls + shows the pulled-data debug panels at step 0).
+  // "Start RFQ →" inside the staging view flips stagingOnly off (same instance, data persists).
+  const openStaged = () => { if (!stagedGlid.trim()) return; setAutoPull(true); setStagingOnly(true); setActiveModal('smart'); };
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -137,6 +149,37 @@ export default function MainApp() {
           </div>
         </div>
 
+        {/* Step-0 debug staging — the Buyer GLID / Pull CTA lives HERE (above the cards so it's the
+            first thing in ?debug). "Pull" → staging view (pulled-data debug) → "Start RFQ →" → clean form. */}
+        {debug && (
+          <div className="w-full max-w-sm rounded-2xl border border-purple-200 bg-purple-50/70 p-3 text-left">
+            <p className="text-[11px] font-semibold text-purple-700 uppercase tracking-wide mb-2">🐞 Debug · Buyer GLID (demo prefill)</p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={stagedGlid}
+                onChange={(e) => setStagedGlid(e.target.value.replace(/[^0-9]/g, ''))}
+                onKeyDown={(e) => { if (e.key === 'Enter') openStaged(); }}
+                placeholder="e.g., 268590579"
+                className="flex-1 min-w-0 border border-purple-200 rounded-xl px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-purple-300 focus:border-purple-400"
+              />
+              <button
+                type="button"
+                disabled={!stagedGlid.trim()}
+                onClick={openStaged}
+                className="px-4 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-900 disabled:opacity-50"
+              >
+                Pull
+              </button>
+            </div>
+            <label className="flex items-center gap-1.5 mt-2 text-[11px] text-purple-700 cursor-pointer select-none">
+              <input type="checkbox" checked={stagedIgnoreTwin} onChange={(e) => setStagedIgnoreTwin(e.target.checked)} className="accent-purple-600" />
+              🧪 Ignore Twin (cold run — skip persona/concierge)
+            </label>
+            <p className="text-[10px] text-purple-400 mt-1.5">Pull → inspect the pulled buyer data (Twin · Dossier · Pipeline · External · raw) → Start the clean RFQ.</p>
+          </div>
+        )}
+
         {/* Version buttons */}
         <div className="flex flex-wrap justify-center gap-3 w-full">
           {VARIANT_BUTTONS.map((btn) => {
@@ -144,7 +187,7 @@ export default function MainApp() {
             return (
               <div key={btn.id} className="flex flex-col items-center gap-2">
                 <button
-                  onClick={() => setActiveModal(btn.id)}
+                  onClick={() => { setAutoPull(false); setStagingOnly(false); setActiveModal(btn.id); }}
                   className={`
                     w-[140px] h-[100px] rounded-2xl font-bold flex flex-col items-center justify-center gap-2
                     shadow-md hover:shadow-xl hover:-translate-y-0.5 active:scale-95 transition-all
@@ -164,13 +207,19 @@ export default function MainApp() {
             );
           })}
         </div>
+
       </div>
 
       {/* Modal */}
       {activeModal && (
         <RFQModalV3
-          onClose={() => setActiveModal(null)}
+          onClose={() => { setActiveModal(null); setAutoPull(false); setStagingOnly(false); }}
           variantLabel={VARIANT_LABELS[activeModal]}
+          initialGlid={stagedGlid}
+          autoPull={autoPull && activeModal === 'smart'}
+          initialIgnoreTwin={stagedIgnoreTwin}
+          stagingOnly={stagingOnly && activeModal === 'smart'}
+          onStart={() => setStagingOnly(false)}
         />
       )}
     </div>

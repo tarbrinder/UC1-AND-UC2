@@ -91,5 +91,51 @@ ok('Sign3 IDENTITY → does NOT stitch (observed-only)', stitches('Sign3', 'Moha
 ok('Befisc IDENTITY → does NOT stitch (observed-only)', stitches('Befisc', '8527610141') === false);
 ok('empty value → never stitches', stitches('GST', '') === false);
 
-console.log(`\nexternaltest (anti-bogus gate + source status + demo provider + Verified stitch): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// 6. P4 — Cross-validation (the agreement ladder = confidence). Mirror of crossValidateExternal:
+//    same fact across more INDEPENDENT sources ⇒ higher tier; 1=observed · 2=corroborated · 3+=verified.
+const xslug = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const FACT_ALIASES = { name: ['name', 'full_name', 'fullName', 'customer_name', 'customerName'], company: ['company', 'company_name', 'companyName', 'business_name', 'businessName', 'firm', 'firm_name'], city: ['city', 'district'], email: ['email', 'email_id', 'emailId'], pan: ['pan', 'pan_number', 'panNumber'] };
+function deepGet(obj, key) {
+  if (!obj || typeof obj !== 'object') return '';
+  if (obj[key] != null && typeof obj[key] !== 'object') return String(obj[key]);
+  for (const v of Object.values(obj)) { if (v && typeof v === 'object') { const inner = v[key]; if (inner != null && typeof inner !== 'object') return String(inner); } }
+  return '';
+}
+function extractFacts(source, seed) {
+  const out = {};
+  if (source.source === 'World') { if (source.status === 'ok' && seed.companyName) out.company = seed.companyName.trim(); return out; }
+  const v = source.value || {};
+  for (const [key, aliases] of Object.entries(FACT_ALIASES)) { for (const a of aliases) { const got = deepGet(v, a).trim(); if (got) { out[key] = got; break; } } }
+  return out;
+}
+function crossValidateExternal(sources, seed) {
+  const providers = [];
+  const seedFacts = {};
+  if (seed.name) seedFacts.name = seed.name.trim();
+  if (seed.companyName) seedFacts.company = seed.companyName.trim();
+  if (seed.city) seedFacts.city = seed.city.trim();
+  providers.push({ provider: 'first_party', facts: seedFacts });
+  for (const s of sources) { if (s.status !== 'ok') continue; providers.push({ provider: s.source, facts: extractFacts(s, seed) }); }
+  const map = new Map();
+  for (const { provider, facts } of providers) { for (const [key, value] of Object.entries(facts)) { const nv = xslug(value); if (!nv) continue; const id = `${key}::${nv}`; if (!map.has(id)) map.set(id, { key, value, sources: new Set() }); map.get(id).sources.add(provider); } }
+  const facts = [...map.values()].map((f) => { const agreement = f.sources.size; const tier = agreement >= 3 ? 'verified' : agreement === 2 ? 'corroborated' : 'observed'; const confidence = agreement >= 3 ? 92 : agreement === 2 ? 78 : 55; return { key: f.key, value: f.value, sources: [...f.sources], agreement, tier, confidence }; }).sort((a, b) => b.agreement - a.agreement);
+  return { facts, verifiedFacts: facts.filter((f) => f.tier === 'verified') };
+}
+const fact = (cv, key) => cv.facts.find((f) => f.key === key);
+const cv1 = crossValidateExternal([], { companyName: 'Chetna Industries', name: 'Dinesh' });
+ok('P4: company from 1 source (seed only) → observed (1×)', fact(cv1, 'company').tier === 'observed' && fact(cv1, 'company').agreement === 1);
+const cv2 = crossValidateExternal([{ source: 'World', status: 'ok', value: {} }], { companyName: 'Chetna Industries' });
+ok('P4: seed + World agree on company → corroborated (2×)', fact(cv2, 'company').tier === 'corroborated' && fact(cv2, 'company').agreement === 2);
+const cv3 = crossValidateExternal([{ source: 'Befisc', status: 'ok', value: { company_name: 'Chetna Industries' } }, { source: 'World', status: 'ok', value: {} }], { companyName: 'Chetna Industries' });
+ok('P4: seed + Befisc + World agree → VERIFIED (3×, conf 92)', fact(cv3, 'company').tier === 'verified' && fact(cv3, 'company').confidence === 92);
+ok('P4: verified company graduates observed→Verified (in verifiedFacts)', cv3.verifiedFacts.some((f) => f.key === 'company'));
+const cvName = crossValidateExternal([{ source: 'Befisc', status: 'ok', value: { name: 'Dinesh Chandra' } }], { name: 'Dinesh Chandra', companyName: 'Chetna Industries' });
+ok('P4: seed + Befisc agree on name → corroborated', fact(cvName, 'name').tier === 'corroborated');
+const cvDis = crossValidateExternal([{ source: 'Befisc', status: 'ok', value: { name: 'D Chandra' } }], { name: 'Dinesh Chandra' });
+ok('P4: differing names do NOT corroborate (each 1× observed)', cvDis.facts.filter((f) => f.key === 'name').every((f) => f.agreement === 1));
+const cvNo = crossValidateExternal([{ source: 'Befisc', status: 'no_record', value: { company_name: 'Chetna Industries' } }], { companyName: 'Chetna Industries' });
+ok('P4: a no_record source cannot corroborate (company stays 1× observed)', fact(cvNo, 'company').agreement === 1);
+ok('P4: bridge records ONLY business cross-facts (company/city) Verified — NOT name/email/pan', /^(company|city)$/.test('company') && !/^(company|city)$/.test('name'));
+
+console.log(`\nexternaltest (anti-bogus gate + source status + demo provider + Verified stitch + P4 agreement ladder): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

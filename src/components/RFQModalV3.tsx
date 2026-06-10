@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { X, Mic, Camera, ChevronDown, ChevronUp, MapPin, ArrowRight, LogIn, Pencil, Clock, CreditCard, User, Phone, CheckCircle2 } from 'lucide-react';
 import type { RFQFormData, ISQSpec, FormStep } from '../types';
 import { filterProducts, fetchProductSuggestions, stripQuantityPrefix, parseQuantityFromName } from '../utils/productNames';
@@ -11,9 +11,19 @@ import { stripPII } from '../utils/pii';
 import { classifySegment } from '../lib/questions/segment';
 import { DEPTH_BY_SEGMENT } from '../lib/questions/types';
 import type { DynQuestion, RequirementPlan, RequirementIntent } from '../lib/questions/types';
-import { fetchEnrichment, matchCategory, debugFallbackMobile, coreTokens } from '../lib/enrichment';
-import type { EnrichmentProfile, BuyerProfile, BuyerTwin } from '../lib/enrichment';
+import { fetchEnrichment, matchCategory, debugFallbackMobile, coreTokens, distillSessionBehavior, mergeObservedBehavior } from '../lib/enrichment';
+import type { EnrichmentProfile, BuyerProfile, BuyerTwin, ObservedSessionBehavior, ObservedExternal } from '../lib/enrichment';
 import { runExternal, osintDemoProvider } from '../lib/externalRun';
+import { isDebug } from '../lib/debugFlag';
+import { classifyEmailDomain, natureDrives } from '../lib/nature';
+import { classifyDesignation, authorityDrives, authorityPlannerHint } from '../lib/authority';
+import { resolveIdentity, identityLine } from '../lib/identity';
+import type { IdentityResolution } from '../lib/identity';
+import { distillSourceThemes } from '../lib/distill';
+import { govern, STATE_ICON, cleanEvidence } from '../lib/governance';
+import type { AttrState } from '../lib/governance';
+import { detectContradictions } from '../lib/contradiction';
+import type { Nudge } from '../lib/contradiction';
 import type { ExternalRunResult, ExternalSeed } from '../lib/externalRun';
 import type { WorldOsint } from '../lib/worldEnrichment';
 import { SEED_QUESTIONS } from '../lib/questions/seed';
@@ -21,7 +31,7 @@ import { SEED_QUESTIONS } from '../lib/questions/seed';
 // Phase-2 feature flag: dynamic Quick-Questions engine. Off → today's form.
 const QUESTION_ENGINE = true;
 // Append ?debug=1 to surface each generated question's "why we ask" rationale.
-const DEBUG_FROM_URL = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug');
+const DEBUG_FROM_URL = isDebug(); // sticky within the tab — survives the dep-reopt reload that drops ?debug
 // Confidence-&-Bias Gate keyword net (universal procurement terms, not category-
 // specific) — brand/preference fields must never be auto-filled (the VEKA killer).
 const PREFERENCE_RE = /\b(brand|make|manufacturer|oem|company\s*name|trademark|model\s*(name|no\.?|number)?|brand\s*name|made\s*by)\b/i;
@@ -145,7 +155,7 @@ type PriorReq = { title: string; source: 'call' | 'isq' | 'buylead'; recencyDays
 
 // Phase-2/3 FOUNDATION — Requirement Understanding ("Final RFQ Vision"): one explainable persona/
 // requirement dimension. Built from the Twin/profile the system ALREADY computes (no new LLM).
-type RUDim = { dim: string; value: string; confidence: number; source: string; evidence: string; usedBy: string };
+type RUDim = { dim: string; value: string; confidence: number; source: string; evidence: string; usedBy: string; state: AttrState };
 // Deterministic trait → buyer-facing-dimension maps (pure; mirrored by requnderstandingtest.mjs).
 const RU_AWARENESS: Record<string, string> = { spec_driven: 'Specification-driven', brand_driven: 'Brand-driven', catalog_driven: 'Catalog / price-driven', application_driven: 'Solution-driven' };
 const RU_SUPPORT: Record<string, string> = { 'Needs Guidance': 'Needs consultation', 'Self Driven': 'Self-sufficient', Hybrid: 'Some guidance' };
@@ -216,6 +226,55 @@ function profileFailReason(bp: unknown): string {
   if (o.APP_AUTH_FAILURE_CODE || o.CODE) return `auth/code ${String(o.APP_AUTH_FAILURE_CODE ?? o.CODE)}`;
   if (String(o.status ?? o.STATUS ?? '').trim() === '0') return 'status 0 (no data for this GLID)';
   return 'profile fields empty';
+}
+
+// Distil the OBSERVED external run (Befisc identity + Sign3 footprint + World) into a compact shape
+// attached to the Buyer Twin. OBSERVED-only — never a planning input. Returns null if nothing landed.
+function buildObservedExternal(ext: ExternalRunResult): ObservedExternal | null {
+  const obj = (x: unknown): Record<string, unknown> => (x && typeof x === 'object' ? x as Record<string, unknown> : {});
+  const s = (x: unknown) => (x == null ? '' : String(x).trim());
+  const find = (name: string) => ext.sources.find((src) => src.source === name);
+  const out: ObservedExternal = { fetched_at: ext.ranAt };
+  const notes: string[] = [];
+
+  const bef = find('Befisc');
+  if (bef?.status === 'ok' && bef.value) {
+    const v = obj(bef.value); const pi = obj(v.personal_information); const docs = obj(v.document_data);
+    const pan = Array.isArray(docs.pan) && docs.pan.length ? s(obj((docs.pan as unknown[])[0]).value) : '';
+    const emails = Array.isArray(v.email) ? (v.email as unknown[]).map((e) => s(obj(e).value)).filter(Boolean) : [];
+    const a0 = Array.isArray(v.address) && v.address.length ? obj((v.address as unknown[])[0]) : {};
+    const befisc = {
+      name: s(pi.full_name) || undefined, gender: s(pi.gender) || undefined, age: s(pi.age) || undefined,
+      dob: s(pi.date_of_birth) || undefined, income: s(pi.income) || undefined, pan: pan || undefined,
+      altPhones: Array.isArray(v.alternate_phone) ? (v.alternate_phone as unknown[]).length : undefined,
+      email: emails[0], address: [s(a0.detailed_address), s(a0.state), s(a0.pincode)].filter(Boolean).join(', ') || undefined,
+    };
+    if (Object.values(befisc).some((x) => x != null && x !== '')) out.befisc = befisc;
+  } else if (bef && !['ok', 'not_run', 'creds_pending'].includes(bef.status)) {
+    notes.push(`Befisc: ${bef.detail || bef.status}`);
+  }
+
+  const sg = find('Sign3');
+  if (sg?.status === 'ok' && sg.value) {
+    const v = obj(sg.value); const pdRoot = obj(v.phone_data); const pd = obj(pdRoot.primary_data);
+    const meta = obj(pd.phone_meta); const ld = obj(pdRoot.linked_data); const br = obj(ld.breach_details);
+    const platforms = Object.entries(obj(pd.account_details)).filter(([, x]) => obj(x).user_exist === true).map(([k]) => k);
+    out.sign3 = {
+      socialProfiles: pd.social_profile_count != null ? Number(pd.social_profile_count) : undefined,
+      operator: s(meta.operator) || undefined,
+      breaches: br.number_of_breaches != null ? Number(br.number_of_breaches) : undefined,
+      platforms: platforms.length ? platforms.slice(0, 12) : undefined,
+      linked: s(ld.key) || undefined,
+    };
+  } else if (sg && !['ok', 'not_run', 'creds_pending'].includes(sg.status)) {
+    notes.push(`Sign3: ${sg.detail || sg.status}`);
+  }
+
+  const w = find('World');
+  if (w?.status === 'ok' && w.value) out.world = { summary: s(obj(w.value).summary) || undefined, confidence: w.confidence };
+
+  if (notes.length) out.notes = notes;
+  return (out.befisc || out.sign3 || out.world || out.notes) ? out : null;
 }
 // #N2: whatsapp_inbound arrives three ways — a real message array, a {data:{recent_messages}}
 // object, or an n8n sub-fetch FAILURE wrapper ({error}/success:false). The failure wrapper has
@@ -291,6 +350,17 @@ import SellerResultsModal from './SellerResultsModal';
 interface Props {
   onClose: () => void;
   variantLabel?: string;
+  // Step-0 (landing) staging: the GLID/Pull CTA now lives on the landing. When it stages a GLID and
+  // opens Smart with autoPull, the modal runs its EXISTING pull on mount — so the flow is byte-identical
+  // and the product screen stays clean. (initialGlid is ignored unless autoPull is true.)
+  initialGlid?: string;
+  autoPull?: boolean;
+  initialIgnoreTwin?: boolean;
+  // B-step-2: when true, render the step-0 STAGING view (pulled-data debug panels) instead of the
+  // form — so the buyer data is inspectable on the landing right after a Pull. onStart flips to the
+  // clean form on the SAME instance (data persists, no re-pull).
+  stagingOnly?: boolean;
+  onStart?: () => void;
 }
 
 const EMPTY_FORM: RFQFormData = {
@@ -424,7 +494,7 @@ async function fileToAnalyzable(
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function RFQModalV3({ onClose, variantLabel }: Props) {
+export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPull, initialIgnoreTwin, stagingOnly, onStart }: Props) {
   const [step, setStep] = useState<FormStep>(0);
   const [showAllSpecs, setShowAllSpecs] = useState(false); // reveal the long tail of specs
   const [page1Choice, setPage1Choice] = useState<'' | 'business' | 'personal'>(''); // page-1 seed qualifier
@@ -466,6 +536,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     setBuyerTwin(null);
     setBuyerProfile(null);
     setConciergeState('none');
+    setPriorObserved(null); // BTE-v1.3: going cold → drop the prior-session behaviour read too
     const w = window as unknown as { __buyerTwin?: unknown; __buyerProfile?: unknown };
     w.__buyerTwin = undefined;
     w.__buyerProfile = undefined;
@@ -568,6 +639,12 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   const [assistLoading, setAssistLoading] = useState(false);
   const [autoFilledSpecs, setAutoFilledSpecs] = useState<Set<string>>(new Set());
   const [manualSpecs, setManualSpecs] = useState<Set<string>>(new Set());
+  // BTE-v1.3 — in-session behaviour observation. overriddenSpecs = specs where the buyer REPLACED an
+  // AI-suggested value with their own (deduped; the keystroke-safe "I know my spec" signal);
+  // priorObserved = behaviour seen in this GLID's PAST sessions (loaded at Twin build) so the read
+  // compounds session-over-session.
+  const [overriddenSpecs, setOverriddenSpecs] = useState<Set<string>>(new Set());
+  const [priorObserved, setPriorObserved] = useState<ObservedSessionBehavior | null>(null);
   const [assistNudge, setAssistNudge] = useState(0);
   // Tier-2 per-spec "Not sure?" help (on-demand, bucketized + context-aware)
   const [specHelp, setSpecHelp] = useState<Record<string, { loading?: boolean; guide?: SpecGuide }>>({});
@@ -584,6 +661,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   const buyerTypeManual = useRef(false); // buyer explicitly picked a role → never auto-override
   const offProfileTracked = useRef(''); // analytics: fire rfq_off_profile once per product
   const questionsResolvedSig = useRef(''); // analytics: fire the shown/hidden summary once per plan signature
+  const sessionStartRef = useRef(performance.now()); // BTE-v1.3: form open → submit, for fill-duration (decisiveness)
   const [buyerTypeDeducedFrom, setBuyerTypeDeducedFrom] = useState(''); // debug: which spec implied the role
   // Last-page belief: deduced logistics/profile (timeline/payment) + confidence.
   const [deducedLogistics, setDeducedLogistics] = useState<Record<string, { value: string; confidence: number; reason: string }>>({});
@@ -677,6 +755,9 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     setManualSpecs((prev) => new Set(prev).add(key));
     setAutoFilledSpecs((prev) => {
       if (!prev.has(key)) return prev;
+      // BTE-v1.3: the buyer is REPLACING an AI-suggested value → an override (deduped). The
+      // keystroke-safe "I know my spec better than your guess" signal → independence trait.
+      setOverriddenSpecs((o) => (o.has(key) ? o : new Set(o).add(key)));
       const next = new Set(prev);
       next.delete(key);
       return next;
@@ -835,7 +916,14 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     const emergencyish = journey === 'maintenance' || /\b(replace|replacement|breakdown|repair|urgent|emergency|spare)\b/.test(intentVal);
     // A re-post ("Buy again") IS a repeat purchase by definition → feeds the recurring signal. It still
     // sits BELOW emergency/capital/project in the hierarchy, so re-posting a broken motor stays emergency.
-    const recurs = !!repostSource || !!repeatSignal() || /repeat_procurement|inventory_builder/i.test(buyerProfile?.buyingPattern || '');
+    // ── HEADLINE GOVERNANCE FIX (G1): the OFF-PROFILE guard ──────────────────────────────────────
+    // A buyer's PERSONA buying-pattern (repeat_procurement) must NOT make an UNRELATED current order
+    // "recurring" → that is the "Repeat Buyer → Recurring → Credit" hallucination both pilot cases hit
+    // (the notebook manufacturer's LED order, the tyre buyer's personal order). Re-post and current-
+    // product repeat-overlap ARE current-order signals and still count; the persona pattern counts ONLY
+    // when this requirement is ON-profile. Off-profile ⇒ mode derives from the CURRENT order alone.
+    const personaRecurs = !offProfileNow() && /repeat_procurement|inventory_builder/i.test(buyerProfile?.buyingPattern || '');
+    const recurs = !!repostSource || !!repeatSignal() || personaRecurs;
     const tiny = q > 0 && q <= 2 && !UNIT_BULK.test(unit); // 1–2 units / 1 kg — a sample/one-off; dominates the repeat pattern
     // Emergency FIRST: an explicit breakdown/replacement (intent answer or maintenance journey) is the
     // most behaviour-defining signal and beats the derived archetype — a capital MOTOR being *replaced*
@@ -866,38 +954,51 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     const rm = requirementMode();
     const ev1 = (t?: { evidence?: Array<{ signal?: string }> }) => (t?.evidence || []).map((e) => e?.signal).filter(Boolean)[0] || '';
     const out: RUDim[] = [];
-    const add = (dim: string, value: string, confidence: number, source: string, evidence: string, usedBy: string) =>
-      out.push({ dim, value: value || '— (phase 2)', confidence: value ? confidence : 0, source: value ? source : '—', evidence, usedBy });
+    // Every dimension is GOVERNED (G0): weak/no-evidence ⇒ Unknown (never a confident guess). opts.hasEv
+    // forces the verdict from the real signal; opts.userOrVerified marks buyer-stated/Verified ⇒ Confirmed.
+    const add = (dim: string, value: string, confidence: number, source: string, evidence: string, usedBy: string, opts: { hasEv?: boolean; userOrVerified?: boolean; contradicted?: boolean } = {}) => {
+      const g = govern({ value, confidence, source, evidence: evidence ? [evidence] : [], hasEvidence: opts.hasEv, userOrVerified: opts.userOrVerified, contradicted: opts.contradicted });
+      out.push({ dim, value: g.value, confidence: g.confidence, source: g.source, evidence, usedBy, state: g.state });
+    };
 
-    // 1 — Who is the buyer (role + lifecycle stage descriptor)
+    // 1 — Who is the buyer (role + lifecycle). User pick ⇒ Confirmed.
     const role = canonicalBuyerType();
     add('Who is the buyer', [role, bp?.maturity].filter(Boolean).join(' · '), role ? (form.buyerType ? 100 : 85) : 0,
-      form.buyerType ? 'User' : 'Twin/Profile', (tw?.layer_a_identity?.company_desc || bp?.summary || '').slice(0, 70), 'GST/Firm gating · planner persona');
+      form.buyerType ? 'User' : 'Twin/Profile', (cleanEvidence(tw?.layer_a_identity?.company_desc) || bp?.summary || '').slice(0, 70), 'GST/Firm gating · planner persona',
+      { hasEv: !!role, userOrVerified: !!form.buyerType });
     // 2 — Use case / active intent (CURRENT requirement wins; else the Twin's history-derived intent)
     const curIntent = requirementIntent?.value || '';
     const ai = lc?.current_active_intent;
     add('Use case / intent', curIntent || String(ai?.value || ''), curIntent ? (requirementIntent?.locked ? 100 : requirementIntent?.confidence || 0) : ai?.confidence || 0,
-      curIntent ? (requirementIntent?.locked ? 'User' : 'Derived') : 'Twin', ev1(ai), 'intent question · spec re-rank · planner');
-    // 3 — Procurement stage (maturity)
-    add('Procurement stage', bp?.maturity || '', bp?.maturity ? 85 : 0, 'Profile', 'setup→execution / machine→inputs signals', 'requirement mode · question depth');
-    // 4 — Purchase urgency (inferred from mode + response sensitivity + repeat cadence)
-    const urg = rm.mode === 'emergency' ? 'Immediate' : /low tolerance/i.test(String(lb?.response_sensitivity?.value || bp?.responseSensitivity || '')) ? 'Soon' : repeatSignal() ? 'Recurring cadence' : '';
-    add('Purchase urgency', urg, urg ? 55 : 0, 'Mode/Twin (inferred)', rm.descriptor.slice(0, 50), 'delivery deduction · seller SLA');
-    // 5 — Purchasing power (band only; never exact unless externally verified — phase 4)
-    const power = String(lc?.bulk_orientation?.value || '') || enrichment?.persona?.scale || '';
-    add('Purchasing power', power ? `${power} (band)` : '', power ? 50 : 0, 'History/Twin', 'BL volume + scale · external GST pending (phase 4)', 'budget bands');
-    // 6 — Local supplier preference
+      curIntent ? (requirementIntent?.locked ? 'User' : 'Derived') : 'Twin', ev1(ai), 'intent question · spec re-rank · planner',
+      { hasEv: !!(curIntent || ai?.value), userOrVerified: !!(curIntent && requirementIntent?.locked) });
+    // 3 — Buyer maturity (history; persists across requirements — distinct from the current-order stage)
+    add('Buyer maturity', bp?.maturity || '', bp?.maturity ? 80 : 0, 'Profile', 'new / existing / repeat from history', 'question depth · education level', { hasEv: !!bp?.maturity });
+    // 4 — Requirement stage (CURRENT journey: exploring → evaluating → finalizing) — SPLIT from maturity (E2)
+    const reqStage = step >= 2 ? 'Finalizing' : (curIntent || dynQuestions.some((q) => dynAnswers[q.id])) ? 'Evaluating options' : 'Exploring';
+    add('Requirement stage', reqStage, 65, 'Current journey', `step ${step} · intent ${curIntent ? 'set' : 'open'}`, 'requirement mode · question depth', { hasEv: true });
+    // 5 — Purchase urgency — ONLY when the CURRENT order proves it (emergency mode). No guessing from persona.
+    const urg = rm.mode === 'emergency' ? 'Immediate' : '';
+    add('Purchase urgency', urg, urg ? 75 : 0, 'Current order (mode)', rm.descriptor.slice(0, 50), 'delivery deduction · seller SLA', { hasEv: rm.mode === 'emergency' });
+    // 6 — Income band (OBSERVED) — Befisc income, shown as observed income NOT inferred "purchasing power"
+    // (ChatGPT: income ≠ buying power for a business; GST turnover/employees are stronger — wait for them).
+    const income = String(tw?.observed_external?.befisc?.income || '').trim();
+    add('Income band (observed)', income ? `₹${income}` : '', income ? 70 : 0, 'External (Befisc)', income ? `Befisc income ${income} — observed, not a turnover/buying-power proxy` : '', 'budget bands (advisory until GST/Udyam)', { hasEv: !!income });
+    // 7 — Local supplier preference (now drives the supplier-radius nudge, L3)
     const loc = String(lb?.local_preference?.value || '') || bp?.localityPreference || '';
-    add('Local supplier preference', loc, loc ? 70 : 0, 'Twin/Profile', tw?.layer_a_identity?.city || '', 'supplier matching');
-    // 7 — Buyer awareness
+    add('Local supplier preference', loc, loc ? 70 : 0, 'Twin/Profile', tw?.layer_a_identity?.city || '', 'supplier matching · supplier-radius nudge', { hasEv: !!loc });
+    // 8 — Buyer awareness
     const aware = bp?.sourcingStyle ? RU_AWARENESS[bp.sourcingStyle] || bp.sourcingStyle : '';
-    add('Buyer awareness', aware, aware ? 70 : 0, 'Profile', `sourcing: ${bp?.sourcingStyle || '?'} · info-seeking: ${bp?.infoSeeking || '?'}`, 'question tone · supplier matching');
-    // 8 — Preferred communication
-    const comm = bp?.engagement ? RU_COMMS[bp.engagement] || bp.engagement : lb?.whatsapp_affinity?.value ? 'WhatsApp-first' : '';
-    add('Preferred communication', comm, comm ? 75 : 0, 'Twin/Profile', `WA affinity: ${enrichment?.persona?.whatsappAffinity || '?'}`, 'seller routing');
-    // 9 — Support required
-    const sup = bp?.decisionStyle ? RU_SUPPORT[bp.decisionStyle] || bp.decisionStyle : '';
-    add('Support required', sup, sup ? 60 : 0, 'Profile', `decision: ${bp?.decisionStyle || '?'}`, 'quote enrichment');
+    add('Buyer awareness', aware, aware ? 70 : 0, 'Profile', `sourcing: ${bp?.sourcingStyle || '?'} · info-seeking: ${bp?.infoSeeking || '?'}`, 'question tone · supplier matching', { hasEv: !!aware });
+    // 9 — Preferred communication — ONLY with a REAL WhatsApp signal (volume / affinity). Kills the hallucinated "WhatsApp-first 75%" when WA affinity = ?.
+    const waMsgs = Number(enrichment?.persona?.whatsappMsgs || 0);
+    const waAff = String(enrichment?.persona?.whatsappAffinity || '');
+    const waReal = waMsgs > 0 || /high|medium/i.test(waAff) || !!lb?.whatsapp_affinity?.value;
+    const comm = waReal ? (bp?.engagement ? RU_COMMS[bp.engagement] || bp.engagement : 'WhatsApp-first') : '';
+    add('Preferred communication', comm, comm ? 70 : 0, 'Twin/Profile', waReal ? `WA affinity ${waAff || lb?.whatsapp_affinity?.value || 'present'} · ${waMsgs} msgs` : 'no WhatsApp signal', 'seller routing', { hasEv: waReal });
+    // 10 — Support required — ONLY a genuine "needs guidance" signal; "self-driven" is NOT evidence of a support need. Kills the "Self-sufficient 60%" guess.
+    const sup = bp?.decisionStyle === 'Needs Guidance' ? RU_SUPPORT['Needs Guidance'] || 'Needs consultation' : '';
+    add('Support required', sup, sup ? 60 : 0, 'Profile', `decision: ${bp?.decisionStyle || '?'}`, 'quote enrichment', { hasEv: bp?.decisionStyle === 'Needs Guidance' });
     return out;
   };
 
@@ -974,8 +1075,15 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   //    "Industrial Chemicals · Cleaning Supplies" instead of "WhatsApp 660 · CSL 100". ──
   const twinThemes = (): string[] => {
     const tw = ignoreTwin ? null : liveTwin();
-    const cl = tw?.layer_c_commercial_intelligence?.recent_intent_clusters || [];
-    return cl.map((c) => String(c.intent || '').trim()).filter(Boolean).slice(0, 3);
+    const lc = tw?.layer_c_commercial_intelligence;
+    if (!lc) return [];
+    // P5: fuse recent clusters + historical categories + intent history → ranked, de-duped themes
+    // (the inline version read recent_intent_clusters alone and went blank when that was sparse).
+    return distillSourceThemes({
+      recentClusters: lc.recent_intent_clusters,
+      historicalCategories: lc.historical_categories,
+      intentHistory: lc.buyer_intent_history,
+    }).themes;
   };
   // ── P2.2: repeat-purchase detection — does the CURRENT product token-overlap a prior
   //    buy-lead title? Generic ≥4-char token overlap (same approach as personaSpecMatch);
@@ -1423,12 +1531,20 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     // 'Verified' fact would manufacture bogus truth. World/OSINT graduates to Verified only once it
     // carries a real anchor-strength/confidence score (post-pilot). Recorded as 'Verified' (outranks
     // Twin, below User) so a buyer correction still overrides a GST guess.
-    const ebi = (window as unknown as { __ebi?: { externalEvidenceLedger?: Array<Record<string, unknown>> } }).__ebi;
+    const ebi = (window as unknown as { __ebi?: { externalEvidenceLedger?: Array<Record<string, unknown>>; crossValidation?: { verifiedFacts?: Array<Record<string, unknown>> } } }).__ebi;
     const TIER1 = /gst|hsn|udyam|nic/i; // NOT world/osint (observed-only until confidence-scored)
     for (const e of ebi?.externalEvidenceLedger || []) {
       const src = String(e?.source || '');
       const val = String((e?.value_summary as string) || (e?.value as string) || '').trim();
       if (val && TIER1.test(src)) cov.record(src, val, 'Verified', typeof e?.confidence === 'number' ? (e.confidence as number) : 90);
+    }
+    // P4 — the agreement ladder graduates observed→Verified: a BUSINESS attribute (company / city)
+    // corroborated by ≥3 INDEPENDENT sources is recorded as Verified. Personal identity (name / email /
+    // pan) stays OBSERVED-only (debug, never planning) — agreement raises trust, it never unlocks PII.
+    for (const f of ebi?.crossValidation?.verifiedFacts || []) {
+      const key = String(f?.key || '');
+      const val = String(f?.value || '').trim();
+      if (val && /^(company|city)$/.test(key)) cov.record(`cross:${key}`, val, 'Verified', typeof f?.confidence === 'number' ? (f.confidence as number) : 92);
     }
     (window as unknown as { __coverage?: unknown }).__coverage = cov; // debug introspection (window.__coverage.facts())
   }, [dynQuestions, dynAnswers, form.dynamicSpecs, manualSpecs, cascadeSpecs, enrichedSpecs, autoFilledSpecs, deducedLogistics, buyerTwin, external]);
@@ -2799,9 +2915,11 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   };
 
   // DEBUG: pull buyer history for a GLID and power the form from it.
-  const handleGlidFetch = async () => {
-    const g = glidInput.trim();
+  const handleGlidFetch = async (glidOverride?: string, ignoreTwinOverride?: boolean) => {
+    const g = (glidOverride ?? glidInput).trim();
     if (!g) return;
+    // When the landing auto-pulls, ignoreTwin state may not have flushed yet — honour the override.
+    const skipTwin = ignoreTwinOverride ?? ignoreTwin;
     setEnrichLoading(true);
     const t0 = performance.now();
     const { profile, raw } = await fetchEnrichment(g);
@@ -2851,30 +2969,49 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           .then((res) => {
             setExternal(res);
             const w = window as unknown as { __ebi?: unknown; __externalSeed?: unknown };
-            w.__ebi = { externalEvidenceLedger: res.externalEvidenceLedger, sources: res.sources, gate: res.gate, ran_at: res.ranAt };
+            w.__ebi = { externalEvidenceLedger: res.externalEvidenceLedger, sources: res.sources, gate: res.gate, ran_at: res.ranAt, crossValidation: res.crossValidation };
             w.__externalSeed = seed;
           })
           .catch(() => {});
       }
       // Derive the PERSISTENT behavioural profile (compounds across requirements).
-      if (profile.digest && hasGeminiKey() && !ignoreTwin) {
+      if (profile.digest && hasGeminiKey() && !skipTwin) {
+        // P0 Nature engine (Tier-2 structural inference): classify the email domain — a first-party
+        // signal we already hold — and FEED it to the profile LLM so it stops mislabeling (an
+        // iitk.ac.in academic was tagged "Manufacturer"). Anti-hallucination: institution-type only.
+        const emailNature = classifyEmailDomain(profile.buyer?.email, profile.buyer?.companyName);
+        // P1 Authority engine (Tier-2 structural): classify the buyer's DESIGNATION — a first-party
+        // signal — into a buying-process role. Evidence-gated, anti-hallucination (a "Professor" is a
+        // Researcher, never auto a Decision-Maker). Feeds the same LLM hint + a deterministic stamp.
+        const authority = classifyDesignation(profile.buyer?.designation);
+        const natureHint = natureDrives(emailNature)
+          ? `[STRUCTURAL SIGNAL — email domain] This buyer's email domain indicates: ${emailNature.value} (high confidence; ${emailNature.evidence[0]}). Factor this into persona/business_type: an Academic / Government / Institutional buyer is RESEARCH / INSTITUTIONAL procurement — NOT a manufacturer / trader / reseller. Do NOT invent a person's role (e.g. professor / CEO) — only the institution type is evidenced.\n\n`
+          : '';
+        const authorityHint = authorityDrives(authority)
+          ? `[STRUCTURAL SIGNAL — designation] The buyer's job title indicates ${authorityPlannerHint(authority)} (${authority.evidence[0]}). Use it for persona/decisionStyle — but only what the TITLE proves; do NOT invent budget authority a title does not carry.\n\n`
+          : '';
         logPrompt({
           prompt: 'deriveBuyerProfile',
           model: 'gemini-2.5-flash-lite',
-          purpose: 'persistent buyer profile (persona/maturity/style/engagement) from history digest',
-          inputs: `glid=${g} · digest(${profile.digest.length} chars)`,
+          purpose: 'persistent buyer profile (persona/maturity/style/engagement) from history digest + email-domain nature + designation authority',
+          inputs: `glid=${g} · digest(${profile.digest.length} chars) · emailNature=${emailNature.institutionType} · authority=${authority.authorityRole}`,
         });
-        deriveBuyerProfile(profile.digest)
+        deriveBuyerProfile(natureHint + authorityHint + profile.digest)
           .then((bpf) => {
+            // Stamp the DETERMINISTIC, evidence-gated Nature (authoritative over the LLM guess for
+            // academic/gov/corporate domains). Generic/unknown → leave the LLM's persona untouched.
+            if (natureDrives(emailNature)) { bpf.nature = emailNature.value; bpf.natureConfidence = emailNature.confidence; bpf.natureEvidence = emailNature.evidence; }
+            // Stamp the DETERMINISTIC, evidence-gated Authority (role from designation).
+            if (authorityDrives(authority)) { bpf.authority = authority.value; bpf.authorityRole = authority.authorityRole; bpf.authorityConfidence = authority.confidence; bpf.authorityEvidence = authority.evidence; }
             setBuyerProfile(bpf);
             (window as unknown as { __buyerProfile?: unknown }).__buyerProfile = bpf;
-            track('rfq_buyer_profile', { glid: g, persona: bpf.persona, confidence: bpf.confidence });
+            track('rfq_buyer_profile', { glid: g, persona: bpf.persona, nature: bpf.nature || null, authority: bpf.authority || null, procurementModel: bpf.procurementModel || null, confidence: bpf.confidence });
           })
           .catch(() => {});
       }
       // ── BTE-v1.1 Heavy pass: compile the Buyer Twin (Phase 1, additive). ──
       // Evidence-grounded; stored on window for the Phase-2 debug view + verification.
-      if (profile.signals?.length && hasGeminiKey() && !ignoreTwin) {
+      if (profile.signals?.length && hasGeminiKey() && !skipTwin) {
         logPrompt({
           prompt: 'deriveBuyerTwin',
           model: 'gemini-2.5-flash-lite',
@@ -2900,6 +3037,10 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
           .then((twin) => {
             setBuyerTwin(twin);
             (window as unknown as { __buyerTwin?: unknown }).__buyerTwin = twin;
+            // BTE-v1.3: load behaviour OBSERVED in this GLID's past RFQ sessions so the read
+            // compounds (stability grows when the same behaviour recurs). Client-side pilot
+            // store — the production path is the lead store (saveSubmission) round-tripping it.
+            try { const raw = localStorage.getItem(`rfq_obs_${g}`); setPriorObserved(raw ? (JSON.parse(raw) as ObservedSessionBehavior) : null); } catch { setPriorObserved(null); }
             setPull((p) => (p ? { ...p, twinMs: Math.round(performance.now() - tw0) } : p));
             track('rfq_buyer_twin', { glid: g, score: twin.twin_confidence.overall_score });
           })
@@ -2909,6 +3050,37 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       toast.show('No history found for that GLID', 'warning');
     }
   };
+
+  // Step-0 (landing) staged a GLID + opened Smart with autoPull → run the EXISTING pull once here,
+  // on mount. The trigger moved to the landing; the pull + downstream flow are byte-identical. We
+  // seed glidInput/ignoreTwin for the flow AND pass them as overrides so the pull never reads stale state.
+  const autoPulledRef = useRef(false);
+  useEffect(() => {
+    const g = (initialGlid || '').trim();
+    if (autoPull && !autoPulledRef.current && g) {
+      autoPulledRef.current = true;
+      setGlidInput(g);
+      if (initialIgnoreTwin) setIgnoreTwin(true);
+      handleGlidFetch(g, !!initialIgnoreTwin);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Wire the OBSERVED external footprint (Befisc identity + Sign3 + World) ONTO the Buyer Twin — so
+  // the buyer model carries it. OBSERVED-only: shown on the Twin, NEVER fed to the planner/registry
+  // (the external bridge already takes only Tier-1 Verified GST/HSN; Befisc/Sign3 are tier 'observed').
+  // Merged once per external run; the ranAt ref-guard prevents the setBuyerTwin→re-render loop.
+  const extMergedRef = useRef('');
+  useEffect(() => {
+    if (!external || !buyerTwin) return;
+    if (extMergedRef.current === external.ranAt) return;
+    extMergedRef.current = external.ranAt;
+    const obs = buildObservedExternal(external);
+    if (obs) {
+      setBuyerTwin((t) => (t ? { ...t, observed_external: obs } : t));
+      (window as unknown as { __buyerTwin?: unknown }).__buyerTwin = { ...buyerTwin, observed_external: obs };
+    }
+  }, [external, buyerTwin]);
 
   // Prefill PII from the buyer profile (no overwrite of anything typed).
   useEffect(() => {
@@ -3074,6 +3246,30 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       buyer_profile_derived: buyerProfile ? JSON.stringify(buyerProfile) : '',
       buyer_history_categories: JSON.stringify((enrichment?.categories || []).map((c) => c.mcat)),
       buyer_deduced_logistics: JSON.stringify(deducedLogistics),
+      // BTE-v1.3 — the OBSERVED in-session behaviour travels with the lead so it compounds.
+      buyer_observed_behavior: JSON.stringify(observedBehavior),
+      // OBSERVED external footprint (Befisc identity + Sign3 + World) travels with the lead too.
+      buyer_observed_external: buyerTwin?.observed_external ? JSON.stringify(buyerTwin.observed_external) : '',
+      // P3 — the composite identity resolution (anchors + agreement/conflict + confidence).
+      buyer_identity: identity ? JSON.stringify(identity) : '',
+      // P4 — the cross-source agreement ladder (which facts corroborated → graduated to Verified).
+      buyer_external_crossval: external?.crossValidation ? JSON.stringify(external.crossValidation) : '',
+    });
+    // BTE-v1.3 — persist the observed behaviour per-GLID (client-side pilot store) so the NEXT
+    // RFQ from this buyer starts already knowing how they behave. session_count grows each time.
+    try {
+      const g = enrichment?.glid || glidInput || '';
+      if (g) localStorage.setItem(`rfq_obs_${g}`, JSON.stringify(observedBehavior));
+    } catch { /* storage disabled — non-fatal */ }
+    track('rfq_behavior_observed', {
+      sessions: observedBehavior.session_count,
+      spec_engagement: observedBehavior.spec_engagement?.value ?? null,
+      flexibility: observedBehavior.flexibility?.value ?? null,
+      question_engagement: observedBehavior.question_engagement?.value ?? null,
+      urgency_posture: observedBehavior.urgency_posture?.value ?? null,
+      commercial_posture: observedBehavior.commercial_posture?.value ?? null,
+      independence: observedBehavior.independence?.value ?? null,
+      fill_duration_ms: Math.round(performance.now() - sessionStartRef.current),
     });
     // ── Funnel close: the one event that answers most KPIs for this requirement ──
     track('rfq_completed', {
@@ -3277,6 +3473,113 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
   // ─── Buyer Twin — seller-facing one-liner (NO PII) for "Your Requirement" ────
   // A2 / G3: ONE canonical buyer-type, used by the seller line, Truth Table, and debug, so
   // we never show "Manufacturer" in one place and a different role (or "Unknown") in another.
+  // ── BTE-v1.3 — OBSERVED in-session behaviour ────────────────────────────────
+  // Distil how the buyer is filling THIS RFQ into behavioural traits, then merge with what we
+  // observed in their PAST sessions. This DESCRIBES the buyer (lowest in the hierarchy) — it
+  // never originates or overrides the current requirement. PII-free; safe to share with sellers.
+  const observedBehavior = useMemo<ObservedSessionBehavior>(() => {
+    const answered = dynQuestions.filter((q) => dynAnswers[q.id]).length;
+    const current = distillSessionBehavior({
+      specsFilledByUser: manualSpecs.size,
+      specsAvailable: isqSpecs.length,
+      specsOverridden: overriddenSpecs.size,
+      specsRemoved: removedSpecs.size,
+      personaQsAnswered: answered,
+      personaQsSkipped: intentGateSkipped ? 1 : 0,
+      deliveryTimeline: form.deliveryTimeline,
+      paymentTerms: form.paymentTerms,
+      observedAt: new Date().toISOString(),
+    });
+    return mergeObservedBehavior(priorObserved, current);
+  }, [manualSpecs, isqSpecs.length, overriddenSpecs, removedSpecs, dynQuestions, dynAnswers, intentGateSkipped, form.deliveryTimeline, form.paymentTerms, priorObserved]);
+  // P3 Identity Resolution (the "Dinesh mechanism") — stitch first-party anchors (name/mobile/company/
+  // email/city/state) with any observed-external PAN into one composite identity + confidence score.
+  // OBSERVED-only (it can fold in external PAN/GST): a confidence + dossier signal, NEVER a planner
+  // spec-driver (locked rule). Recomputes when the profile or the external pull lands.
+  const identity = useMemo<IdentityResolution | null>(() => {
+    if (!enrichment?.buyer) return null;
+    const b = enrichment.buyer;
+    const bef = buyerTwin?.observed_external?.befisc;
+    const res = resolveIdentity({
+      name: b.fullName || [b.firstName, b.lastName].filter(Boolean).join(' '),
+      altNames: [bef?.name].filter((x): x is string => !!x), // N6 — reconcile profile name vs Befisc name
+      mobile: b.mobile,
+      company: b.companyName,
+      email: b.email,
+      pan: bef?.pan,
+      city: b.city || enrichment.cslCity,
+      state: b.state,
+    });
+    (window as unknown as { __identity?: unknown }).__identity = res;
+    return res;
+  }, [enrichment, buyerTwin?.observed_external]);
+  // L2 Contradiction Engine — turn detected clashes (location / persona-vs-order / buyer-type) + the
+  // local-preference CONSUMPTION (supplier radius) into polite NUDGES. Recomputes as the buyer types.
+  const contradictions = useMemo<Nudge[]>(() => {
+    if (!enrichment?.buyer && !buyerTwin) return [];
+    const b = enrichment?.buyer;
+    const bef = buyerTwin?.observed_external?.befisc;
+    // best-effort city out of a Befisc postal address: the comma-segment just before the 6-digit PIN.
+    const befCity = (() => {
+      const segs = String(bef?.address || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const pin = segs.findIndex((s) => /\b\d{6}\b/.test(s));
+      const c = pin > 0 ? segs[pin - 1] : '';
+      return /^[A-Za-z .]{3,20}$/.test(c) ? c : '';
+    })();
+    const locations = [
+      { source: 'profile', value: b?.city || '' },
+      { source: 'CSL', value: enrichment?.cslCity || '' },
+      { source: 'Befisc', value: befCity },
+    ].filter((l) => l.value);
+    const res = detectContradictions({
+      locations,
+      companyName: b?.companyName,
+      // Prefer the human-readable persona (LLM "Retailer") over a raw customerType code ("empFCP").
+      profileType: buyerProfile?.persona || b?.customerType || enrichment?.persona?.type,
+      twinType: buyerTwin?.layer_a_identity?.business_type,
+      intentType: requirementIntent?.journey || requirementIntent?.value || undefined,
+      isPersonal: page1Choice === 'personal',
+      qty: qtyNum,
+      unit: form.unit,
+      localPreference: buyerProfile?.localityPreference || String(buyerTwin?.layer_b_behavioral?.local_preference?.value || ''),
+      buyerCity: b?.city,
+      // R3 — feed the (previously idle) engines so they drive action nudges.
+      authorityRole: buyerProfile?.authorityRole,
+      procurementModel: buyerProfile?.procurementModel,
+    });
+    (window as unknown as { __contradictions?: unknown }).__contradictions = res;
+    return res;
+  }, [enrichment, buyerTwin, buyerProfile, requirementIntent, page1Choice, qtyNum, form.unit]);
+  const [nudgeAnswers, setNudgeAnswers] = useState<Record<string, string>>({});
+  const [ceoView, setCeoView] = useState(false); // L4 — plain-language Executive view toggle
+  const answerNudge = (n: Nudge, opt: string) => {
+    setNudgeAnswers((prev) => ({ ...prev, [n.type]: opt }));
+    // Wire the clean field writes (consumption — the buyer's answer flows into the form).
+    if (n.field === 'buyerKind') {
+      if (/personal/i.test(opt)) setPage1Choice('personal');
+      else if (/business|resale|workshop|fleet/i.test(opt)) setPage1Choice('business');
+    }
+    if (n.field === 'deliveryCity' && opt && opt !== 'Other') setForm((p) => ({ ...p, deliveryLocation: opt }));
+    track('rfq_nudge_answered', { type: n.type, answer: opt });
+  };
+  const observedTraits = (o: ObservedSessionBehavior) =>
+    [o.spec_engagement, o.flexibility, o.question_engagement, o.urgency_posture, o.commercial_posture, o.independence].filter(Boolean);
+  // Human, seller-facing one-liner from the observed traits (most actionable first). PII-free.
+  const observedBehaviorLine = (o: ObservedSessionBehavior): string => {
+    const phrase: Record<string, string> = {
+      'urgency_posture:Immediate': 'needs it fast', 'urgency_posture:Flexible': 'timing-flexible', 'urgency_posture:Planned': 'planned timeline',
+      'commercial_posture:Advance-led': 'pays advance', 'commercial_posture:Credit-seeking': 'seeks credit terms', 'commercial_posture:COD': 'prefers COD', 'commercial_posture:Finance-seeking': 'needs financing',
+      'spec_engagement:High': 'hands-on with specs', 'spec_engagement:Medium': 'gives spec detail', 'spec_engagement:Low': 'open on spec detail',
+      'flexibility:High': 'flexible on several specs', 'flexibility:Medium': 'flexible on a spec',
+      'question_engagement:High': 'shares context', 'question_engagement:Low': 'prefers a quick form',
+      'independence:High': 'overrides AI suggestions', 'independence:Medium': 'tweaks a suggestion',
+    };
+    const order: Array<keyof ObservedSessionBehavior> = ['urgency_posture', 'commercial_posture', 'spec_engagement', 'flexibility', 'independence', 'question_engagement'];
+    const parts: string[] = [];
+    for (const k of order) { const tr = o[k]; if (tr && typeof tr === 'object' && 'value' in tr) { const p = phrase[`${k}:${(tr as { value: unknown }).value}`]; if (p) parts.push(p); } }
+    return parts.slice(0, 4).join(' · ');
+  };
+
   // Precedence: the buyer's own/concierge pick > the Twin's compiled role > the profile persona.
   const canonicalBuyerType = (t?: BuyerTwin | null): string => {
     const tw = t ?? liveTwin();
@@ -3350,7 +3653,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         {buyerProfile?.persona && buyerProfile.persona.toLowerCase() !== (t.layer_a_identity.business_type || '').toLowerCase() && (
           <p className="text-indigo-500">↳ role (Twin): <b>{t.layer_a_identity.business_type || '—'}</b> · persona (Profile): <b>{buyerProfile.persona}</b>{buyerProfile.confidence != null ? ` · persona-fit ${Math.round(buyerProfile.confidence * 100)}%` : ''} — same buyer, two lenses (NOT a conflict)</p>
         )}
-        {t.layer_a_identity.company_desc && <p className="text-indigo-500 break-words"><b>company:</b> {t.layer_a_identity.company_desc.slice(0, 180)}</p>}
+        {t.layer_a_identity.company_desc && <p className="text-indigo-500 break-words"><b>company:</b> {cleanEvidence(t.layer_a_identity.company_desc) ? t.layer_a_identity.company_desc.slice(0, 180) : <span className="text-gray-400 italic">— buyer-typed gibberish, ignored as evidence (N5)</span>}</p>}
         <p className="font-semibold pt-1">behavioral:</p>
         {Object.entries(t.layer_b_behavioral).map(([k, v]) => traitRow(k, v))}
         <p className="font-semibold pt-1">commercial intelligence:</p>
@@ -3364,6 +3667,37 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         <p><b>explicit_unknowns (planner queue):</b> {t.explicit_unknowns.join(', ') || '—'}</p>
         <p><b>negative signals (never violate):</b> {t.explicit_negative_signals.join(' · ') || '—'}</p>
         <p><b>attribution:</b> {lc.attribution_confidence.inferred_product_mapping || '—'} ({lc.attribution_confidence.confidence})</p>
+        {/* BTE-v1.3 — PRESENT behaviour, observed live as the buyer fills the form. Source-separated
+            from the history-derived layers above (evidence reads [rfq_session]). DESCRIBES the buyer;
+            never drives the requirement. Strengthens across sessions (session_count → stability). */}
+        {observedTraits(observedBehavior).length > 0 && (() => {
+          const o = observedBehavior;
+          return (
+            <>
+              <p className="font-semibold pt-1 text-emerald-700">👁 observed this session (RFQ-filling behaviour · {o.session_count > 1 ? `seen across ${o.session_count} sessions` : 'first session'}):</p>
+              <p className="text-emerald-600 -mt-0.5 text-[10px]">first-party — what the buyer DID in the form now; describes, never overrides the current requirement</p>
+              {traitRow('spec_engagement', o.spec_engagement)}
+              {traitRow('flexibility', o.flexibility)}
+              {traitRow('question_engagement', o.question_engagement)}
+              {traitRow('urgency_posture', o.urgency_posture)}
+              {traitRow('commercial_posture', o.commercial_posture)}
+              {traitRow('independence', o.independence)}
+            </>
+          );
+        })()}
+        {t.observed_external && (() => {
+          const e = t.observed_external;
+          const b = e.befisc; const g = e.sign3;
+          return (
+            <>
+              <p className="font-semibold pt-1 text-fuchsia-700">🌐 observed external (mobile lookup{e.fetched_at ? ` · ${e.fetched_at.slice(0, 10)}` : ''} · OBSERVED — not a planning input):</p>
+              {b && <p className="text-fuchsia-700 break-words">Befisc: {[b.name && `name ${b.name}`, b.gender, b.age && `age ${b.age}`, b.dob && `dob ${b.dob}`, b.income && `income ₹${b.income}`, b.pan && `PAN ${b.pan}`, b.altPhones ? `+${b.altPhones} alt phone(s)` : '', b.email && `email ${b.email}`, b.address && `addr ${b.address}`].filter(Boolean).join(' · ') || '—'}</p>}
+              {g && <p className="text-fuchsia-700 break-words">Sign3: {[g.socialProfiles != null && `${g.socialProfiles} social profiles`, g.operator && `operator ${g.operator}`, g.breaches != null && `${g.breaches} breach(es)`, g.linked && `linked ${g.linked}`, g.platforms?.length && `on: ${g.platforms.join(', ')}`].filter(Boolean).join(' · ')}</p>}
+              {e.world?.summary && <p className="text-fuchsia-700 break-words">World: {e.world.summary}{e.world.confidence != null ? ` (conf ${e.world.confidence})` : ''}</p>}
+              {e.notes?.length ? <p className="text-fuchsia-500">⚠ {e.notes.join(' · ')}</p> : null}
+            </>
+          );
+        })()}
         <p className="italic">“{t.summary}”</p>
       </div>
     );
@@ -3535,6 +3869,115 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     const score = pt.size ? Math.round((shared.length / pt.size) * 100) / 100 : 0;
     return { on: shared.length > 0, score, shared };
   };
+  // L4 — Executive (CEO) View: the SAME governed intelligence in plain language, NO engine names.
+  // What we know (Confirmed) · what we think (Likely) · what looks unusual (contradictions) · what we
+  // still need · what the AI saved. Reads the governed RU dims + the contradiction engine + spec list.
+  const renderExecutiveView = () => {
+    const dims = requirementUnderstanding();
+    const know = dims.filter((d) => d.state === 'Confirmed');
+    const think = dims.filter((d) => d.state === 'Likely');
+    const weak = dims.filter((d) => d.state === 'Weak');
+    const openNudges = contradictions.filter((n) => !nudgeAnswers[n.type]);
+    const needed = isqSpecs.filter((s) => !form.dynamicSpecs[s.IM_SPEC_MASTER_DESC]).map((s) => s.IM_SPEC_MASTER_DESC).slice(0, 6);
+    const engineSpecs = new Set<string>([...enrichedSpecs, ...cascadeSpecs, ...autoFilledSpecs]);
+    const avoided = engineSpecs.size + (reqPlan?.twinResolved?.length || 0);
+    const deduced = Object.values(deducedLogistics).filter((d) => d && d.value && (d.confidence || 0) >= 0.8).length;
+    // Commercial headline (ChatGPT: CEOs buy business impact, not "questions skipped"). Buyer-effort-
+    // reduced % + an estimate of seller back-and-forth avoided (each pre-filled/deduced field + each
+    // contradiction caught up-front is roughly one follow-up call/message the seller won't need).
+    const universe = Math.max(1, isqSpecs.length + (reqPlan?.twinResolved?.length || 0) + deduced);
+    const effortPct = Math.min(100, Math.round(((avoided + deduced) / universe) * 100));
+    const followupsAvoided = avoided + deduced + openNudges.length;
+    const Row = ({ icon, label, val }: { icon: string; label: string; val: string }) => (
+      <p className="leading-snug"><span className="mr-1">{icon}</span><b>{label}:</b> {val}</p>
+    );
+    return (
+      <div className="border-2 border-slate-300 bg-white rounded-xl p-3 text-[12.5px] text-slate-800 space-y-2 shadow-sm">
+        <p className="font-bold text-slate-900 text-[13px]">👔 Buyer snapshot</p>
+        <div className="flex flex-wrap gap-2 -mt-0.5">
+          <span className="rounded-full bg-emerald-600 text-white font-bold px-2.5 py-0.5 text-[11px]">Buyer effort reduced ~{effortPct}%</span>
+          <span className="rounded-full bg-slate-700 text-white font-semibold px-2.5 py-0.5 text-[11px]">≈{followupsAvoided} seller follow-ups avoided</span>
+        </div>
+        <div className="space-y-0.5">
+          <p className="font-semibold text-emerald-700">✓ What we know</p>
+          {know.length ? know.map((d) => <Row key={d.dim} icon="✓" label={d.dim} val={d.value} />) : <p className="text-slate-400 pl-4">— still learning</p>}
+        </div>
+        <div className="space-y-0.5">
+          <p className="font-semibold text-amber-700">~ What we think (likely)</p>
+          {think.length ? think.map((d) => <Row key={d.dim} icon="~" label={d.dim} val={d.value} />) : <p className="text-slate-400 pl-4">—</p>}
+        </div>
+        {weak.length > 0 && (
+          <div className="space-y-0.5">
+            <p className="font-semibold text-yellow-600">◦ Early signals (low confidence)</p>
+            {weak.map((d) => <Row key={d.dim} icon="◦" label={d.dim} val={d.value} />)}
+          </div>
+        )}
+        {openNudges.length > 0 && (
+          <div className="space-y-0.5">
+            <p className="font-semibold text-red-600">⚠ What looks unusual</p>
+            {openNudges.map((n) => <p key={n.type} className="leading-snug pl-1">⚠ {n.evidence.join(' · ') || n.question}</p>)}
+          </div>
+        )}
+        <div className="space-y-0.5">
+          <p className="font-semibold text-slate-600">? What we still need</p>
+          <p className="pl-4 text-slate-500">{needed.length ? needed.join(' · ') : '— nothing, ready to send'}</p>
+        </div>
+        <p className="pt-1 border-t border-slate-200 text-slate-600">⚡ <b>What the AI saved:</b> {avoided} question{avoided === 1 ? '' : 's'} skipped · {deduced} field{deduced === 1 ? '' : 's'} auto-completed · {openNudges.length} thing{openNudges.length === 1 ? '' : 's'} double-checked</p>
+      </div>
+    );
+  };
+
+  // L5 — Verification dashboard: governance at a glance (the 4+1 states) + nudge confirm/change tally.
+  // This is the self-improving loop's scoreboard — confirmed / likely / weak / unknown / contradicted.
+  const renderVerificationDashboard = () => {
+    const dims = requirementUnderstanding();
+    const by = (s: AttrState) => dims.filter((d) => d.state === s).length;
+    const total = dims.length || 1;
+    const pct = (n: number) => Math.round((n / total) * 100);
+    const raised = contradictions.length;
+    const answered = Object.keys(nudgeAnswers).length;
+    return (
+      <div className="border border-slate-300 bg-slate-50 rounded-xl p-3 text-[11px] text-slate-800 space-y-1">
+        <p className="font-bold">📊 Verification dashboard — governance at a glance</p>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+          <span className="text-emerald-700">✓ Confirmed {by('Confirmed')} ({pct(by('Confirmed'))}%)</span>
+          <span className="text-amber-700">~ Likely {by('Likely')}</span>
+          <span className="text-yellow-600">◦ Weak {by('Weak')}</span>
+          <span className="text-gray-400">? Unknown {by('Unknown')}</span>
+          <span className="text-red-600">⚠ Contradicted {by('Contradicted')}</span>
+        </div>
+        <p>Nudges raised: <b>{raised}</b> · answered: <b>{answered}</b> · open: <b>{Math.max(0, raised - answered)}</b></p>
+        <p className="text-slate-400">Golden Rule: every attribute is Confirmed / Likely / Weak / Unknown / Contradicted — never an unsupported "fact". Confirm/Change happens via the nudge chips on the form.</p>
+      </div>
+    );
+  };
+
+  // L2 — the buyer-facing NUDGE banner (VISIBLE, not debug-gated): a polite clarifying chip per detected
+  // contradiction / consumption gap. Answered nudges drop off; tap writes the field via answerNudge.
+  const renderNudges = () => {
+    // R2 — contradictions arrive pre-sorted by priority; show only the TOP 2 so RFQ friction never returns.
+    const open = contradictions.filter((n) => !nudgeAnswers[n.type]).slice(0, 2);
+    if (!open.length) return null;
+    const ICON: Record<string, string> = { location: '📍', persona_vs_order: '🤔', buyer_type: '🪪', supplier_radius: '📡' };
+    return (
+      <div className="border border-amber-300 bg-amber-50 rounded-xl p-3 text-[12px] text-amber-900 space-y-2">
+        <p className="font-bold text-amber-800">⚡ A couple of quick checks — for sharper quotes</p>
+        {open.map((n) => (
+          <div key={n.type} className="border-l-2 border-amber-400 pl-2">
+            <p className="font-medium">{ICON[n.type] || '•'} {n.question}</p>
+            {debug && n.evidence.length > 0 && <p className="text-amber-500 text-[10px]">why: {n.evidence.join(' · ')}</p>}
+            <div className="flex flex-wrap gap-1.5 mt-1">
+              {n.options.map((o) => (
+                <button key={o} type="button" onClick={() => answerNudge(n, o)} className="rounded-full border border-amber-400 bg-white px-2.5 py-1 text-amber-800 hover:bg-amber-100 font-medium">{o}</button>
+              ))}
+            </div>
+          </div>
+        ))}
+        {Object.keys(nudgeAnswers).length > 0 && <p className="text-amber-500 text-[10px]">✓ noted: {Object.entries(nudgeAnswers).map(([k, v]) => `${k} = ${v}`).join(' · ')}</p>}
+      </div>
+    );
+  };
+
   const renderRequirementUnderstanding = () => {
     const dims = requirementUnderstanding();
     const known = dims.filter((d) => d.confidence > 0).length;
@@ -3543,13 +3986,15 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       <div className="border border-indigo-200 bg-indigo-50 rounded-xl p-3 text-[11px] text-indigo-900 space-y-1">
         <p className="font-bold">🧠 Requirement Understanding — the “Final RFQ Vision” ({known}/{dims.length} known · existing Twin/profile intelligence, NO new LLM · Phase-2/3 foundation)</p>
         <p className={hi.on ? 'text-indigo-700' : 'text-amber-700'}>🧭 History influence: <b>{hi.on ? 'ON' : 'OFF'}</b> · current-vs-history similarity <b>{hi.score}</b> {hi.on ? `· shared: [${hi.shared.join(', ')}] → Twin intent/history may shape this requirement` : `· no shared category tokens → OFF-PROFILE: history weight ≈ 0, intent derives from the CURRENT product only (G3)`}</p>
-        {dims.map((d) => (
+        {dims.map((d) => {
+          const sc = d.state === 'Confirmed' ? 'text-emerald-700' : d.state === 'Likely' ? 'text-amber-700' : d.state === 'Weak' ? 'text-yellow-600' : d.state === 'Contradicted' ? 'text-red-600' : 'text-gray-400';
+          return (
           <div key={d.dim} className="border-l-2 border-indigo-200 pl-1.5 my-0.5">
-            <p><b>{d.dim}:</b> <span className={d.confidence ? 'text-indigo-800 font-semibold' : 'text-gray-400'}>{d.value}</span>{d.confidence ? <span className="text-indigo-400"> · {d.confidence}% · {d.source}</span> : null}</p>
+            <p><b>{d.dim}:</b> <span className={d.confidence ? 'text-indigo-800 font-semibold' : 'text-gray-400'}>{d.value}</span> <span className={`${sc} font-semibold`}>{STATE_ICON[d.state]} {d.state}</span>{d.confidence ? <span className="text-indigo-400"> · {d.confidence}% · {d.source}</span> : null}</p>
             {d.confidence ? <p className="text-indigo-400">{d.evidence ? `evidence: ${d.evidence} · ` : ''}used by: {d.usedBy}</p> : null}
           </div>
-        ))}
-        <p className="text-indigo-400">value · confidence · source · evidence · used-by. Gaps (“— phase 2”) = Requirement-Understanding-Engine v2 inference targets; purchasing-power exactness waits on external GST (phase 4).</p>
+        );})}
+        <p className="text-indigo-400">value · <b>state</b> (Confirmed / Likely / Unknown / Contradicted — Golden Rule: no evidence ⇒ Unknown, never a guess) · confidence · source · evidence · used-by.</p>
       </div>
     );
   };
@@ -3592,7 +4037,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       const res = await runExternal(seed, { nowIso: new Date().toISOString(), osintFn: osintDemoProvider });
       setExternal(res);
       const w = window as unknown as { __ebi?: unknown; __externalSeed?: unknown };
-      w.__ebi = { externalEvidenceLedger: res.externalEvidenceLedger, sources: res.sources, gate: res.gate, ran_at: res.ranAt };
+      w.__ebi = { externalEvidenceLedger: res.externalEvidenceLedger, sources: res.sources, gate: res.gate, ran_at: res.ranAt, crossValidation: res.crossValidation };
       w.__externalSeed = seed;
       track('rfq_world_demo_run', { hasCompany: !!seed.companyName });
     } catch { /* no-op */ }
@@ -3621,15 +4066,51 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
         <p className="font-bold flex items-center gap-2 flex-wrap">🌐 External Pull Health — Befisc · Sign3 · World (status · latency · anchor) {demoBtn}</p>
         <p className="text-fuchsia-600">seed: {seedBits}</p>
         <p>OSINT gate: <b className={external.gate.osintEligible ? 'text-emerald-700' : 'text-amber-600'}>{external.gate.osintEligible ? `eligible (${external.gate.strongest})` : `skipped (${external.gate.strongest})`}</b> — {external.gate.reason}</p>
-        {external.sources.map((src) => (
-          <p key={src.source}>
-            {ICON[src.status] || '·'} <b>{src.source}</b> <span className="text-fuchsia-400">({src.tier})</span> — {LABEL[src.status] || src.status}
-            {src.ms ? ` · ${src.ms}ms` : ''}{src.anchor ? ` · via ${src.anchor}` : ''}{src.confidence != null ? ` · conf ${src.confidence}` : ''}
-            {src.detail ? <span className="text-fuchsia-500"> — {src.detail}</span> : ''}
-            {src.status === 'ok' && src.source === 'World' && !!(src.value as { summary?: string })?.summary ? <span className="text-emerald-700"> → “{String((src.value as { summary?: string }).summary).slice(0, 120)}”</span> : null}
-            {src.source === 'World' && Array.isArray((src.value as { match_basis?: string[] })?.match_basis) && (src.value as { match_basis?: string[] }).match_basis!.length ? <span className="text-fuchsia-500"> · matched on: [{(src.value as { match_basis: string[] }).match_basis.join(', ')}]</span> : null}
-          </p>
-        ))}
+        {external.crossValidation && external.crossValidation.facts.length > 0 && (
+          <div className="mt-1 pt-1 border-t border-fuchsia-200">
+            <p className="font-semibold">🔗 P4 Cross-validation (agreement ladder = confidence):</p>
+            {external.crossValidation.facts.map((f, i) => (
+              <p key={i} className={f.tier === 'verified' ? 'text-emerald-700' : f.tier === 'corroborated' ? 'text-amber-700' : 'text-fuchsia-600'}>
+                {f.tier === 'verified' ? '✅' : f.tier === 'corroborated' ? '🤝' : '•'} <b>{f.key}</b> = {f.value} — {f.agreement}× [{f.sources.join(' + ')}] → <b>{f.tier}</b> · conf {f.confidence}{f.tier === 'verified' && /^(company|city)$/.test(f.key) ? ' · → Registry Verified ✓' : ''}
+              </p>
+            ))}
+            <p className="text-fuchsia-400">1 source = observed · 2 = corroborated · 3+ = Verified. Business facts (company/city) at Verified graduate into the Coverage Registry; personal identity (name/email/pan) stays observed-only.</p>
+          </div>
+        )}
+        {external.sources.map((src) => {
+          // "show what we got": curated fields from each OK source. Observed-only (never planning).
+          const obj = (x: unknown): Record<string, unknown> => (x && typeof x === 'object' ? x as Record<string, unknown> : {});
+          const s = (x: unknown) => (x == null ? '' : String(x));
+          const v = obj(src.value);
+          let detail: import('react').ReactNode = null;
+          if (src.status === 'ok' && src.source === 'Befisc') {
+            const pi = obj(v.personal_information); const docs = obj(v.document_data);
+            const pan = Array.isArray(docs.pan) && docs.pan.length ? s(obj((docs.pan as unknown[])[0]).value) : '';
+            const alt = Array.isArray(v.alternate_phone) ? (v.alternate_phone as unknown[]).length : 0;
+            const emails = Array.isArray(v.email) ? (v.email as unknown[]).map((e) => s(obj(e).value)).filter(Boolean) : [];
+            const a0 = Array.isArray(v.address) && v.address.length ? obj((v.address as unknown[])[0]) : {};
+            const bits = [s(pi.full_name) && `name ${s(pi.full_name)}`, s(pi.gender), s(pi.age) && `age ${s(pi.age)}`, s(pi.date_of_birth) && `dob ${s(pi.date_of_birth)}`, s(pi.income) && `income ₹${s(pi.income)}`, pan && `PAN ${pan}`, alt ? `+${alt} alt phone(s)` : '', emails.length ? `email ${emails[0]}` : '', (s(a0.state) || s(a0.pincode)) ? `addr ${[s(a0.detailed_address), s(a0.state), s(a0.pincode)].filter(Boolean).join(', ')}` : ''].filter(Boolean).join(' · ');
+            detail = bits ? <span className="block ml-4 text-fuchsia-700 break-words">↳ {bits}</span> : null;
+          } else if (src.status === 'ok' && src.source === 'Sign3') {
+            const pdRoot = obj(v.phone_data); const pd = obj(pdRoot.primary_data); const meta = obj(pd.phone_meta);
+            const ld = obj(pdRoot.linked_data); const br = obj(ld.breach_details); const accts = obj(pd.account_details);
+            const platforms = Object.entries(accts).filter(([, x]) => obj(x).user_exist === true).map(([k]) => k);
+            const bits = [s(pd.social_profile_count) && `${s(pd.social_profile_count)} social profiles`, s(meta.operator) && `operator ${s(meta.operator)}`, s(br.number_of_breaches) ? `${s(br.number_of_breaches)} breach(es)` : '', s(ld.key) ? `linked ${s(ld.key)}` : '', platforms.length ? `on: ${platforms.slice(0, 8).join(', ')}` : ''].filter(Boolean).join(' · ');
+            detail = bits ? <span className="block ml-4 text-fuchsia-700 break-words">↳ {bits}</span> : null;
+          }
+          return (
+            <div key={src.source}>
+              <p>
+                {ICON[src.status] || '·'} <b>{src.source}</b> <span className="text-fuchsia-400">({src.tier})</span> — {LABEL[src.status] || src.status}
+                {src.ms ? ` · ${src.ms}ms` : ''}{src.anchor ? ` · via ${src.anchor}` : ''}{src.confidence != null ? ` · conf ${src.confidence}` : ''}
+                {src.detail ? <span className="text-fuchsia-500"> — {src.detail}</span> : ''}
+                {src.status === 'ok' && src.source === 'World' && !!(src.value as { summary?: string })?.summary ? <span className="text-emerald-700"> → “{String((src.value as { summary?: string }).summary).slice(0, 120)}”</span> : null}
+                {src.source === 'World' && Array.isArray((src.value as { match_basis?: string[] })?.match_basis) && (src.value as { match_basis?: string[] }).match_basis!.length ? <span className="text-fuchsia-500"> · matched on: [{(src.value as { match_basis: string[] }).match_basis.join(', ')}]</span> : null}
+              </p>
+              {detail}
+            </div>
+          );
+        })}
         {(() => { const verified = (() => { try { return (coverage.current.facts() || []).filter((f) => f.source === 'Verified'); } catch { return []; } })(); return verified.length ? (
           <p className="text-emerald-700">↪ STITCHED INTO THE ENGINE: {verified.length} Verified fact(s) recorded from external → fed the planner + Truth Table (Used-By: YES). {verified.slice(0, 3).map((f) => `${f.rawKey}=${f.value}`).join(' · ')}</p>
         ) : (
@@ -3801,7 +4282,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     if (!tw) return null; // cold / no-Twin → nothing
     const off = offProfileNow() || twinMuted.current; // A3: twin history AND enrichment both miss
     if (off) {
-      return <p className="text-[11px] text-gray-400 mt-1.5">Looks like a new area for you — we'll tailor fresh questions.</p>;
+      return debug ? <p className="text-[11px] text-gray-400 mt-1.5">Looks like a new area for you — we'll tailor fresh questions.</p> : null;
     }
     const repeat = repeatSignal(); // P2.2: RFQ-specific repeat-order signal beats a generic persona line
     const traits = conciergeTraits(tw).slice(0, 2);
@@ -3836,6 +4317,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       );
     }
     if (!page1Choice) return null; // unknown/cold → the chosen intent journey infers it
+    if (!debug) return null; // (#5) buyer-facing UI stays clean; the kind is auto-derived. Toggle is debug-only.
     const isBiz = page1Choice === 'business';
     return (
       <p className="text-[11px] text-gray-400 mt-3">
@@ -3916,7 +4398,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       return (
         <div className="mt-4 animate-field-in">
           <label className="block text-sm font-semibold text-gray-800 mb-1">{ri.question}</label>
-          <p className="text-xs text-gray-400 mb-2.5">This shapes the whole form — we'll ask only what matters for your answer.</p>
+          {debug && <p className="text-xs text-gray-400 mb-2.5">This shapes the whole form — we'll ask only what matters for your answer.</p>}
           <div className="flex flex-wrap gap-2">
             {ri.chips.map((c) => (
               <RadioChip key={c} label={c} selected={false} onClick={() => answerIntent(c)} />
@@ -3952,7 +4434,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     return (
       <div className="rounded-2xl border border-teal-300 bg-gradient-to-br from-teal-50 to-emerald-50 p-5 space-y-3 animate-[fadeIn_0.3s_ease]">
         <p className="text-[15px] font-semibold text-gray-800">{ri.question}</p>
-        <p className="text-xs text-gray-500 -mt-1.5">This shapes the whole form — we'll ask only what matters for your answer.</p>
+        {debug && <p className="text-xs text-gray-500 -mt-1.5">This shapes the whole form — we'll ask only what matters for your answer.</p>}
         <div className="flex flex-wrap gap-2 pt-0.5">
           {ri.chips.map((c) => (
             <button key={c} type="button" onClick={() => answerIntent(c)} className="rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:border-teal-400 hover:bg-teal-50 transition-colors">{c}</button>
@@ -4195,18 +4677,19 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
 
   // ── Provenance: for ANY captured field, where did the value come from + how sure ──
   // Single source of truth reused by the Truth Table (last page) AND per-spec bars (P3).
-  type Trust = 'VERIFIED' | 'HIGH' | 'MEDIUM' | 'LOW' | 'BLOCKED';
+  type Trust = 'VERIFIED' | 'HIGH' | 'MEDIUM' | 'LOW' | 'BLOCKED' | 'OPEN';
   type Prov = { src: string; icon: string; conf: number | null; evidence: string; trust: Trust };
-  // Trust badge (Gemini): User/API = VERIFIED · Twin/AI >80 = HIGH · 60-80 = MEDIUM · <60 = LOW · Gate = BLOCKED.
+  // Trust badge (Gemini): User/API = VERIFIED · Twin/AI >80 = HIGH · 60-80 = MEDIUM · <60 = LOW ·
+  // Gate = OPEN (a preference field left open ON PURPOSE → more competitive quotes; NOT "blocked").
   const trustOf = (src: string, conf: number | null): Trust =>
-    src === 'Gate' ? 'BLOCKED' : src === 'User' ? 'VERIFIED' : conf == null ? 'MEDIUM' : conf >= 80 ? 'HIGH' : conf >= 60 ? 'MEDIUM' : 'LOW';
+    src === 'Gate' ? 'OPEN' : src === 'User' ? 'VERIFIED' : conf == null ? 'MEDIUM' : conf >= 80 ? 'HIGH' : conf >= 60 ? 'MEDIUM' : 'LOW';
   const trustClass = (t: Trust) =>
-    t === 'VERIFIED' ? 'text-green-700 font-semibold' : t === 'HIGH' ? 'text-blue-700 font-semibold' : t === 'MEDIUM' ? 'text-amber-600' : t === 'LOW' ? 'text-red-600' : 'text-gray-400';
+    t === 'VERIFIED' ? 'text-green-700 font-semibold' : t === 'HIGH' ? 'text-blue-700 font-semibold' : t === 'MEDIUM' ? 'text-amber-600' : t === 'LOW' ? 'text-red-600' : t === 'OPEN' ? 'text-teal-600 font-semibold' : 'text-gray-400';
   const fieldProvenance = (key: string, value: string): Prov => {
     const base = ((): Omit<Prov, 'trust'> => {
       const d = deducedLogistics[key];
       if (d && d.value) return { src: 'Deduced', icon: '🧠', conf: Math.round((d.confidence || 0) * 100), evidence: d.reason || 'inferred from known signals' };
-      if (preferenceSpecs.has(key) && !(value && value.trim())) return { src: 'Gate', icon: '🔒', conf: null, evidence: 'preference field — left open for more quotes' };
+      if (preferenceSpecs.has(key) && !(value && value.trim())) return { src: 'Gate', icon: '🔓', conf: null, evidence: 'left open on purpose → more competitive quotes' };
       if (manualSpecs.has(key)) return { src: 'User', icon: '👤', conf: 100, evidence: 'picked by buyer' };
       if (repostMeta[key]) return { src: 'History', icon: '🔁', conf: 90, evidence: `re-posted from your ${agoLabel(repostMeta[key].recencyDays)} order${repostMeta[key].custom ? ' (added — not in this category)' : ''}` };
       if (enrichedSpecs.has(key)) return { src: 'Twin/History', icon: '🧬', conf: 90, evidence: 'from past requirements' };
@@ -4234,7 +4717,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       : { src: 'Twin', icon: '🧬', conf: 70, evidence: `canonical role (Twin/Profile)${twinOrigin ? ' · from ' + twinOrigin : ''}` });
     if (form.quantity) push('Quantity', `${form.quantity}${form.unit ? ' ' + form.unit : ''}`, { src: 'User', icon: '👤', conf: 100, evidence: 'typed on step 1' });
     for (const [k, v] of Object.entries(form.dynamicSpecs)) if (v && v.trim()) push(k, v, fieldProvenance(k, v));
-    for (const k of preferenceSpecs) if (!(form.dynamicSpecs[k] || '').trim()) push(k, '— open to all', { src: 'Gate', icon: '🔒', conf: null, evidence: 'preference → more quotes' });
+    for (const k of preferenceSpecs) if (!(form.dynamicSpecs[k] || '').trim()) push(k, '— open to all', { src: 'Gate', icon: '🔓', conf: null, evidence: 'left open on purpose → more competitive quotes' });
     for (const q of dynQuestions) { const a = dynAnswers[q.id]; if (a) push(q.label.replace(/\s*\?$/, ''), a, { src: 'User', icon: '👤', conf: 100, evidence: 'answered' }); }
     if (form.deliveryTimeline) push('Delivery Timeline', form.deliveryTimeline, fieldProvenance('deliveryTimeline', form.deliveryTimeline));
     if (form.paymentTerms) push('Payment Terms', form.paymentTerms, fieldProvenance('paymentTerms', form.paymentTerms));
@@ -4425,38 +4908,13 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
             <span>{debug ? <>Re-planned after: <b>{replanFlash}</b> — reordered the specs that matter most for this</> : <>We reordered these to match your answer</>}</span>
           </div>
         )}
-        {debug && enrichment && (
-          <div className="border border-blue-200 bg-blue-50 rounded-xl p-3 text-[11px] text-blue-900 space-y-1">
-            <p className="font-bold">🧠 Enrichment (GLID {enrichment.glid || glidInput})</p>
-            <p className="text-blue-400">↓ DIRECT from webhook fields (no LLM)</p>
-            <p><b>PII:</b> {[enrichment.buyer?.fullName, enrichment.buyer?.designation, enrichment.buyer?.companyName, enrichment.buyer?.city, enrichment.buyer?.state, enrichment.buyer?.locality, enrichment.buyer?.mobile, enrichment.buyer?.email, enrichment.buyer?.verifiedBusiness ? 'verified✓' : '', enrichment.buyer?.primaryLanguage].filter(Boolean).join(' · ')} <span className="text-blue-400">→ preserved at last step + in payload</span></p>
-            <p><b>persona (direct):</b> {[enrichment.persona?.type, enrichment.persona?.scale, enrichment.persona?.commercial ? 'commercial' : '', `repeat=${enrichment.persona?.repeatBuyer}`, enrichment.persona?.multiSku ? `multi-SKU(${enrichment.persona?.domains?.length})` : '', enrichment.persona?.whatsappAffinity ? `WA:${enrichment.persona.whatsappAffinity}(${enrichment.persona.whatsappMsgs})` : ''].filter(Boolean).join(' · ')}</p>
-            <p><b>history:</b> {(enrichment.categories || []).map((c) => `${c.mcat}(${c.source})`).join(', ') || '—'}</p>
-            {(() => { const m = matchCategory(enrichment, form.productName); return m ? <p><b>MATCHED “{m.mcat}”:</b> specs {JSON.stringify(m.knownSpecs || {})} · sellerAsked {JSON.stringify(m.sellerQuestions || [])}</p> : <p className="text-blue-400">no category match for “{form.productName}”</p>; })()}
-            {buyerProfile && Object.keys(buyerProfile).length > 0 && (
-              <div className="mt-1 pt-1 border-t border-blue-200">
-                <p className="text-blue-400">↓ LLM-DERIVED via deriveBuyerProfile (persists across requirements)</p>
-                <p><b>🧬 profile:</b> {[buyerProfile.persona, buyerProfile.maturity, buyerProfile.sourcingStyle, buyerProfile.buyingPattern, buyerProfile.decisionStyle, buyerProfile.infoSeeking && `info:${buyerProfile.infoSeeking}`, buyerProfile.supplierPreference, buyerProfile.localityPreference, buyerProfile.engagement, buyerProfile.responseSensitivity, buyerProfile.multiSku ? 'multi-SKU' : ''].filter(Boolean).join(' · ')}{typeof buyerProfile.confidence === 'number' ? ` · conf ${Math.round(buyerProfile.confidence * 100)}%` : ''}</p>
-                {buyerProfile.summary && <p className="italic">“{buyerProfile.summary}”</p>}
-                {buyerProfile.tags?.length ? <p><b>tags:</b> {buyerProfile.tags.join(', ')}</p> : null}
-              </div>
-            )}
-            {buyerTwin && (
-              <p className="text-blue-500 mt-1 pt-1 border-t border-blue-200">
-                🧬 <b>Buyer Twin v1.2</b> below ↓ — full evidence ledger · window.__buyerTwin
-              </p>
-            )}
-            <p className="text-blue-400">raw: {enrichmentRaw ? 'window.__enrichment' : '—'} · profile: window.__buyerProfile</p>
-          </div>
-        )}
-        {debug && renderBuyerDossier()}
-        {debug && renderPipelineHealth()}
-        {debug && renderExternalPullHealth()}
-        {debug && renderLLMCallHealth()}
+        {/* Pulled-data debug panels (🧠 Enrichment · 🕵️ Dossier · 🩺 Pipeline · 🌐 External · 🤖 LLM ·
+            🧬 Twin · Ledger) moved to the step-0 STAGING view (landing "Pull"). The FLOW panels — which
+            describe the LIVE requirement, not the pull — stay here on the spec page. */}
+        {/* L2 — buyer-facing nudges (location mismatch / personal-vs-business / supplier radius). VISIBLE. */}
+        {renderNudges()}
         {debug && renderRequirementUnderstanding()}
         {debug && renderOptionProvenance()}
-        {debug && renderTwinDebug()}
-        {debug && renderBuyerIntelligenceLedger()}
         {debug && renderIntentDebug()}
         {debug && renderCoverageRegistry()}
         {debug && renderWhyAskedSkipped()}
@@ -4884,11 +5342,12 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     // component scope and shared with the details wizard. Role/Industry/Size/
     // Frequency now live in that wizard; only validated GST/Firm stay here.
     // Payment mode options depend on the chosen payment term.
+    // Payment mode applies only when the mode is decided UP FRONT. Credit (Post-Delivery) → the
+    // Credit Period is the relevant detail and mode is settled at payment time; Loan/Finance → the
+    // financing is the detail. Both hide Payment Mode. Full Advance / COD → mode matters now.
     const paymentModeOptions =
-      form.paymentTerms === 'Loan/Finance'
+      form.paymentTerms === 'Loan/Finance' || form.paymentTerms === 'Credit (Post-Delivery)'
         ? []
-        : form.paymentTerms === 'Credit (Post-Delivery)'
-        ? ['Online Transfer', 'Cheque']
         : ['Online Transfer', 'Cash', 'Cheque'];
     const showPaymentMode = !!form.paymentTerms && paymentModeOptions.length > 0;
 
@@ -5210,6 +5669,18 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
             )}
           </div>
         )}
+        {/* BTE-v1.3 — how the buyer FILLED this RFQ, as a seller-facing behaviour line (PII-free).
+            Shows even with no Twin (it's pure in-session signal). The way they fill the form tells
+            the seller how to pitch (fast vs flexible, advance vs credit, hands-on vs delegating). */}
+        {(() => {
+          const line = observedBehaviorLine(observedBehavior);
+          return line ? (
+            <p className="mb-3 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-100 rounded-lg px-2.5 py-1.5">
+              <span className="font-semibold">Buyer behaviour</span> (how they filled this RFQ): {line}
+              {observedBehavior.session_count > 1 && <span className="text-emerald-600"> · seen across {observedBehavior.session_count} sessions</span>}
+            </p>
+          ) : null;
+        })()}
         {summaryChips.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-3">
             {summaryChips.map((s) => (
@@ -5380,6 +5851,96 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
     );
   };
 
+  // 🧠 Enrichment dump (DIRECT webhook fields + LLM-derived profile) — pulled-data debug, shown in
+  // the step-0 staging view. Extracted from the spec page so the pulled-data panels live in ONE place.
+  const renderEnrichmentDump = () => (!enrichment ? null : (
+    <div className="border border-blue-200 bg-blue-50 rounded-xl p-3 text-[11px] text-blue-900 space-y-1">
+      <p className="font-bold">🧠 Enrichment (GLID {enrichment.glid || glidInput})</p>
+      <p className="text-blue-400">↓ DIRECT from webhook fields (no LLM)</p>
+      <p><b>PII:</b> {[enrichment.buyer?.fullName, enrichment.buyer?.designation, enrichment.buyer?.companyName, enrichment.buyer?.city, enrichment.buyer?.state, enrichment.buyer?.locality, enrichment.buyer?.mobile, enrichment.buyer?.email, enrichment.buyer?.verifiedBusiness ? 'verified✓' : '', enrichment.buyer?.primaryLanguage].filter(Boolean).join(' · ')} <span className="text-blue-400">→ preserved at last step + in payload</span></p>
+      <p><b>persona (direct):</b> {[enrichment.persona?.type, enrichment.persona?.scale, enrichment.persona?.commercial ? 'commercial' : '', `repeat=${enrichment.persona?.repeatBuyer}`, enrichment.persona?.multiSku ? `multi-SKU(${enrichment.persona?.domains?.length})` : '', enrichment.persona?.whatsappAffinity ? `WA:${enrichment.persona.whatsappAffinity}(${enrichment.persona.whatsappMsgs})` : ''].filter(Boolean).join(' · ')}</p>
+      <p><b>history:</b> {(enrichment.categories || []).map((c) => `${c.mcat}(${c.source})`).join(', ') || '—'}</p>
+      {(() => { const m = matchCategory(enrichment, form.productName); return m ? <p><b>MATCHED “{m.mcat}”:</b> specs {JSON.stringify(m.knownSpecs || {})} · sellerAsked {JSON.stringify(m.sellerQuestions || [])}</p> : <p className="text-blue-400">no category match for “{form.productName || '—'}”</p>; })()}
+      {buyerProfile && Object.keys(buyerProfile).length > 0 && (
+        <div className="mt-1 pt-1 border-t border-blue-200">
+          <p className="text-blue-400">↓ LLM-DERIVED via deriveBuyerProfile (persists across requirements)</p>
+          <p><b>🧬 profile:</b> {[buyerProfile.persona, buyerProfile.maturity, buyerProfile.sourcingStyle, buyerProfile.buyingPattern, buyerProfile.decisionStyle, buyerProfile.infoSeeking && `info:${buyerProfile.infoSeeking}`, buyerProfile.supplierPreference, buyerProfile.localityPreference, buyerProfile.engagement, buyerProfile.responseSensitivity, buyerProfile.multiSku ? 'multi-SKU' : ''].filter(Boolean).join(' · ')}{typeof buyerProfile.confidence === 'number' ? ` · conf ${Math.round(buyerProfile.confidence * 100)}%` : ''}</p>
+          {buyerProfile.summary && <p className="italic">“{buyerProfile.summary}”</p>}
+          {buyerProfile.tags?.length ? <p><b>tags:</b> {buyerProfile.tags.join(', ')}</p> : null}
+          {buyerProfile.nature && (
+            <p className="mt-1 pt-1 border-t border-blue-200"><b>🏛 Nature:</b> {buyerProfile.nature} <span className="text-blue-400">· conf {buyerProfile.natureConfidence ?? '—'} · source email-domain · evidence: {(buyerProfile.natureEvidence || []).join('; ') || '—'} · used by: planner (bpfLine + nature rule)</span></p>
+          )}
+          {buyerProfile.authority && (
+            <p><b>🎖 Authority:</b> {buyerProfile.authority} <span className="text-blue-400">· conf {buyerProfile.authorityConfidence ?? '—'} · source designation · evidence: {(buyerProfile.authorityEvidence || []).join('; ') || '—'} · used by: planner (bpfLine + authority rule)</span></p>
+          )}
+          {buyerProfile.procurementModel && (
+            <p><b>📦 Procurement model:</b> {buyerProfile.procurementModel} <span className="text-blue-400">· conf {buyerProfile.procurementModelConfidence ?? '—'} · source history (LLM, persistent prior) · used by: planner (bpfLine) — current order mode still outranks</span></p>
+          )}
+        </div>
+      )}
+      {buyerTwin && (
+        <p className="text-blue-500 mt-1 pt-1 border-t border-blue-200">
+          🧬 <b>Buyer Twin v1.2</b> below ↓ — full evidence ledger · window.__buyerTwin
+        </p>
+      )}
+      {identity && identity.anchorCount > 0 && (
+        <p className="mt-1 pt-1 border-t border-blue-200"><b>🪪 Identity (composite):</b> {identityLine(identity)} <span className="text-blue-400">· source first-party + observed-external (PAN) · OBSERVED-only (confidence + dossier, NOT a planner driver) · window.__identity</span>{identity.conflicts.length > 0 && <span className="text-red-500"> · ⚠ {identity.conflicts.join('; ')}</span>}</p>
+      )}
+      <p className="text-blue-400">raw: {enrichmentRaw ? 'window.__enrichment' : '—'} · profile: window.__buyerProfile · identity: window.__identity</p>
+    </div>
+  ));
+
+  // ─── B-step-2: Step-0 STAGING view ────────────────────────────────────────────
+  // Shown when opened from the landing's "Pull" (stagingOnly). Renders the PULLED-data debug
+  // panels — reusing the existing renderers in-scope (no state lift) — then "Start RFQ →" flips
+  // this same instance to the clean form (onStart), so the data persists (no re-pull).
+  const renderStagingView = () => (
+    <div className="p-6 space-y-3 max-h-[88vh] overflow-y-auto">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-lg font-bold text-gray-900">Buyer data {pull?.glid ? <span className="text-gray-400 font-normal">· GLID {pull.glid}</span> : ''}</p>
+          <p className="text-xs text-gray-500">Review what we pulled, then start — the product screen stays clean.</p>
+        </div>
+        <button type="button" onClick={handleClose} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 hover:bg-gray-200 shrink-0"><X size={16} /></button>
+      </div>
+      {enrichLoading && (
+        <p className="text-sm text-gray-400 flex items-center gap-2"><span className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Pulling buyer history…</p>
+      )}
+      {!enrichLoading && !enrichment && (
+        <p className="text-sm text-amber-600">No history pulled{pull && !pull.ok ? ' — the webhook returned nothing for that GLID.' : '.'} You can still start a cold RFQ.</p>
+      )}
+      {enrichment?.buyer && (
+        <p className="text-[11px] text-green-700 bg-green-50 border border-green-100 rounded-lg px-2.5 py-1.5">✓ {enrichment.buyer.fullName || enrichment.buyer.firstName || 'Buyer'}{enrichment.buyer.city ? ` · ${enrichment.buyer.city}` : ''}{enrichment.persona?.type ? ` · ${enrichment.persona.type}` : ''}{enrichment.categories?.length ? ` · ${enrichment.categories.length} prior cats` : ''}</p>
+      )}
+      {/* L4 — Executive (CEO) view toggle: plain-language snapshot vs the engineer panels. */}
+      {enrichment && (
+        <button type="button" onClick={() => setCeoView((v) => !v)} className="self-start rounded-full border border-slate-400 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">
+          {ceoView ? '🔧 Show engineer view' : '👔 Executive view (plain English)'}
+        </button>
+      )}
+      {ceoView && enrichment && renderExecutiveView()}
+      {/* the PULLED-data debug panels — the same renderers the spec page used, now shown here at step 0 */}
+      {!ceoView && (<>
+        {renderVerificationDashboard()}
+        {renderEnrichmentDump()}
+        {renderPipelineHealth()}
+        {renderExternalPullHealth()}
+        {renderLLMCallHealth()}
+        {renderBuyerDossier()}
+        {renderTwinDebug()}
+        {renderBuyerIntelligenceLedger()}
+        {enrichmentRaw != null && renderRawFetchDump()}
+      </>)}
+      <button
+        type="button"
+        onClick={() => onStart?.()}
+        className="w-full mt-2 rounded-xl bg-teal-600 text-white font-semibold py-3 hover:bg-teal-700 flex items-center justify-center gap-2 sticky bottom-0"
+      >
+        Start RFQ <ArrowRight size={16} />
+      </button>
+    </div>
+  );
+
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div
@@ -5401,7 +5962,7 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
       <div
         className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl lg:max-w-3xl overflow-hidden animate-modal-in"
       >
-        {step === 0 ? (
+        {stagingOnly ? renderStagingView() : step === 0 ? (
           /* ── TWO PANEL LAYOUT ── */
           <div className="flex h-full" style={{ minHeight: 520 }}>
             {/* LEFT PANEL — hidden on mobile */}
@@ -5513,9 +6074,10 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
                       setVoiceTarget('main');
                       setShowVoiceRecorder(true);
                     }}
-                    className="flex items-center gap-1 px-3 text-green-600 font-medium text-sm border-l border-gray-100 hover:bg-green-50 py-3 transition-colors"
+                    className="flex items-center justify-center px-3 text-green-600 border-l border-gray-100 hover:bg-green-50 py-3 transition-colors"
+                    aria-label="Speak your requirement" title="Speak"
                   >
-                    <Mic size={14} /> Speak
+                    <Mic size={18} />
                   </button>
                   <button
                     onClick={() => fileInputRef.current?.click()}
@@ -5559,34 +6121,15 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
                   )}
               </div>
 
-              {/* DEBUG: Buyer GLID → pull history to power the form */}
+              {/* GLID + Pull + Ignore-Twin + all pulled-data debug panels live on the LANDING now:
+                  "Pull" opens the step-0 STAGING view (debug panels), "Start RFQ →" flips to this clean
+                  product screen with the data already pulled. Only the result is confirmed here. */}
               <div className="mt-4">
-                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                  Buyer GLID (demo prefill)
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={glidInput}
-                    onChange={(e) => setGlidInput(e.target.value.replace(/[^0-9]/g, ''))}
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleGlidFetch(); }}
-                    placeholder="e.g., 267885237"
-                    className="flex-1 min-w-0 border border-gray-200 rounded-xl px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleGlidFetch}
-                    disabled={enrichLoading || !glidInput.trim()}
-                    className="px-4 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-900 disabled:opacity-50"
-                  >
-                    {enrichLoading ? '…' : 'Pull'}
-                  </button>
-                </div>
-                {debug && (
-                  <label className="flex items-center gap-1.5 mt-1.5 text-[11px] text-purple-700 cursor-pointer select-none">
-                    <input type="checkbox" checked={ignoreTwin} onChange={(e) => setIgnoreTwin(e.target.checked)} className="accent-purple-600" />
-                    🧪 Ignore Twin (cold run — skip persona/concierge while testing)
-                  </label>
+                {enrichLoading && (
+                  <p className="text-[11px] text-gray-400 flex items-center gap-1.5">
+                    <span className="w-3 h-3 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />
+                    Pulling buyer history…
+                  </p>
                 )}
                 {enrichment?.buyer && (
                   <p className="text-[11px] text-green-600 mt-1.5">
@@ -5596,8 +6139,8 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
                     {enrichment.categories?.length ? ` · ${enrichment.categories.length} prior cats` : ''}
                   </p>
                 )}
-                {/* Debug: full raw fetch dump — audit every source BEFORE the spec step. */}
-                {debug && enrichmentRaw != null && <div className="mt-3">{renderRawFetchDump()}</div>}
+                {/* Pulled-data debug (raw dump + Twin/Dossier/Pipeline/External/LLM/Ledger) now lives in the
+                    step-0 STAGING view (landing "Pull"), not on the product screen. */}
               </div>
 
               {/* P (Quick Re-post): "Buy again" cards — appear once a GLID with prior requirements is pulled. */}
@@ -5869,10 +6412,10 @@ export default function RFQModalV3({ onClose, variantLabel }: Props) {
                       setVoiceTarget('assist');
                       setShowVoiceRecorder(true);
                     }}
-                    className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 shrink-0"
-                    aria-label="Speak your requirement"
+                    className="flex items-center justify-center px-3 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 shrink-0"
+                    aria-label="Speak your requirement" title="Speak"
                   >
-                    <Mic size={15} /> Speak
+                    <Mic size={18} />
                   </button>
                   <button
                     onClick={() => {

@@ -106,6 +106,22 @@ export interface BuyerProfile {
   summary?: string; // one-line buyer summary for the seller
   tags?: string[]; // short behaviour tags
   confidence?: number; // 0-1 overall confidence in the deduction
+  // P0 Nature engine (Tier-2 structural inference). Institution type from the email domain — a
+  // first-party signal. Evidence-gated {value, confidence, evidence} so the consume-gate can trust it.
+  nature?: string; // e.g. "Academic / Research Institution" · "Government / PSU" · "Corporate / Business"
+  natureConfidence?: number; // 0-100
+  natureEvidence?: string[];
+  // P1 Authority engine (Tier-2 structural inference). Buyer's role/seniority from their DESIGNATION
+  // — a first-party signal. Evidence-gated, anti-hallucination: only what the title PROVES (a
+  // "Professor" is a Researcher, never auto a Decision-Maker; "Purchase Manager" is Procurement).
+  authority?: string; // human label: "Decision-Maker" · "Procurement" · "Researcher" · "Influencer"
+  authorityRole?: string; // machine key: decision_maker | procurement | researcher | influencer
+  authorityConfidence?: number; // 0-100
+  authorityEvidence?: string[];
+  // P2 Procurement Model (persistent) — HOW this buyer procures, across requirements (a PRIOR, not
+  // today's order). LLM-derived from history; the per-order requirementMode still OUTRANKS it.
+  procurementModel?: string; // Project-based | Recurring Supply | Capex | Maintenance/MRO | Replacement | Expansion
+  procurementModelConfidence?: number; // 0-100
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -114,7 +130,10 @@ export interface BuyerProfile {
 // RFQ is its first consumer." Each inferred trait carries an EVIDENCE LEDGER so
 // every deduction is explainable + auditable — never a black box.
 // ════════════════════════════════════════════════════════════════════════════
-export type TwinSource = 'pns' | 'whatsapp' | 'csl' | 'bl_history' | 'isq' | 'profile';
+// 'rfq_session' = first-party behaviour OBSERVED while the buyer filled the RFQ (BTE-v1.3).
+// It is source-separated from the 6 historical sources so we never confuse what we SAW the
+// buyer do now with what we INFERRED from their past.
+export type TwinSource = 'pns' | 'whatsapp' | 'csl' | 'bl_history' | 'isq' | 'profile' | 'rfq_session';
 export interface TwinEvidence {
   source: TwinSource;
   date: string; // ISO/display date, or '' if the source carries no timestamp
@@ -193,7 +212,144 @@ export interface BuyerTwin {
     // Stub for downstream Matchmaking/Recommendations — what the buyer ultimately sources for.
     attribution_confidence: { inferred_product_mapping: string | null; confidence: number };
   };
+  // BTE-v1.3 — PRESENT behaviour, OBSERVED while the buyer fills the RFQ (not history-inferred).
+  // Kept as its own layer so the seam between "what we saw them do NOW" and "what we inferred
+  // from the PAST" is never blurred. DESCRIBES the buyer (lowest in the decision hierarchy:
+  // Current Requirement > Mode > Intent > Verified > Persona/behaviour) — it never originates or
+  // overrides the current requirement. Strengthens across sessions (session_count → stability).
+  observed_session_behavior?: ObservedSessionBehavior;
+  // OBSERVED external footprint (mobile-keyed lookups — Befisc identity + Sign3 digital footprint +
+  // World). Attached to the Twin for visibility/persistence, but OBSERVED-only — NEVER a planning
+  // input (a lookup can be wrong/stale; it enriches the buyer model, it does not drive specs).
+  observed_external?: ObservedExternal;
   summary: string; // one-line, seller-valuable, no PII
+}
+
+export interface ObservedExternal {
+  fetched_at: string;
+  befisc?: { name?: string; pan?: string; income?: string; dob?: string; gender?: string; age?: string; altPhones?: number; email?: string; address?: string };
+  sign3?: { socialProfiles?: number; operator?: string; breaches?: number; platforms?: string[]; linked?: string };
+  world?: { summary?: string; confidence?: number };
+  notes?: string[]; // e.g. "Befisc: Source down (302)"
+}
+
+// ── BTE-v1.3: observed in-session RFQ-filling behaviour ───────────────────────
+// Every trait carries receipts (rfq_session evidence) and a MODEST confidence — a single
+// session is weak evidence, so confidence is capped and trait_stability stays low until the
+// same behaviour is seen again across sessions (mergeObservedBehavior raises it).
+export interface ObservedSessionBehavior {
+  spec_engagement?: InferredTrait;     // High/Medium/Low — hands-on & spec-literate vs delegates detail to seller
+  flexibility?: InferredTrait;         // High/Medium — removed specs (×) → open to seller options on those dims
+  question_engagement?: InferredTrait; // High/Low — answers the why/persona questions vs skips (transactional)
+  urgency_posture?: InferredTrait;     // Immediate/Planned/Flexible — from the delivery-timeline pick
+  commercial_posture?: InferredTrait;  // Advance-led/Credit-seeking/COD/Finance-seeking — from the payment pick
+  independence?: InferredTrait;        // High/Medium — overrode AI-suggested spec(s); own spec knowledge
+  session_count: number;               // how many RFQ sessions this behaviour has been observed across
+  observed_at: string;                 // ISO of the latest observation
+}
+
+// Pure, generic distiller: in-session RFQ-filling metrics → observed behavioural traits.
+// NO category literals — only generic ratios/counts and the form's own universal logistics
+// enums (delivery/payment). Exported so the harness and the proxy share one implementation.
+export interface SessionBehaviorInput {
+  specsFilledByUser: number;   // specs the buyer set/overrode by hand
+  specsAvailable: number;      // category (ISQ) specs on offer
+  specsOverridden: number;     // AI-suggested specs the buyer REPLACED with their own value (deduped)
+  specsRemoved: number;        // specs the buyer explicitly removed (×)
+  personaQsAnswered: number;   // why/persona/intent questions answered
+  personaQsSkipped: number;    // why/persona/intent questions skipped
+  deliveryTimeline?: string;   // raw form value (universal enum)
+  paymentTerms?: string;       // raw form value (universal enum)
+  observedAt: string;          // ISO timestamp (injected — keeps the fn pure/testable)
+}
+export function distillSessionBehavior(inp: SessionBehaviorInput): ObservedSessionBehavior {
+  const ev = (signal: string): TwinEvidence[] => [{ source: 'rfq_session', date: inp.observedAt.slice(0, 10), signal }];
+  const trait = (value: string, confidence: number, stability: number, signal: string, contradictions = 0): InferredTrait =>
+    ({ value, confidence: Math.min(60, Math.max(0, Math.round(confidence))), trait_stability: Math.min(60, Math.max(0, Math.round(stability))), contradictions_count: contradictions, last_seen: inp.observedAt.slice(0, 10), evidence: ev(signal) });
+  const out: ObservedSessionBehavior = { session_count: 1, observed_at: inp.observedAt };
+
+  // spec_engagement — how hands-on the buyer is with spec detail. Ratio of specs they filled
+  // by hand (+ persona answers) against what was on offer. More specs available ⇒ more confident.
+  const ratio = inp.specsAvailable > 0 ? inp.specsFilledByUser / inp.specsAvailable : 0;
+  const handsOn = inp.specsFilledByUser + inp.personaQsAnswered;
+  if (handsOn >= 1) {
+    const conf = 35 + Math.min(20, inp.specsAvailable * 2); // up to ~55 with a rich spec set
+    const sig = `Filled ${inp.specsFilledByUser}/${inp.specsAvailable} specs by hand + answered ${inp.personaQsAnswered} detail question(s)`;
+    if (ratio >= 0.5 || inp.specsFilledByUser >= 6) out.spec_engagement = trait('High', conf, 30, sig);
+    else if (ratio >= 0.2 || inp.specsFilledByUser >= 2) out.spec_engagement = trait('Medium', conf - 5, 28, sig);
+    else out.spec_engagement = trait('Low', conf - 10, 26, `${sig} — delegates spec detail to the seller`);
+  }
+
+  // flexibility — removing a spec (×) is an explicit "this dimension isn't a hard constraint for me".
+  if (inp.specsRemoved >= 1) {
+    out.flexibility = trait(inp.specsRemoved >= 2 ? 'High' : 'Medium', 30 + inp.specsRemoved * 6, 28,
+      `Removed ${inp.specsRemoved} spec(s) (×) — open to seller options on those dimensions`);
+  }
+
+  // question_engagement — answers the why/persona questions vs skips them (low patience / transactional).
+  const qTotal = inp.personaQsAnswered + inp.personaQsSkipped;
+  if (qTotal >= 1) {
+    const sig = `Answered ${inp.personaQsAnswered}, skipped ${inp.personaQsSkipped} of the why/persona question(s)`;
+    if (inp.personaQsSkipped > 0 && inp.personaQsAnswered === 0) out.question_engagement = trait('Low', 40, 30, `${sig} — transactional / time-pressed; ask less`);
+    else if (inp.personaQsAnswered >= 2 && inp.personaQsSkipped === 0) out.question_engagement = trait('High', 45, 32, `${sig} — cooperative`);
+    else out.question_engagement = trait('Medium', 38, 28, sig);
+  }
+
+  // urgency_posture — interprets the universal delivery-timeline enum (generic keyword, not a category).
+  const dt = (inp.deliveryTimeline || '').toLowerCase();
+  if (dt) {
+    const val = /immediate|urgent|today|asap|24 ?h|same.?day/.test(dt) ? 'Immediate'
+      : /flex|no rush|anytime|whenever/.test(dt) ? 'Flexible' : 'Planned';
+    out.urgency_posture = trait(val, 50, 35, `Chose delivery: "${inp.deliveryTimeline}"`);
+  }
+
+  // commercial_posture — interprets the universal payment-terms enum.
+  const pt = (inp.paymentTerms || '').toLowerCase();
+  if (pt) {
+    const val = /advance/.test(pt) ? 'Advance-led'
+      : /credit|post.?delivery|net ?\d/.test(pt) ? 'Credit-seeking'
+      : /loan|finance|emi/.test(pt) ? 'Finance-seeking'
+      : /cod|cash/.test(pt) ? 'COD' : 'Stated';
+    out.commercial_posture = trait(val, 50, 35, `Chose payment: "${inp.paymentTerms}"`);
+  }
+
+  // independence — the buyer REPLACED AI-suggested spec(s) with their own value. A clean,
+  // keystroke-safe "I know my spec better than your guess" signal (deduped per spec). Only emits
+  // on an actual override; 0 overrides is ambiguous (accepted, or no suggestion existed) ⇒ omit.
+  if (inp.specsOverridden >= 1) {
+    out.independence = trait(inp.specsOverridden >= 2 ? 'High' : 'Medium', 35 + inp.specsOverridden * 6, 28,
+      `Overrode ${inp.specsOverridden} AI-suggested spec(s) with own value — strong own spec knowledge`);
+  }
+
+  return out;
+}
+
+// Merge a PRIOR observation (e.g. from a previous session) with the CURRENT one. Re-seeing the
+// SAME value raises stability/confidence (the trait is consistent over time); a DIFFERENT value
+// keeps the most recent and records a contradiction (the trait is volatile). Prior traits not
+// re-observed this session are CARRIED FORWARD (still behaviour we have). This is the flywheel:
+// every RFQ makes the next read a little stronger. Pure ⇒ harness-tested.
+export function mergeObservedBehavior(prior: ObservedSessionBehavior | null | undefined, curr: ObservedSessionBehavior): ObservedSessionBehavior {
+  if (!prior) return curr;
+  const keys = ['spec_engagement', 'flexibility', 'question_engagement', 'urgency_posture', 'commercial_posture', 'independence'] as const;
+  const merged: ObservedSessionBehavior = { session_count: (prior.session_count || 1) + 1, observed_at: curr.observed_at };
+  for (const k of keys) {
+    const p = prior[k]; const c = curr[k];
+    if (p && c) {
+      const same = String(p.value) === String(c.value);
+      merged[k] = {
+        value: c.value, // most recent wins
+        confidence: Math.min(75, Math.round(same ? Math.max(p.confidence, c.confidence) + 8 : (p.confidence + c.confidence) / 2)),
+        trait_stability: same ? Math.min(85, p.trait_stability + 15) : Math.max(20, p.trait_stability - 12),
+        contradictions_count: p.contradictions_count + (same ? 0 : 1),
+        last_seen: c.last_seen,
+        evidence: [...p.evidence, ...c.evidence].slice(-6),
+      };
+    } else {
+      merged[k] = c || p; // carry forward whichever side has it
+    }
+  }
+  return merged;
 }
 
 // ── SERVER-SIDE ONLY ──────────────────────────────────────────────────────────

@@ -469,7 +469,8 @@ export async function planRequirement(args: {
     twinBlock += `Open unknowns to PRIORITISE (ask only the ones relevant to THIS product, as chips): ${tw.unknowns.slice(0, 8).join(', ')}.\n`;
   }
   const bpfLine = bpf && Object.keys(bpf).length
-    ? [bpf.persona, bpf.maturity, bpf.sourcingStyle, bpf.buyingPattern, bpf.decisionStyle,
+    ? [bpf.nature && `Nature: ${bpf.nature}`, bpf.authority && `Authority: ${bpf.authority}`, bpf.procurementModel && `Procurement model: ${bpf.procurementModel}`,
+       bpf.persona, bpf.maturity, bpf.sourcingStyle, bpf.buyingPattern, bpf.decisionStyle,
        bpf.infoSeeking && `info-seeking ${bpf.infoSeeking}`, bpf.supplierPreference, bpf.localityPreference,
        bpf.engagement, bpf.responseSensitivity, bpf.multiSku ? 'multi-SKU' : '', bpf.summary]
         .filter(Boolean).join(' · ')
@@ -486,7 +487,7 @@ Quantity: ${args.quantity || '?'} ${args.unit || ''}
 Buyer use-case (if any): "${args.application || ''}"
 ${args.buyerKind ? `Who's buying: ${args.buyerKind === 'personal' ? 'PERSONAL / individual end-user — keep it short and simple, NO firm/GST/credit/cadence questions, fewer cards, consumer language and pack sizes.' : 'BUSINESS buyer — scale (volume/cadence), credit/payment terms, and bulk/commercial signals are fair game.'}` : ''}
 Category ISQ spec fields WITH options — REFERENCE ONLY (the spec dimension a seller expects; NOT the goal): ${JSON.stringify(args.isqSpecsWithOptions)}
-${args.prior ? `\nBUYER HISTORY (from this buyer's PRIOR calls/RFQs in this or a related category — they ALREADY told us these). USE IT: pre-rank specs the buyer cared about to the top of specOrder; REUSE the seller's real questions; infer persona from it; and do NOT re-ask anything already known here.\n  persona: ${args.prior.persona || '?'}\n  specs the buyer already gave: ${JSON.stringify(args.prior.knownSpecs || {})}\n  questions the seller actually asked this buyer: ${JSON.stringify(args.prior.sellerQuestions || [])}\n  prior RFQ answers: ${JSON.stringify(args.prior.isqAnswers || {})}\n` : ''}${bpfLine ? `\nPERSISTENT BUYER PROFILE (WHO this buyer is, across all requirements — high signal): ${bpfLine}.\nUSE IT to shape the plan: a LOCAL-ONLY buyer → a supply-radius/visit question; CATALOG/IMAGE buyer → offer to share catalog, ask for a reference photo; MULTI-SKU TRADER/WHOLESALER → cadence + credit + bulk; LOW DELAY TOLERANCE → flag urgency; SETUP-PHASE → installation/turnkey. Bias personaOptions toward this persona, and rank specs this buyer-type cares about first. Do NOT ask anything this profile already answers.\nBUT — DECISION HIERARCHY: the CURRENT ORDER MODE (in the use-case above) OUTRANKS this persona for THIS requirement. A one-off / sample / emergency order gets one-off-appropriate questions even for a habitual bulk/credit buyer; the persona is a PRIOR, never the dominant signal.\n` : ''}
+${args.prior ? `\nBUYER HISTORY (from this buyer's PRIOR calls/RFQs in this or a related category — they ALREADY told us these). USE IT: pre-rank specs the buyer cared about to the top of specOrder; REUSE the seller's real questions; infer persona from it; and do NOT re-ask anything already known here.\n  persona: ${args.prior.persona || '?'}\n  specs the buyer already gave: ${JSON.stringify(args.prior.knownSpecs || {})}\n  questions the seller actually asked this buyer: ${JSON.stringify(args.prior.sellerQuestions || [])}\n  prior RFQ answers: ${JSON.stringify(args.prior.isqAnswers || {})}\n` : ''}${bpfLine ? `\nPERSISTENT BUYER PROFILE (WHO this buyer is, across all requirements — high signal): ${bpfLine}.\nUSE IT to shape the plan: an ACADEMIC / GOVERNMENT / INSTITUTIONAL Nature → research / institutional procurement (spec-precise, advisory, likely a PO / tender / grant process) — bias personaOptions to ["Research Lab","Institution / Dept","Faculty / R&D","Procurement Cell"] and NEVER ask resale / credit-trader / bulk-stockist questions; a LOCAL-ONLY buyer → a supply-radius/visit question; CATALOG/IMAGE buyer → offer to share catalog, ask for a reference photo; MULTI-SKU TRADER/WHOLESALER → cadence + credit + bulk; LOW DELAY TOLERANCE → flag urgency; SETUP-PHASE → installation/turnkey. Bias personaOptions toward this persona, and rank specs this buyer-type cares about first. Do NOT ask anything this profile already answers.\nAUTHORITY (role in the buying process, from the buyer's designation): a DECISION-MAKER (owns budget) → commercial terms / pricing / a direct close are fair game; a PROCUREMENT role → a PO / rate-contract / tender flow (MOQ, payment terms, vendor compliance) — do NOT pitch as if they are the end-user; a RESEARCHER / technical role → be SPEC-PRECISE and advisory, AVOID hard commercial / credit pressure (they may not control the budget); an INFLUENCER → lead with technical fit, commercials get escalated not closed. NEVER invent authority the title does not prove. The PERSISTENT PROCUREMENT MODEL (Project / Recurring / Capex / Maintenance / Replacement / Expansion) is a PRIOR — let it bias cadence / turnkey / spares framing, but it NEVER overrides the current order mode.\nBUT — DECISION HIERARCHY: the CURRENT ORDER MODE (in the use-case above) OUTRANKS this persona for THIS requirement. A one-off / sample / emergency order gets one-off-appropriate questions even for a habitual bulk/credit buyer; the persona is a PRIOR, never the dominant signal.\n` : ''}
 ${twinBlock}Think about how THIS trade actually sells, then produce a PLAN:
 1. "archetype" — classify by HOW THE TRADE SELLS, never by price or bulk:
    • commodity = standard catalog goods sold by spec/grade (resin, film, valves, fasteners — AND furniture, gifts, stationery, consumables, even in bulk).
@@ -732,6 +733,7 @@ Return ONLY JSON. For EACH field pick EXACTLY ONE value from its list — NEVER 
   "maturity": "<one of: New Buyer, Existing Buyer, Repeat Buyer, Business Setup Phase, Execution Phase>",
   "sourcingStyle": "<one of: catalog_driven, spec_driven, brand_driven, application_driven>",
   "buyingPattern": "<one of: trial_first, bulk_first, inventory_builder, one_time_capex, repeat_procurement>",
+  "procurementModel": "<the buyer's PERSISTENT procurement model across requirements — one of: Project-based, Recurring Supply, Capex, Maintenance/MRO, Replacement, Expansion, Unknown>",
   "decisionStyle": "<one of: Needs Guidance, Self Driven, Hybrid>",
   "infoSeeking": "<one of: Low, Medium, High>",
   "supplierPreference": "<one of: Manufacturer Preferred, Trader Preferred, No Preference>",
@@ -743,7 +745,8 @@ Return ONLY JSON. For EACH field pick EXACTLY ONE value from its list — NEVER 
   "tags": ["<short>","<behaviour>","<tags>"],
   "confidence": <a number from 0 to 1>
 }
-Evidence cues: many WhatsApp messages → WhatsApp Friendly; asks for images/catalog → Image Sharing Buyer; wants factory visit / local area → Local Only; "waited, bought elsewhere" → Low Tolerance For Delay; >1 distinct category → multiSku true; machine/setup → Business Setup Phase / one_time_capex.`;
+Evidence cues: many WhatsApp messages → WhatsApp Friendly; asks for images/catalog → Image Sharing Buyer; wants factory visit / local area → Local Only; "waited, bought elsewhere" → Low Tolerance For Delay; >1 distinct category → multiSku true; machine/setup → Business Setup Phase / one_time_capex.
+Procurement-model cues (persistent pattern, NOT today's order): one-off build/site → Project-based; steady repeat buying of the same goods → Recurring Supply; big one-time machinery/plant → Capex; spares/consumables to keep things running → Maintenance/MRO; replacing worn/old equipment → Replacement; adding capacity/new line → Expansion. Pick "Unknown" if the history doesn't show a clear pattern — do NOT guess.`;
   try {
     const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 700, label: 'deriveBuyerProfile' });
     const p = JSON.parse(text) as Record<string, unknown>;
@@ -761,6 +764,14 @@ Evidence cues: many WhatsApp messages → WhatsApp Friendly; asks for images/cat
       maturity: s(p.maturity),
       sourcingStyle: s(p.sourcingStyle),
       buyingPattern: s(p.buyingPattern),
+      // P2 — persistent procurement model. Reject "Unknown" (the explicit no-signal value) so we
+      // never stamp a guess; confidence rides the overall profile confidence (same digest evidence).
+      ...(() => {
+        const pm = s(p.procurementModel);
+        if (!pm || /^unknown$/i.test(pm)) return {};
+        const oc = typeof p.confidence === 'number' ? Math.round(Math.max(0, Math.min(1, p.confidence)) * 100) : 60;
+        return { procurementModel: pm, procurementModelConfidence: oc };
+      })(),
       decisionStyle: s(p.decisionStyle),
       infoSeeking: lvl(p.infoSeeking) as BuyerProfile['infoSeeking'],
       supplierPreference: s(p.supplierPreference),

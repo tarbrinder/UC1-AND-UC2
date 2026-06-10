@@ -72,5 +72,17 @@ ok('units + qty + unit → ready', qtyReady(3, '100', 'Tonne') === true);
 ok('units + qty, no unit → NOT ready', qtyReady(3, '100', '') === false);
 ok('units + unit, no qty → NOT ready', qtyReady(3, '', 'Tonne') === false);
 
-console.log(`\nrequirementmodetest (R v2 modes + hierarchy lean + T3 nudge + T1 gate): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// ── G1 HEADLINE FIX: the off-profile recurs guard (mirrors the `recurs` computation in RFQModalV3) ──
+// The "Repeat Buyer → Recurring → Credit" hallucination: a buyer's PERSONA pattern must NOT make an
+// UNRELATED (off-profile) current order recurring. Re-post + current-product overlap still count.
+const computeRecurs = (repost, repeatOverlap, personaPattern, offProfile) =>
+  !!repost || !!repeatOverlap || (!offProfile && /repeat_procurement|inventory_builder/.test(personaPattern || ''));
+ok('G1: off-profile + persona=repeat_procurement → recurs FALSE (LED for a notebook mfr)', computeRecurs(false, false, 'repeat_procurement', true) === false);
+ok('G1: off-profile bulk qty → mode bulk NOT recurring (the Jaiveer LED / Tarbrinder tyre fix)', requirementMode('111', 'Piece', 'commodity', '', computeRecurs(false, false, 'repeat_procurement', true)).mode === 'bulk');
+ok('G1: off-profile → no credit lean (mode bulk → either, not credit)', requirementMode('111', 'Piece', 'commodity', '', computeRecurs(false, false, 'repeat_procurement', true)).lean !== 'credit');
+ok('G1: ON-profile + persona=repeat → recurs TRUE (still consumed when relevant)', computeRecurs(false, false, 'repeat_procurement', false) === true);
+ok('G1: re-post always recurs (current-order signal, even if off-profile flag set)', computeRecurs(true, false, '', true) === true);
+ok('G1: current-product repeat-overlap recurs (it IS on-product)', computeRecurs(false, true, '', true) === true);
+
+console.log(`\nrequirementmodetest (R v2 modes + hierarchy lean + T3 nudge + T1 gate + G1 off-profile guard): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);
