@@ -459,7 +459,18 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           <div className="space-y-0.5">
             {steps.map((r, i) => (
               <div key={i} className="text-gray-600 leading-snug">• {r.claim}
-                {(r.evidence || []).map((id) => (<button key={id} type="button" onClick={() => jumpToFact(id)} title="jump to this source line" className="ml-1 inline-flex items-baseline gap-0.5 rounded px-1 text-[9.5px] text-indigo-500 hover:bg-indigo-50 hover:text-indigo-700"><span className="font-mono">[{id}]</span><span className="text-gray-400">{evMapAll.has(id) ? shortNode(id) : '⚠'}</span><span>↗</span></button>))}
+                {(r.evidence || []).map((id) => { const e = evMapAll.get(id); return (
+                  <details key={id} className="inline-block align-baseline ml-1">
+                    <summary className="cursor-pointer list-none inline-flex items-baseline gap-0.5 rounded px-1 text-[9.5px] text-indigo-500 hover:bg-indigo-50 hover:text-indigo-700" title="show the exact line sent to the LLM"><span className="font-mono">[{id}]</span><span className="text-gray-400">{e ? shortNode(id) : '⚠'}</span><span>▾</span></summary>
+                    <div className="mt-0.5 rounded bg-indigo-50/70 border border-indigo-200 p-1.5 text-[10px] text-gray-700 not-italic font-normal">
+                      {e ? (<>
+                        <div className="text-gray-500">{e.node}{e.tag ? <span className="text-gray-400"> · {e.tag}</span> : null} <span className="text-gray-300">(exact LLM-input line)</span></div>
+                        <div className="font-mono text-gray-800 break-words mt-0.5">“{e.raw}”</div>
+                        <button type="button" onClick={() => jumpToFact(id)} className="mt-1 text-[9px] text-indigo-400 hover:text-indigo-600 hover:underline">↗ also scroll to it in the L4 raw prompt</button>
+                      </>) : <span className="text-rose-500">[{id}] is NOT in the evidence bundle sent to the LLM — likely a hallucinated citation</span>}
+                    </div>
+                  </details>
+                ); })}
               </div>
             ))}
           </div>
