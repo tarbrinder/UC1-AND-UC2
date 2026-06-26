@@ -13,7 +13,7 @@ Data priority: **Tier-1 Procurement** (GST/HSN/NIC/Udyam/turnover) ≫ **Tier-2 
 
 ## Auth — CORRECTED: two separate services (resolved live)
 The earlier `Authorization: Basic` confusion is resolved — it was a mislabeled smartauth attempt. The real model, both **verified working**:
-- **Befisc** = `https://prod.smartauth.co/<code>`, header **`authkey: BRLN0P7NRSLVD6J`** → Profile Advance (`C9S1`, identity), Udyam (`TGAG`), GST (codes unknown). ✅ authenticates.
+- **Befisc** = `https://prod.smartauth.co/<code>`, header **`authkey: <BEFISC_AUTHKEY — redacted; see .env>`** → Profile Advance (`C9S1`, identity), Udyam (`TGAG`), GST (codes unknown). ✅ authenticates.
 - **Sign3** = `https://you.sign3.in/v1/persona`, header **`Authorization: Bearer …`**, body `{"phone"}` — a **separate** service. ✅ `status 2000 SUCCESS` (`footprint=established` on probe).
 
 ⚠ **Sign3 is Tier-3 SURVEILLANCE data** (social-media/dating-site presence, data-breach history, linked personal emails) — **~zero RFQ value + high DPDP risk**. The sandbox extracts ONLY a coarse non-identifying footprint bucket and **discards** accounts/breaches/emails/names. **Recommendation: do NOT feed Sign3 persona into the Twin** (legal/privacy should decide whether to use it at all). Both *working* APIs are Tier-3 identity; the high-value **procurement** chain (GST→HSN→Udyam) is still blocked on endpoint codes + Udyam privilege — so procurement value remains unproven (~20%).

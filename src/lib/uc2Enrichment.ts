@@ -49,7 +49,7 @@ export function buildUC2Enrichment(input: UC2Input): UC2Enrichment {
 // · Specs. Buyer PROFILE is NOT re-derived — passed as CONTEXT (cite its [fN]). Every change must cite ≥1 buyer
 // signal id from the SAME fN universe the L5 twin uses (synthCtx.bundle.evidence). Confidence gate + hallucination
 // guard ported from offerEnrich; output projects to the UC2Enrichment render contract (L6) + a richer debug shape.
-export const UC2_PROMPT_VERSION = 'uc2Enrich.v2'; // v2: pure-LLM (no deterministic merges) · NEVER overwrite location + ADD Sourcing Preference · force PNS/WhatsApp hero signals (price·qty·GSM·typed enquiry) into specs · surface quantity conflict (recommend lower trial) · age/gender context
+export const UC2_PROMPT_VERSION = 'uc2Enrich.v3'; // v3: PRODUCT-LINE LOCK (machine lead ≠ paper lead — never retitle/recategorise across product lines or graft cross-product specs) + category zero-overlap merge guard. v2: pure-LLM · location-lock + Sourcing Preference · PNS hero→specs · qty-conflict · age/gender
 
 export interface UC2Evidence { evidence_id: string; node: string; tag?: string; raw: string } // mirror synthCtx.bundle.evidence
 export interface UC2Context {
@@ -80,10 +80,18 @@ export const UC2_ENRICH_SYSTEM = [
   'PNS call narrative, prior requirements). Reconstruct what the buyer ACTUALLY wants — NOT what the form captured.',
   '',
   'FIELD RULES:',
-  '- TITLE: fix ONLY a term the evidence DIRECTLY contradicts (replace just the conflicting term, keep structure); OR',
-  '  enrich a 1-word / gibberish title from specs + products_of_interest into ≤6 words. Never append marketing words.',
-  '- CATEGORY: if the title clearly belongs to a DIFFERENT MCAT than recorded → corrected (give the right category).',
-  '  A sub-type / variant / component / accessory of the recorded category → kept. Gibberish category → corrected.',
+  '- PRODUCT-LINE LOCK (read FIRST — non-negotiable): a buyer often holds SEVERAL DISTINCT requirements at once — e.g. a',
+  '  "Notebook Making MACHINE" requirement AND a separate "Notebook RAW PAPER" requirement. You are enriching exactly ONE',
+  '  lead. NEVER retitle or recategorise THIS lead into a DIFFERENT product line, and NEVER graft another product line\'s',
+  '  specs onto it. A MACHINE lead gets machine specs (automation grade · components · cutting size); a RAW-MATERIAL lead',
+  '  gets material specs (GSM · grade · ₹-per-kg). Evidence about a DIFFERENT product than this lead is NOT this',
+  '  requirement — leave it for that lead. The "1300Pcs/Hr Notebook Making Machine" lead must stay a machine, not become paper.',
+  '- TITLE: fix ONLY a term the evidence DIRECTLY contradicts (replace just the conflicting term, keep structure) and ONLY',
+  '  within THIS lead\'s product line; OR enrich a 1-word / gibberish title from THIS lead\'s OWN specs into ≤6 words. NEVER',
+  '  switch the product (do NOT turn a "Notebook Making Machine" title into "Notebook Raw Material Paper").',
+  '- CATEGORY: correct ONLY a gibberish / clearly-wrong category to the RIGHT one for THIS lead\'s OWN product. A sub-type /',
+  '  variant / component / accessory of the recorded category → kept. NEVER change the category to a DIFFERENT product line',
+  '  (a machine category must not become a raw-material category, or vice-versa).',
   '- LOCATION (LOCKED — NEVER overwrite): the recorded operating/buyer city stays VERBATIM. NEVER emit a "corrected"',
   '  location that replaces the buyer\'s city with a seller / sourcing / call city (e.g. do NOT turn "Auraiya" into',
   '  "Kanpur"). Instead, when the buyer SOURCES from one or more different cities, ADD a spec named exactly',
@@ -97,11 +105,12 @@ export const UC2_ENRICH_SYSTEM = [
   '  do NOT silently keep one — emit the spec showing BOTH with a "(conflict — verify; recommend the lower trial)" note',
   '  and prefer the LOWER commitment (a trial / first order over bulk) as the recommended value.',
   '',
-  'DECISIVE PNS + WHATSAPP HERO SIGNALS (MUST integrate — never drop): spoken-call signals are the strongest. You MUST',
-  'reconcile every PNS / WhatsApp hero signal into the requirement specs when grounded: spoken TARGET PRICE (add a',
-  '"Target Price" spec, e.g. "₹45–52/kg"), spoken/typed QUANTITY, GSM / grade / dimensions stated on a call, the buyer\'s',
-  'INTENDED APPLICATION, and the WhatsApp TYPED ENQUIRY (e.g. "Notebook Copy Raw Material, 54/75 GSM"). If a hero signal',
-  'genuinely cannot be reconciled, it must still have been considered — never omit one silently.',
+  'DECISIVE PNS + WHATSAPP HERO SIGNALS (integrate ONLY when they pertain to THIS lead\'s product — respect the',
+  'PRODUCT-LINE LOCK): spoken-call signals are the strongest, but apply a hero signal to THIS lead ONLY if it describes',
+  'THIS lead\'s product. For a RAW-MATERIAL / paper lead: fold in spoken TARGET PRICE ("₹45–52/kg"), QUANTITY, GSM / grade,',
+  'INTENDED APPLICATION, and the WhatsApp TYPED ENQUIRY ("Notebook Copy Raw Material, 54/75 GSM"). For a MACHINE lead: do',
+  'NOT add paper price / GSM / grade — those belong to the SEPARATE raw-material requirement, not the machine. A hero',
+  'signal for a different product than this lead is left for that lead (never grafted on here).',
   '',
   'GUARDS (non-negotiable):',
   '- (none) / blank → NEVER invent a value; emit kind "kept".',
@@ -173,10 +182,15 @@ export function mergeUC2LLM(ctx: UC2Context, out: UC2LLMOut | null): UC2Result {
       // O28 LOCATION LOCK — never apply a location *overwrite*; the operating city is immutable. (A sourcing city
       // must arrive as an ADDED "Sourcing Preference" spec instead.) Demote any location 'corrected' to kept.
       const locationOverwrite = group === 'location' && kind === 'corrected';
+      // PRODUCT-LINE LOCK (backstop) — block a category "correction" that shares NO ≥4-char token with the recorded
+      // category: that's a product-line switch (e.g. "Notebook Making Machines" → "Raw Paper Material"), not a refinement.
+      const tok = (s: string): Set<string> => new Set((String(s || '').toLowerCase().match(/[a-z0-9]{4,}/g)) || []);
+      const recCat = tok(ctx.selReq.category || '');
+      const categorySwitch = group === 'category' && kind === 'corrected' && recCat.size > 0 && ![...tok(to)].some((t) => recCat.has(t));
       // hallucination guard + confidence gate: a change is APPLIED only when grounded AND conf ≥ LO and it has a value.
       const wantsChange = (kind === 'corrected' || kind === 'added') && !!to;
-      const applied = wantsChange && grounded && conf >= GATE_LO && !locationOverwrite;
-      const reason = locationOverwrite ? `${String(e.reason || '')} · [location-lock: never overwrite operating city — surface as Sourcing Preference]`.trim() : String(e.reason || '');
+      const applied = wantsChange && grounded && conf >= GATE_LO && !locationOverwrite && !categorySwitch;
+      const reason = `${String(e.reason || '')}${locationOverwrite ? ' · [location-lock: never overwrite operating city — surface as Sourcing Preference]' : ''}${categorySwitch ? ' · [product-line lock: category correction shares no token with the recorded product — blocked as a cross-product switch]' : ''}`.trim();
       editsFull.push({ field: e.field || group, group, kind: applied ? kind : (wantsChange ? 'kept' : kind), from, to, confidence: conf, grounded, applied, evidence: ev, reason });
     }
   }

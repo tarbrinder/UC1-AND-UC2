@@ -53,7 +53,8 @@ N_GST_RESOLVE = "gst-resolve"
 GST_URL_MOBILE = "https://prod.smartauth.co/JKSU"
 GST_URL_EMAIL  = "https://prod.smartauth.co/3WVY"
 GST_URL = GST_URL_MOBILE  # default url on the node; per-item url is set by expression
-GST_AUTHKEY = "BRLN0P7NRSLVD6J"  # owner-supplied; verified against befisc-fetch at build time
+import os
+GST_AUTHKEY = os.environ.get("GST_AUTHKEY", "<SET_GST_AUTHKEY>")  # redacted from source — export GST_AUTHKEY before running
 
 
 def load():

@@ -32,8 +32,11 @@ function mergeUC2(ctx, out) {
       const grounded = !!e.grounded && ev.length > 0;
       const to = String(e.to ?? e.value ?? ''); const from = String(e.from ?? '');
       const locationOverwrite = group === 'location' && kind === 'corrected'; // O28 — never overwrite the operating city
+      const tok = (s) => new Set((String(s || '').toLowerCase().match(/[a-z0-9]{4,}/g)) || []);
+      const recCat = tok(ctx.selReq && ctx.selReq.category); // product-line lock — block category switch across product lines
+      const categorySwitch = group === 'category' && kind === 'corrected' && recCat.size > 0 && ![...tok(to)].some((t) => recCat.has(t));
       const wantsChange = (kind === 'corrected' || kind === 'added') && !!to;
-      const applied = wantsChange && grounded && conf >= GATE_LO && !locationOverwrite;
+      const applied = wantsChange && grounded && conf >= GATE_LO && !locationOverwrite && !categorySwitch;
       editsFull.push({ field: e.field || group, group, kind: applied ? kind : (wantsChange ? 'kept' : kind), from, to, confidence: conf, grounded, applied, evidence: ev, reason: String(e.reason || '') });
     }
   }
@@ -91,6 +94,14 @@ const ok = (name, cond) => { if (cond) { pass++; console.log('  PASS', name); } 
 {
   const r = mergeUC2(ctx, { edits: [{ group: 'location', field: 'location', kind: 'corrected', from: 'Auraiya', to: 'Kanpur', confidence: 95, grounded: true, evidence_ids: ['f1'] }] });
   ok('location overwrite blocked (never applied)', r.edits[0].applied === false && r.edits[0].kind === 'kept');
+}
+// 9) PRODUCT-LINE LOCK — a category "correction" that shares NO token with the recorded product is a cross-product switch → blocked
+{
+  const ctxM = { evidence: ctx.evidence, selReq: { category: 'Notebook Making Machines' } };
+  const switched = mergeUC2(ctxM, { edits: [{ group: 'category', field: 'category', kind: 'corrected', from: 'Notebook Making Machines', to: 'Raw Paper Material', confidence: 90, grounded: true, evidence_ids: ['f1'] }] });
+  ok('cross-product category switch blocked (machine→paper)', switched.edits[0].applied === false && switched.edits[0].kind === 'kept');
+  const refined = mergeUC2(ctxM, { edits: [{ group: 'category', field: 'category', kind: 'corrected', from: 'Notebook Making Machines', to: 'Motorized Notebook Making Machine', confidence: 90, grounded: true, evidence_ids: ['f1'] }] });
+  ok('same-line category refinement still applies (shares token)', refined.edits[0].applied === true);
 }
 
 console.log(`\nUC2 enrichment harness: ${pass} passed · ${fail} failed`);

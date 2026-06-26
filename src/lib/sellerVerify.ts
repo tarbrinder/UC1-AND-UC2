@@ -22,12 +22,23 @@ export interface SellerVerifyState {
 // Fire the scrape job → returns the job id (or null on a shapeless response).
 export async function startSellerVerify(glid: string): Promise<string | null> {
   if (!KEY.trim()) return null;
-  const res = await fetch(api('/api/sellerverify/api/v2/seller/verify'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Gemini-Key': KEY },
-    body: JSON.stringify({ glid }),
-  });
-  if (!res.ok) throw new Error(`seller-verify init ${res.status}`);
+  let res: Response;
+  try {
+    // Fail fast (25s) instead of hanging ~75s on a 502. The verify call should return a job_id quickly.
+    res = await fetch(api('/api/sellerverify/api/v2/seller/verify'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Gemini-Key': KEY },
+      body: JSON.stringify({ glid }),
+      signal: AbortSignal.timeout(25000),
+    });
+  } catch (e) {
+    const t = e instanceof Error && e.name === 'TimeoutError';
+    throw new Error(`seller-verify init ${t ? 'timed out' : 'failed'} — scraper host (34.93.111.50) unreachable from this network (VPN/firewall?)`);
+  }
+  if (!res.ok) {
+    const hint = (res.status === 502 || res.status === 504) ? ' — host unreachable from this network (VPN/firewall?)' : res.status === 401 || res.status === 403 ? ' — X-Gemini-Key rejected (wrong key type?)' : '';
+    throw new Error(`seller-verify init ${res.status}${hint}`);
+  }
   const j = (await res.json().catch(() => ({}))) as { job_id?: string; jobId?: string; id?: string };
   return j.job_id || j.jobId || j.id || null;
 }

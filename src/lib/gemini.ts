@@ -60,7 +60,7 @@ const PROMPT_VER: Record<string, string> = {
   planRequirement: 'plan-v7', deriveIntent: 'intent-v5', refineQuestions: 'refine-v2',
   inferSpecsFromApplication: 'cascade-v3', deriveBuyerTwin: 'twin-v1.2', deriveBuyerProfile: 'profile-v1',
   getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1', extractBuyerProfile: 'extract-v4', // MUST mirror EXTRACT_PROMPT_VERSION (v4: removed repeat_buyer/next_best_seller_action/purchasing_power/urgency; added buyer_maturity/purchase_frequency/delivery_timeline/digital_footprint)
-  offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v2', // MUST mirror UC2_PROMPT_VERSION in uc2Enrichment.ts (v2: pure-LLM · location-lock + sourcing-preference · PNS-hero into specs · qty-conflict)
+  offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v3', // MUST mirror UC2_PROMPT_VERSION in uc2Enrichment.ts (v3: product-line lock — machine lead ≠ paper lead)
 };
 const promptVer = (label: string): string => PROMPT_VER[label] || PROMPTS_VERSION;
 

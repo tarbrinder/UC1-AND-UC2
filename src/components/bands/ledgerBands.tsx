@@ -310,10 +310,10 @@ const FILL_TONE: Record<string, { label: string; cls: string; dot: string }> = {
 const fillTone = (f?: string) => FILL_TONE[f || 'buyer'] || FILL_TONE.buyer;
 export interface L6Availability { key: string; label: string; present: boolean; verified: boolean; value: string; externalValue?: string; source: string; note: string }
 export interface L6ProfileRow { label: string; value: string; drill?: ReactNode }
-export interface L6BuyerDetails { name?: string; memberSince?: string; responseCalls?: number; responseReplies?: number; availability: L6Availability[]; profileRows: L6ProfileRow[] }
+export interface L6BuyerDetails { name?: string; memberSince?: string; responseCalls?: number; responseReplies?: number; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[] }
 
 // compact channel icons for the "Available" row (matches the classic Buylead-Details card)
-const AVAIL_ICON: Record<string, string> = { mobile: '📱', email: '✉️', address: '🏢', pan: '🪪', gst: '🧾', whatsapp: '💬' };
+const AVAIL_ICON: Record<string, string> = { mobile: '📱', email: '✉️', address: '🏢', pan: '🪪', gst: '🧾', whatsapp: '💬', name: '👤', age: '🎂' };
 
 // a clean "Label : value" row; clickable (reveals its drill) when a deduction/source exists, plain otherwise
 function DrillRow({ label, value, drill }: { label: ReactNode; value: ReactNode; drill?: ReactNode }) {
@@ -323,13 +323,13 @@ function DrillRow({ label, value, drill }: { label: ReactNode; value: ReactNode;
   );
 }
 
-export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, fields, offerEval, enrichControl, defaultOpen }: {
+export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, fields, offerEval, enrichControl, gstVerified, defaultOpen }: {
   picker?: ReactNode; selectedReq?: L6Requirement | null; uc2?: UC2Enrichment | null;
   productsOfInterest?: { value: string; changed: boolean; drill?: ReactNode } | null;
   requirementCount?: number; buyerDetails?: L6BuyerDetails | null; retailLead?: boolean;
   titleDrill?: ReactNode; locationDrill?: ReactNode;
   fields: OfferFieldRow[]; offerEval?: { groundedPct: number; hallucinations: number; verdict: string } | null;
-  enrichControl?: ReactNode; defaultOpen?: boolean;
+  enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[] } | null; defaultOpen?: boolean;
 }) {
   const ACTION_TONE: Record<string, string> = { kept: 'text-gray-400', corrected: 'text-amber-700', added: 'text-emerald-700', dropped: 'text-rose-600 line-through', suggested: 'text-sky-700' };
   const avail = (buyerDetails?.availability || []).filter((a) => a.present);
@@ -349,6 +349,18 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
       <div className="-mx-3 -mt-1 mb-3 px-4 py-2.5 bg-gradient-to-r from-blue-700 to-blue-500 rounded-t-lg flex items-center justify-between gap-2 flex-wrap">
         <span className="text-white font-bold text-[15px]">Buylead Details</span>
         <div className="flex items-center gap-2">
+          {/* GST Verified ribbon badge — shown ONLY when the GST node returned a GSTIN; expandable to the decode */}
+          {gstVerified && (
+            <details className="relative shrink-0">
+              <summary className="cursor-pointer list-none inline-flex items-center gap-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-300 px-2 py-0.5 text-[10px] font-bold">🧾 GST Verified{gstVerified.count > 1 ? ` (${gstVerified.count})` : ''} ▾</summary>
+              <div className="absolute right-0 mt-1 z-20 w-64 rounded-lg bg-white border border-emerald-200 shadow-lg p-2 text-[10.5px] text-gray-700 font-normal">
+                <div className="font-mono text-gray-800 break-all">{gstVerified.gstin}</div>
+                <div className="text-gray-500 mt-0.5">{gstVerified.state} · {gstVerified.entity}</div>
+                {gstVerified.list.length > 1 && <div className="mt-1 border-t border-gray-100 pt-1"><span className="text-gray-400">all GSTINs:</span> {gstVerified.list.map((g) => <div key={g} className="font-mono text-[9.5px] text-gray-600 break-all">{g}</div>)}</div>}
+                <div className="text-gray-400 mt-1">source: Mobile/Email→GST (KYB)</div>
+              </div>
+            </details>
+          )}
           {uc2 && (
             <div className="inline-flex rounded-md overflow-hidden border border-white/40 text-[10px] font-semibold shrink-0" title="UC2 — see the requirement before vs after AI enrichment/correction">
               <button type="button" onClick={() => setUc2Mode('original')} className={`px-2 py-0.5 ${!on ? 'bg-white text-blue-700' : 'text-white/90 hover:bg-white/10'}`}>Original</button>
@@ -430,7 +442,9 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
                 ))}
               </span>
             </div>
-            {/* buyer-profile findings — clean clickable rows right below Available */}
+            {/* Identity Confidence — trust signal about the anchors, pinned right below Available (owner) */}
+            {buyerDetails.identityConfidence && <DrillRow label={<>Identity Confidence{on && <NewTag />}</>} value={buyerDetails.identityConfidence.value || '—'} drill={buyerDetails.identityConfidence.drill} />}
+            {/* buyer-profile findings — clean clickable rows (value only; confidence% + LLM badge show on click) */}
             {buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<>{p.label}{on && <NewTag />}</>} value={p.value || '—'} drill={p.drill} />))}
             {retailLead && <div className="mt-3 inline-block rounded-md bg-amber-50 border border-amber-200 px-2.5 py-1 text-[12px] font-semibold text-amber-800">This might be a retail lead</div>}
           </div>

@@ -16,7 +16,7 @@
 // OR as a STANDALONE node (this whole file, "Run Once for Each Item") — wire Webhook → E3 → final Merge.
 
 const REDASH = 'https://redash.intermesh.net';
-const RKEY   = 'KHDBL787pd3sbkWyPo8Gs2KsE20DZA1AhQLZwjmE'; // ⚠ use the SAME user key your category node's RKEY uses;
+const RKEY   = '<REDASH_API_KEY>'; // ⚠ redacted from source — use the SAME user key your category node's RKEY uses;
                                                             //    the POST/poll endpoints need the user key, not a per-query key.
 const QUERY_ID = 12070;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
