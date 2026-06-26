@@ -22,7 +22,7 @@ const list = (o: Record<string, unknown>, ...keys: string[]): string[] => {
 };
 
 export interface MergedIdentity { name?: string; company?: string; city?: string; state?: string; address?: string; memberSince?: string; designation?: string; emails: string[]; mobiles: string[]; pan?: string; gst?: string }
-export interface MergedExternal { verifiedName?: string; verifiedNameConfidence?: number; pan?: string; pans: string[]; gender?: string; dob?: string; city?: string; state?: string; location?: string; incomeBand?: string; age?: string; socialPlatforms: string[]; socialPresenceCount?: number; emails: string[]; mobiles: string[] }
+export interface MergedExternal { verifiedName?: string; verifiedNameConfidence?: number; verifiedNameSource?: string; pan?: string; pans: string[]; gender?: string; dob?: string; city?: string; state?: string; location?: string; incomeBand?: string; age?: string; socialPlatforms: string[]; socialPresenceCount?: number; emails: string[]; mobiles: string[] }
 export interface AvailabilityRow { key: 'mobile' | 'email' | 'address' | 'pan' | 'gst'; label: string; present: boolean; verified: boolean; value: string; externalValue?: string; source: string; note: string }
 
 function richSources(rich: unknown): Record<string, unknown> {
@@ -71,6 +71,7 @@ export function externalFromMerged(rich: unknown): MergedExternal | null {
   return {
     verifiedName: pick(s, 'verified_name', 'name') || undefined,
     verifiedNameConfidence: bandConfidence(pick(s, 'verified_name_confidence', 'name_confidence')),
+    verifiedNameSource: pick(s, 'verified_name_source', 'name_source') || undefined,
     pan: pick(s, 'pan', 'pan_number') || undefined,
     pans: list(s, 'pans', 'pan', 'pan_number', 'pan_list'),
     gender: pick(s, 'gender') || undefined,
@@ -106,7 +107,9 @@ export function resolveAvailable(idn: MergedIdentity | null, ext: MergedExternal
 
   add('mobile', 'Mobile', idn?.mobiles[0] || '', ext?.mobiles[0] || '', !!idn?.mobiles[0] && !!ext?.mobiles[0] && digits(idn.mobiles[0]) === digits(ext.mobiles[0]));
   add('email', 'Email', idn?.emails[0] || '', ext?.emails[0] || '', !!idn?.emails[0] && !!ext?.emails[0] && lc(idn.emails[0]) === lc(ext.emails[0]));
-  add('address', 'Address', idnAddress, extLocation, !!idnAddress && !!extLocation && (lc(idnAddress).includes(lc(idn?.city || '')) && lc(extLocation).includes(lc(idn?.city || '')) && !!idn?.city));
+  // surface the MOST-COMPLETE address (Befisc full_address is far richer than the bare city/state)
+  const bestAddr = (extLocation && extLocation.length > idnAddress.length) ? extLocation : idnAddress;
+  add('address', 'Address', bestAddr, extLocation, !!idnAddress && !!extLocation && (lc(idnAddress).includes(lc(idn?.city || '')) && lc(extLocation).includes(lc(idn?.city || '')) && !!idn?.city));
   add('pan', 'PAN', idn?.pan || '', ext?.pan || '', !!idn?.pan && !!ext?.pan && lc(idn.pan) === lc(ext.pan));
   // GST is buyer-supplied only; external rarely carries it — verified only when the external PAN is embedded in the GSTIN (chars 3-12)
   const gstPanMatch = !!idn?.gst && !!ext?.pan && lc(idn.gst).includes(lc(ext.pan));
@@ -125,11 +128,14 @@ export function resolveBuyerName(idn: MergedIdentity | null, ext: MergedExternal
   const profile = (idn?.name || '').trim();
   const verified = (ext?.verifiedName || '').trim();
   const words = (s: string) => s.split(/\s+/).filter(Boolean).length;
+  // name the SPECIFIC external provider (Sign3 bank-verified vs Befisc) instead of a generic "External (verified)".
+  const vs = String(ext?.verifiedNameSource || '');
+  const extSrc = /sign3/i.test(vs) ? 'Sign3 (bank-verified)' : /befisc/i.test(vs) ? 'Befisc (verified)' : 'External (verified)';
   // candidate = the one with more words; tie → the verified one (it's bank-corroborated)
   let chosen = profile, src = 'Profile', conf = profile ? 55 : 0;
   if (verified && (words(verified) > words(profile) || (words(verified) === words(profile) && verified.length >= profile.length))) {
-    chosen = verified; src = 'External (verified)'; conf = ext?.verifiedNameConfidence ?? 80;
-  } else if (verified && !profile) { chosen = verified; src = 'External (verified)'; conf = ext?.verifiedNameConfidence ?? 80; }
+    chosen = verified; src = extSrc; conf = ext?.verifiedNameConfidence ?? 80;
+  } else if (verified && !profile) { chosen = verified; src = extSrc; conf = ext?.verifiedNameConfidence ?? 80; }
   if (!chosen) return null;
   // cross-source agreement (same surname token present in both) bumps confidence
   if (profile && verified && titleCase(profile).split(' ').some((t) => titleCase(verified).includes(t))) conf = Math.max(conf, 85);

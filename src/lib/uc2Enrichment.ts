@@ -9,8 +9,9 @@
 // GENERIC ONLY — never hardcode a category/spec name (owner rule); added specs are universal procurement
 // attributes, corrections are generic string normalisations or a passed-in alternate value.
 
-export interface UC2Edit { from: string; to: string; reason: string }                 // a corrected scalar field
-export interface UC2SpecEdit { k: string; kind: 'unchanged' | 'corrected' | 'added'; from?: string; to: string; reason?: string }
+import type { ReactNode } from 'react';
+export interface UC2Edit { from: string; to: string; reason: string; drill?: ReactNode }                 // a corrected scalar field (drill = the full rich reasoning, attached in the view layer)
+export interface UC2SpecEdit { k: string; kind: 'unchanged' | 'corrected' | 'added'; from?: string; to: string; reason?: string; drill?: ReactNode }
 export interface UC2Enrichment {
   isDummy: boolean;                       // true until the real enrichment LLM is wired
   summary: string;                        // one-line before→after headline
@@ -49,7 +50,7 @@ export function buildUC2Enrichment(input: UC2Input): UC2Enrichment {
 // · Specs. Buyer PROFILE is NOT re-derived — passed as CONTEXT (cite its [fN]). Every change must cite ≥1 buyer
 // signal id from the SAME fN universe the L5 twin uses (synthCtx.bundle.evidence). Confidence gate + hallucination
 // guard ported from offerEnrich; output projects to the UC2Enrichment render contract (L6) + a richer debug shape.
-export const UC2_PROMPT_VERSION = 'uc2Enrich.v3'; // v3: PRODUCT-LINE LOCK (machine lead ≠ paper lead — never retitle/recategorise across product lines or graft cross-product specs) + category zero-overlap merge guard. v2: pure-LLM · location-lock + Sourcing Preference · PNS hero→specs · qty-conflict · age/gender
+export const UC2_PROMPT_VERSION = 'uc2Enrich.v7'; // v7: CLEAN values ("to" = crisp value/range only; conflict/verify/recommend notes go in "reason"). v6: simple India-B2B English reasons/confidence text (professional, not casual). v5: plain-English first pass. v4: per-edit confidence_reason + to_100 (why this %, what would make it 100). v3: PRODUCT-LINE LOCK (machine lead ≠ paper lead — never retitle/recategorise across product lines or graft cross-product specs) + category zero-overlap merge guard. v2: pure-LLM · location-lock + Sourcing Preference · PNS hero→specs · qty-conflict · age/gender
 
 export interface UC2Evidence { evidence_id: string; node: string; tag?: string; raw: string } // mirror synthCtx.bundle.evidence
 export interface UC2Context {
@@ -61,9 +62,9 @@ export interface UC2Context {
   external?: { age?: string; gender?: string; incomeBand?: string }; // O36 — deterministic external context (Befisc) for the LLM's reasoning (e.g. young, first-venture)
 }
 // richer per-edit, surfaced in the UC2·debug band (confidence/grounded/evidence/reason)
-export interface UC2EditFull { field: string; group: 'title' | 'category' | 'location' | 'spec'; kind: 'kept' | 'corrected' | 'added'; from: string; to: string; confidence: number; grounded: boolean; applied: boolean; evidence: UC2Evidence[]; reason: string }
+export interface UC2EditFull { field: string; group: 'title' | 'category' | 'location' | 'spec'; kind: 'kept' | 'corrected' | 'added'; from: string; to: string; confidence: number; grounded: boolean; applied: boolean; evidence: UC2Evidence[]; reason: string; confidenceReason?: string; to100?: string }
 export interface UC2Eval { changed: number; corrected: number; added: number; groundedPct: number; hallucinations: number; leaks: number; llmApplied: boolean; verdict: 'strong' | 'mixed' | 'thin' | 'no-llm' }
-export interface UC2LLMField { field?: string; group?: string; action?: string; kind?: string; from?: string; value?: string; to?: string; confidence?: number; grounded?: boolean; evidence_ids?: string[]; reason?: string }
+export interface UC2LLMField { field?: string; group?: string; action?: string; kind?: string; from?: string; value?: string; to?: string; confidence?: number; grounded?: boolean; evidence_ids?: string[]; reason?: string; confidence_reason?: string; to_100?: string }
 export interface UC2LLMOut { edits: UC2LLMField[] }
 export interface UC2Result { enrichment: UC2Enrichment; edits: UC2EditFull[]; eval: UC2Eval; promptVersion: string }
 
@@ -102,8 +103,11 @@ export const UC2_ENRICH_SYSTEM = [
   '  evidence directly contradicts; (c) ADD a category-critical spec the buyer answered elsewhere or stated on a call —',
   '  the value MUST be evidence-cited; (d) if a spec varies across signals → output a RANGE; (e) QUANTITY CONFLICT: when',
   '  the posted quantity and a spoken/typed quantity diverge materially (e.g. 100000 kg posted vs 0.5–1 ton on a call),',
-  '  do NOT silently keep one — emit the spec showing BOTH with a "(conflict — verify; recommend the lower trial)" note',
-  '  and prefer the LOWER commitment (a trial / first order over bulk) as the recommended value.',
+  '  do NOT silently keep one — set "to" to the clean recommended value/range ONLY (prefer the LOWER commitment, a',
+  '  trial / first order over bulk, e.g. "0.5–1 ton (trial)"), and put the conflict explanation ("posted X vs spoken Y —',
+  '  verify; recommending the lower trial") in "reason", NOT inside "to".',
+  'CLEAN VALUES: "to" is the value/range a reader sees as the headline — keep it crisp (value, unit, range). ALL',
+  'commentary — conflicts, "verify", "recommend…", why-this-changed — belongs in "reason", never appended to "to".',
   '',
   'DECISIVE PNS + WHATSAPP HERO SIGNALS (integrate ONLY when they pertain to THIS lead\'s product — respect the',
   'PRODUCT-LINE LOCK): spoken-call signals are the strongest, but apply a hero signal to THIS lead ONLY if it describes',
@@ -120,11 +124,17 @@ export const UC2_ENRICH_SYSTEM = [
   '  ≥2 signals agree or one strong spoken (call) signal. No supporting signal → emit kind "kept" (do not change/add).',
   '- Conservative: when unsure, keep. Do NOT re-judge profile / selling-intent / PII (handled elsewhere).',
   '',
+  'CONFIDENCE = evidence quality + source authority (spoken PNS call & WhatsApp-from-buyer are strongest) + cross-source',
+  'agreement − contradictions − missing evidence. ≥70 only when ≥2 signals agree OR one strong spoken (call) signal.',
+  '',
   'OUTPUT — strict JSON, one entry per field you assessed or added, nothing else:',
   '{ "edits": [ { "group": "title|category|location|spec", "field": "<spec key, or the group name for title/category/location>",',
   '  "kind": "kept|corrected|added", "from": "<old value, \'\' for added>", "to": "<new value or range>",',
-  '  "confidence": 0-100, "grounded": true|false, "evidence_ids": ["f12","f30"], "reason": "<1-2 sentences>" } ] }',
+  '  "confidence": 0-100, "confidence_reason": "<ONE plain line: WHY this number, per the formula>",',
+  '  "to_100": "<the single thing that would raise it to 100 — e.g. \'a 2nd source confirming\', \'an explicit buyer statement\', \'a live (non-expired) lead\'; \"\" if already 100>",',
+  '  "grounded": true|false, "evidence_ids": ["f12","f30"], "reason": "<1-2 sentences>" } ] }',
   'Cite ONLY buyer-signal [fN] ids that appear in EVIDENCE LINES.',
+  'SIMPLE INDIA-B2B ENGLISH: write "reason", "confidence_reason" and "to_100" in clear, professional Indian-B2B English — simple but not casual or tacky, never Hindi; no jargon-stacking, no parenthetical qualifiers. (Spec keys and values stay technical/verbatim; only the explanation text gets this wording.)',
 ].join('\n');
 
 const norm = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -191,7 +201,7 @@ export function mergeUC2LLM(ctx: UC2Context, out: UC2LLMOut | null): UC2Result {
       const wantsChange = (kind === 'corrected' || kind === 'added') && !!to;
       const applied = wantsChange && grounded && conf >= GATE_LO && !locationOverwrite && !categorySwitch;
       const reason = `${String(e.reason || '')}${locationOverwrite ? ' · [location-lock: never overwrite operating city — surface as Sourcing Preference]' : ''}${categorySwitch ? ' · [product-line lock: category correction shares no token with the recorded product — blocked as a cross-product switch]' : ''}`.trim();
-      editsFull.push({ field: e.field || group, group, kind: applied ? kind : (wantsChange ? 'kept' : kind), from, to, confidence: conf, grounded, applied, evidence: ev, reason });
+      editsFull.push({ field: e.field || group, group, kind: applied ? kind : (wantsChange ? 'kept' : kind), from, to, confidence: conf, grounded, applied, evidence: ev, reason, confidenceReason: e.confidence_reason ? String(e.confidence_reason) : undefined, to100: e.to_100 ? String(e.to_100) : undefined });
     }
   }
 

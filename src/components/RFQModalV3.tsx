@@ -708,7 +708,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // P1: last-page fields the buyer tapped "change" on — re-reveals the full input over the
   // confirmable summary we show for known/deduced values.
   const [editFields, setEditFields] = useState<Set<string>>(new Set());
-  const [replanPending, setReplanPending] = useState(false);
+  const [, setReplanPending] = useState(false); // value unread; setter sequences the re-plan spec reveal
   // P6: intent-driven spec RE-RANKING (the one behaviour change). On the FIRST
   // intent answer we re-run the planner and reorder the still-UNTOUCHED specs;
   // touched specs + the lead stay pinned (anti-jitter). Fires at most once.

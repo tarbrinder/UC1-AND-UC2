@@ -15,13 +15,54 @@ import { Band, KV, StatePill, MiniBar, Expand, BandEmpty, type BandTone } from '
 import type { UC2Enrichment, UC2Edit, UC2EditFull, UC2Eval } from '../../lib/uc2Enrichment';
 import { runSellerVerify, hasCrawlerKey, type SellerVerifyState } from '../../lib/sellerVerify';
 
-// human label for each merged-source key (local copy so this file stays pure — no lib import)
-const RAW_SRC_LABEL: Record<string, string> = {
-  csl: 'CSL · on-site behaviour', requirement: 'Requirement · BuyLeads ⨝ ISQ', whatsapp: 'WhatsApp · one timeline',
-  identity: 'Identity · Profile ⊕ GLUSR', pns: 'PNS · sales calls (spoken)', external: 'External · Befisc ⊕ Sign3 (triangulation)',
-};
-const srcLabel = (k: string) => RAW_SRC_LABEL[k] || k;
 const fmtUsd = (n: number) => (n >= 0.01 ? `$${n.toFixed(3)}` : n > 0 ? `$${n.toFixed(5)}` : '$0');
+
+// ── JSON TREE (owner: "raw data as a tree, expandable, better UI than a wall of JSON") — a compact, recursive,
+// collapsible view of any payload. Objects/arrays are <details> (top 2 levels open); leaves are colour-typed. ──
+export function JsonTree({ data, k, depth = 0 }: { data: unknown; k?: string; depth?: number }) {
+  // Children render ONLY when the node is open (lazy) — so a collapsed subtree costs nothing, and a large raw payload
+  // (e.g. hundreds of CSL log rows) doesn't blow up first paint. Width is capped per container to bound the DOM.
+  const [open, setOpen] = useState(depth < 1);
+  const pad = { paddingLeft: depth ? 10 : 0 };
+  const keyLabel = k != null ? <span className="text-slate-500">{k}: </span> : null;
+  if (data === null || data === undefined || typeof data !== 'object') {
+    const v = data == null ? String(data) : typeof data === 'string' ? `"${data}"` : String(data);
+    const tone = typeof data === 'number' ? 'text-emerald-700' : typeof data === 'boolean' ? 'text-violet-700' : data == null ? 'text-gray-400' : 'text-gray-700';
+    return <div className="text-[10px] font-mono break-words leading-snug" style={pad}>{keyLabel}<span className={tone}>{v}</span></div>;
+  }
+  const isArr = Array.isArray(data);
+  const entries = isArr ? (data as unknown[]).map((v, i) => [String(i), v] as const) : Object.entries(data as Record<string, unknown>);
+  if (entries.length === 0) return <div className="text-[10px] font-mono text-gray-400 leading-snug" style={pad}>{keyLabel}{isArr ? '[ ]' : '{ }'}</div>;
+  const CAP = 200; const shown = entries.length > CAP ? entries.slice(0, CAP) : entries;
+  return (
+    <details open={open} onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)} className="text-[10px] font-mono leading-snug" style={pad}>
+      <summary className="cursor-pointer list-none text-slate-500 hover:text-slate-700 select-none">{keyLabel}<span className="text-gray-400">{isArr ? `[${entries.length}]` : `{${entries.length} ${entries.length === 1 ? 'field' : 'fields'}}`}</span></summary>
+      {open && shown.map(([kk, vv]) => <JsonTree key={kk} k={kk} data={vv} depth={depth + 1} />)}
+      {open && entries.length > CAP && <div className="text-[9.5px] text-gray-400" style={{ paddingLeft: 10 }}>… {entries.length - CAP} more (truncated for display)</div>}
+    </details>
+  );
+}
+
+// ── CONFIDENCE CHIP (shared) — the % is no longer a dead number; it click-expands to show HOW it's scored, WHY this
+// number, and the single thing that would make it 100. `isLlm=false` → deterministic facts get a source-trust line
+// (one verified source, taken at face value — not a probability). reason/to100 are the model's own §9 self-report.
+const CONF_CRITERIA_LLM = 'evidence quality + source authority (a spoken PNS call & a WhatsApp message from the buyer rank highest) + cross-source agreement − contradictions − missing evidence';
+export function confidenceChip(confidence: number, isLlm: boolean, reason?: string, to100?: string): ReactNode {
+  return (
+    <details className="inline-block align-baseline">
+      <summary className="cursor-pointer list-none inline-flex items-baseline gap-0.5 rounded px-1 text-[10px] tabular-nums text-gray-500 hover:bg-gray-100 hover:text-gray-700" title="why this confidence?">{confidence}%<span className="text-gray-300">▾</span></summary>
+      <div className="mt-0.5 rounded bg-gray-50 border border-gray-200 p-1.5 text-[10px] text-gray-700 not-italic font-normal space-y-0.5 max-w-[440px]">
+        <div><span className="text-gray-400">how it's scored: </span>{isLlm ? CONF_CRITERIA_LLM : 'deterministic — a single verified source, taken at face value (this is corroboration, not a probability)'}</div>
+        {isLlm
+          ? (<>
+              {reason ? <div><span className="text-gray-400">why {confidence}%: </span>{reason}</div> : <div className="text-gray-400 italic">why: the model didn't return a confidence reason for this attribute</div>}
+              {to100 ? <div><span className="text-emerald-600">to reach 100%: </span>{to100}</div> : (confidence < 100 ? <div className="text-gray-400 italic">to 100%: not reported</div> : null)}
+            </>)
+          : <div><span className="text-emerald-600">to reach 100%: </span>a second independent source agreeing with this one</div>}
+      </div>
+    </details>
+  );
+}
 const sizeHint = (v: unknown): string => { try { const s = typeof v === 'string' ? v : JSON.stringify(v); const kb = s.length / 1024; const n = Array.isArray(v) ? `${v.length} items · ` : ''; return `${n}${kb >= 1 ? kb.toFixed(1) + ' kb' : s.length + ' chars'}`; } catch { return ''; } };
 
 // ── L0 · LLM RUN STRIP (calls · tokens · cost · eval · harness) — the HOD debug header ──────────────────────────
@@ -75,99 +116,68 @@ export function L0Band({ calls, totals, evalDetail, harness, promptVersion, defa
 export interface HealthRow { node: string; ok: boolean; latency_ms?: number; output_count?: number; source?: string }
 // V10 (owner #8): coverage = what the ONE LLM actually SAW (sent) → what it CITED. NOT a dead ledger count.
 export interface SourceRow { label: string; sent: number; cited: number }
-export function L1Band({ health, sources, cov, endpoint, rich, drill, defaultOpen }: {
-  health: HealthRow[]; sources: SourceRow[]; cov: { sent: number; cited: number; noise: number };
-  endpoint?: string; rich?: { sources?: Record<string, unknown> } | null; drill?: ReactNode; defaultOpen?: boolean;
+// ONE unified node row (owner: "every node in health will have raw what LLM saw, and our readable version"): liveness
+// (ok/latency/count) + OUR humanised readable view + the distilled summary the LLM saw + the full raw payload — GST included.
+export interface L1NodeRow { key: string; label: string; ok?: boolean; latency_ms?: number; output_count?: number; readable?: ReactNode; summary?: unknown; raw?: unknown }
+export function L1Band({ nodes, cov, endpoint, drill, defaultOpen }: {
+  nodes: L1NodeRow[]; cov?: { sent: number; cited: number; noise: number } | null;
+  endpoint?: string; drill?: ReactNode; defaultOpen?: boolean;
 }) {
-  // owner: "i want to see the raw response HERE, not go to n8n" — every merged source → its {summary, raw} payload, inline
-  const rawSources = rich?.sources && typeof rich.sources === 'object' ? Object.entries(rich.sources as Record<string, unknown>) : [];
-  const okCount = health.filter((h) => h.ok).length;
-  const allOk = health.length > 0 && okCount === health.length;
-  const covLine = <>{cov.sent} lines sent to LLM · <span className="text-emerald-700">{cov.cited} cited</span>{cov.noise > 0 && <> · {cov.noise} plumbing excluded</>}</>;
+  const okCount = nodes.filter((n) => n.ok === true).length;
+  const known = nodes.filter((n) => n.ok != null).length;
+  const allOk = known > 0 && okCount === known;
+  const covLine = cov ? <>{cov.sent} lines sent to LLM · <span className="text-emerald-700">{cov.cited} cited</span>{cov.noise > 0 && <> · {cov.noise} plumbing excluded</>}</> : null;
   return (
-    <Band code="L1" title="Nodes & Health" subtitle="what n8n pulled · did each node succeed" tone="slate" defaultOpen={defaultOpen}
-      status={health.length ? `${okCount}/${health.length} ok` : `${sources.length} sources`} statusTone={allOk ? 'emerald' : health.length ? 'rose' : 'slate'}
-      meta={endpoint ? <>endpoint <span className="font-mono text-gray-500">{endpoint}</span> · {covLine}</> : covLine}>
-      {health.length > 0 ? (
-        <div className="space-y-0.5 mb-2">
-          {health.map((h) => (
-            <div key={h.node} className="flex items-center gap-2 text-[11px]">
-              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${h.ok ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-              <span className="flex-1 min-w-0 text-gray-700 truncate font-mono text-[10.5px]">{h.node}</span>
-              {typeof h.output_count === 'number' && <span className="text-gray-400 shrink-0">{h.output_count} out</span>}
-              {typeof h.latency_ms === 'number' && <span className="text-gray-400 shrink-0 tabular-nums">{h.latency_ms} ms</span>}
-            </div>
-          ))}
-        </div>
-      ) : <BandEmpty>No per-node __health on this response (the legacy -advanced path doesn't emit it). Source coverage below.</BandEmpty>}
-      <Expand label={`LLM citation coverage — ${sources.length} sources · sent → cited`} tone="slate">
-        <div className="text-[10px] text-gray-400 mb-1">how much of each source the single extract LLM actually grounded an attribute on (sent = lines shown · cited = lines it referenced).</div>
-        {sources.map((s) => (
-          <div key={s.label} className="flex items-center gap-2 text-[11px] py-0.5">
-            <span className="flex-1 min-w-0 text-gray-600 truncate">{s.label}</span>
-            <MiniBar pct={s.sent ? (s.cited / s.sent) * 100 : 0} tone={s.cited ? 'emerald' : 'slate'} />
-            <span className="text-gray-400 shrink-0 tabular-nums">{s.cited}/{s.sent}</span>
-          </div>
-        ))}
-      </Expand>
-      {/* RAW RESPONSE PER NODE — the data, here, no n8n round-trip */}
-      {rawSources.length > 0 && (
-        <Expand label={`raw response — ${rawSources.length} nodes (summary + raw payload, here)`} tone="slate">
-          <div className="text-[10px] text-gray-400 mb-1">exactly what each merged n8n node returned for this pull — <b>summary</b> = the distilled shape the LLM saw · <b>raw</b> = the full pre-distill payload.</div>
-          <div className="space-y-1">
-            {rawSources.map(([key, node]) => {
-              const n = (node && typeof node === 'object') ? node as Record<string, unknown> : {};
-              const summary = 'summary' in n ? n.summary : node;
-              const raw = 'raw' in n ? n.raw : undefined;
-              return (
-                <div key={key} className="rounded-lg border border-gray-150 bg-gray-50/50 px-2 py-1">
-                  <div className="text-[11px] font-medium text-gray-700">{srcLabel(key)} <span className="text-gray-300 font-normal font-mono text-[9.5px]">{sizeHint(summary)}</span></div>
-                  <Expand label="summary (what the LLM saw)" tone="emerald"><pre className="text-[10px] leading-snug whitespace-pre-wrap break-words font-mono text-gray-600 max-h-72 overflow-auto">{JSON.stringify(summary ?? null, null, 2)}</pre></Expand>
-                  {raw !== undefined && <Expand label={`raw (pre-distill payload · ${sizeHint(raw)})`} tone="slate"><pre className="text-[10px] leading-snug whitespace-pre-wrap break-words font-mono text-gray-500 max-h-72 overflow-auto">{JSON.stringify(raw, null, 2)}</pre></Expand>}
+    <Band code="L1" title="Nodes & Health" subtitle="every node n8n pulled · raw + what the LLM saw + our readable view · did it succeed" tone="slate" defaultOpen={defaultOpen}
+      status={known ? `${okCount}/${known} ok` : `${nodes.length} nodes`} statusTone={allOk ? 'emerald' : known ? 'rose' : 'slate'}
+      meta={<>{endpoint && <>endpoint <span className="font-mono text-gray-500">{endpoint}</span>{covLine ? ' · ' : ''}</>}{covLine}</>}>
+      {nodes.length > 0 ? (
+        <div className="space-y-1">
+          {nodes.map((n) => {
+            const hasBody = n.readable != null || n.summary !== undefined || n.raw !== undefined;
+            return (
+              <details key={n.key} className="rounded-lg border border-gray-150 bg-gray-50/50">
+                <summary className="cursor-pointer list-none flex items-center gap-2 px-2 py-1.5 text-[11px] hover:bg-gray-50">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${n.ok === false ? 'bg-rose-500' : n.ok === true ? 'bg-emerald-500' : 'bg-gray-300'}`} title={n.ok === false ? 'failed' : n.ok === true ? 'ok' : 'no n8n health signal for this node'} />
+                  <span className="flex-1 min-w-0 text-gray-700 truncate font-medium">{n.label}</span>
+                  {typeof n.output_count === 'number' && <span className="text-gray-400 shrink-0">{n.output_count} out</span>}
+                  {typeof n.latency_ms === 'number' && <span className="text-gray-400 shrink-0 tabular-nums">{n.latency_ms} ms</span>}
+                  <span className="shrink-0 text-gray-300 text-[10px]">▾</span>
+                </summary>
+                <div className="px-2 pb-2 pt-1.5 border-t border-gray-100">
+                  {!hasBody ? <div className="text-[10px] text-gray-400">health only — no payload returned for this node.</div> : (<>
+                    {/* RAW — the data, as a collapsible tree (primary, owner). Falls back to the distilled summary when no pre-distill raw exists. */}
+                    {n.raw !== undefined ? (
+                      <Expand label={`raw data — what n8n returned (${sizeHint(n.raw)})`} tone="slate" defaultOpen><div className="max-h-80 overflow-auto"><JsonTree data={n.raw} /></div></Expand>
+                    ) : n.summary !== undefined ? (
+                      <Expand label={`data — what the LLM saw (${sizeHint(n.summary)})`} tone="emerald" defaultOpen><div className="max-h-80 overflow-auto"><JsonTree data={n.summary} /></div></Expand>
+                    ) : null}
+                    {n.raw !== undefined && n.summary !== undefined && <Expand label="what the LLM saw (distilled summary)" tone="emerald"><div className="max-h-72 overflow-auto"><JsonTree data={n.summary} /></div></Expand>}
+                    {n.readable != null && <Expand label="our humanised view (plain English)" tone="sky">{n.readable}</Expand>}
+                  </>)}
                 </div>
-              );
-            })}
-          </div>
-        </Expand>
-      )}
+              </details>
+            );
+          })}
+        </div>
+      ) : <BandEmpty>No nodes on this response.</BandEmpty>}
       {drill && <div className="mt-2">{drill}</div>}
     </Band>
   );
 }
 
-// ── L2 · BUYER SIGNALS (WhatsApp · RFQ · PNS), readable ─────────────────────────────────────────────────────────
+// ── L2 type retained — the readable per-source bodies now fold into L1Band (Nodes & Health). The standalone L2Band
+// was removed in the dashboard restructure; SignalChannel still describes each channel's readable body for L1. ──
 export interface SignalChannel { key: string; label: string; count: number; tone: BandTone; sample?: string; body?: ReactNode }
-export function L2Band({ channels, defaultOpen }: { channels: SignalChannel[]; defaultOpen?: boolean }) {
-  const total = channels.reduce((s, c) => s + c.count, 0);
-  return (
-    <Band code="L2" title="Buyer signals — readable" subtitle="WhatsApp · RFQ/BLs · PNS calls · external" tone="sky" defaultOpen={defaultOpen}
-      status={`${total} signals`} statusTone="sky">
-      {channels.length === 0 ? <BandEmpty>No buyer signals pulled yet.</BandEmpty> : (
-        <div className="space-y-1.5">
-          {channels.map((c) => (
-            <div key={c.key} className="rounded-lg border border-gray-150 bg-gray-50/60 px-2 py-1.5">
-              <div className="flex items-center gap-2">
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${c.tone === 'sky' ? 'bg-sky-50 text-sky-700 border-sky-200' : c.tone === 'emerald' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : c.tone === 'violet' ? 'bg-violet-50 text-violet-700 border-violet-200' : c.tone === 'amber' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>{c.label}</span>
-                <span className="text-[11px] text-gray-500 flex-1">{c.count} {c.count === 1 ? 'item' : 'items'}</span>
-              </div>
-              {c.sample && <div className="text-[10.5px] text-gray-500 mt-1 line-clamp-2">{c.sample}</div>}
-              {c.body && <Expand label="open full thread / records" tone="sky">{c.body}</Expand>}
-            </div>
-          ))}
-        </div>
-      )}
-    </Band>
-  );
-}
 
 // ── L3 · LLM INPUT (the ONE call: model · output ceiling · temperature · context · cost) ────────────────────────
 // Owner Qs answered in the UI: there is ONE call (system + user are two PARTS of it, see L4); "max tokens" is the
 // OUTPUT ceiling, not an input cap (we send everything — no line cap); the per-node "context" is the SOURCE GUIDE
 // (expandable); the old "sent / raw" split is gone (no trims → sent==raw, so just the sent line count + its fN drill).
 export interface CatalogRow { node: string; label: string; sent: number; raw?: number; transform?: string; evidence?: Array<{ id: string; tag: string; raw: string }> }
-export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, signalCount, usage, sourceGuide, defaultOpen }: {
+export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, sources, signalCount, usage, sourceGuide, defaultOpen }: {
   model?: string; maxTokens?: number; temperature?: number; promptVersion?: string;
-  catalog: CatalogRow[]; signalCount: number;
+  catalog: CatalogRow[]; sources?: SourceRow[]; signalCount: number;
   usage?: { inputTokens?: number; outputTokens?: number; reasoningTokens?: number; ms?: number; costUsd?: number } | null;
   sourceGuide?: ReactNode; defaultOpen?: boolean;
 }) {
@@ -186,6 +196,18 @@ export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, 
         {usage?.ms != null && <KV k="latency" v={`${usage.ms} ms`} mono />}
       </div>
       {sourceGuide && <Expand label="per-node CONTEXT — the SOURCE GUIDE the LLM is given (trust · what each node may influence · conflict priority)" tone="violet">{sourceGuide}</Expand>}
+      {sources && sources.length > 0 && (
+        <Expand label={`grounding — how much of each source the LLM actually cited (sent → cited)`} tone="violet">
+          <div className="text-[10px] text-gray-400 mb-1">sent = lines shown to the LLM · cited = lines it referenced in an attribute's reasoning. A low bar means the source was sent but barely grounded an answer.</div>
+          {sources.map((s) => (
+            <div key={s.label} className="flex items-center gap-2 text-[11px] py-0.5">
+              <span className="flex-1 min-w-0 text-gray-600 truncate">{s.label}</span>
+              <MiniBar pct={s.sent ? (s.cited / s.sent) * 100 : 0} tone={s.cited ? 'emerald' : 'slate'} />
+              <span className="text-gray-400 shrink-0 tabular-nums">{s.cited}/{s.sent}</span>
+            </div>
+          ))}
+        </Expand>
+      )}
       <Expand label={`evidence sent — ${catalog.length} nodes (expand a node to see its exact fN lines)`} tone="violet" defaultOpen>
         {catalog.length === 0 ? <BandEmpty>Context not built yet.</BandEmpty> : catalog.map((c) => (
           <div key={c.node} className="py-0.5">
@@ -196,7 +218,7 @@ export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, 
             {c.evidence && c.evidence.length > 0 && (
               <Expand label={`${c.evidence.length} line${c.evidence.length === 1 ? '' : 's'} → exact text`} tone="slate">
                 {c.evidence.map((e) => (
-                  <div key={e.id} className="text-[10px] py-0.5 border-b border-gray-100 last:border-0">
+                  <div key={e.id} data-fact-id={e.id} className="text-[10px] py-0.5 border-b border-gray-100 last:border-0 scroll-mt-16">
                     <span className="font-mono text-violet-600">[{e.id}]</span> <span className="text-gray-400">{e.tag}</span><div className="text-gray-700 break-words">{e.raw}</div>
                   </div>
                 ))}
@@ -300,17 +322,9 @@ export function L5Band({ attrs, evalRows, evalDrill, prune, status, drillFor, de
 // ── L6 · UC1 · BUYLEAD DETAILS + BUYER DETAILS — the rich card (owner: "use this UI we already had") ─────────────
 export interface OfferFieldRow { label: string; before?: string; after: string; action: string; drill?: ReactNode }
 export interface L6Requirement { title: string; posted?: string; expiry?: string; status?: string; isExpired?: boolean; recencyDays?: number; category?: string; location?: string; specs?: Array<{ k: string; v: string; filledBy?: string }>; specsStatus?: string; buyerInfo?: string; commercials?: string }
-// spec PROVENANCE legend (matches the classic Buylead card): Buyer Filled / Auto-Filled / Agent Filled / Predicted
-const FILL_TONE: Record<string, { label: string; cls: string; dot: string }> = {
-  buyer: { label: 'Buyer Filled Spec', cls: 'text-emerald-700', dot: 'bg-emerald-500' },
-  auto: { label: 'Auto-Filled Spec', cls: 'text-amber-600', dot: 'bg-amber-500' },
-  agent: { label: 'Agent Filled', cls: 'text-blue-600', dot: 'bg-blue-500' },
-  predicted: { label: 'Predicted', cls: 'text-violet-600', dot: 'bg-violet-500' },
-};
-const fillTone = (f?: string) => FILL_TONE[f || 'buyer'] || FILL_TONE.buyer;
 export interface L6Availability { key: string; label: string; present: boolean; verified: boolean; value: string; externalValue?: string; source: string; note: string }
-export interface L6ProfileRow { label: string; value: string; drill?: ReactNode }
-export interface L6BuyerDetails { name?: string; memberSince?: string; responseCalls?: number; responseReplies?: number; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[] }
+export interface L6ProfileRow { label: string; value: string; drill?: ReactNode; prov?: 'llm' | 'det' }
+export interface L6BuyerDetails { name?: string; memberSince?: string; responseCalls?: number; responseReplies?: number; ageGender?: string; ageGenderDrill?: ReactNode; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[] }
 
 // compact channel icons for the "Available" row (matches the classic Buylead-Details card)
 const AVAIL_ICON: Record<string, string> = { mobile: '📱', email: '✉️', address: '🏢', pan: '🪪', gst: '🧾', whatsapp: '💬', name: '👤', age: '🎂' };
@@ -323,25 +337,47 @@ function DrillRow({ label, value, drill }: { label: ReactNode; value: ReactNode;
   );
 }
 
-export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, fields, offerEval, enrichControl, gstVerified, defaultOpen }: {
+export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, locationCorrected, fields, offerEval, enrichControl, gstVerified, stillAsk, mode: modeProp, onMode, defaultOpen }: {
   picker?: ReactNode; selectedReq?: L6Requirement | null; uc2?: UC2Enrichment | null;
   productsOfInterest?: { value: string; changed: boolean; drill?: ReactNode } | null;
   requirementCount?: number; buyerDetails?: L6BuyerDetails | null; retailLead?: boolean;
-  titleDrill?: ReactNode; locationDrill?: ReactNode;
+  titleDrill?: ReactNode; locationDrill?: ReactNode; locationCorrected?: { from: string; to: string };
   fields: OfferFieldRow[]; offerEval?: { groundedPct: number; hallucinations: number; verdict: string } | null;
-  enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[] } | null; defaultOpen?: boolean;
+  enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[] } | null; stillAsk?: string[];
+  mode?: 'original' | 'profile' | 'requirement'; onMode?: (m: 'original' | 'profile' | 'requirement') => void; defaultOpen?: boolean;
 }) {
   const ACTION_TONE: Record<string, string> = { kept: 'text-gray-400', corrected: 'text-amber-700', added: 'text-emerald-700', dropped: 'text-rose-600 line-through', suggested: 'text-sky-700' };
   const avail = (buyerDetails?.availability || []).filter((a) => a.present);
-  // UC2 · requirement enrichment/correction — base truth ("Original") ⟷ AI-enriched ("AI-Enriched").
-  // Owner (v11): UC2 defaults to AI-Enriched (the toggle still lets you flip back to Original/verbatim);
-  // UC1 / Buyer Details has no toggle (it is always the AI-derived view).
-  const [uc2Mode, setUc2Mode] = useState<'original' | 'enriched'>('enriched');
-  const on = !!uc2 && uc2Mode === 'enriched';
-  const NewTag = ({ label = 'new' }: { label?: string }) => (<span className="ml-1 align-middle text-[8px] font-bold uppercase tracking-wide text-violet-700 bg-violet-50 border border-violet-200 rounded px-1 py-px">{label}</span>);
+  // 3-way view (owner): Original = recorded lead + resolved details, FROZEN (nothing clickable) · Buyer Profile =
+  // the AI-built profile with clickable reasoning (default) · Requirement = the AI-corrected/enriched requirement (UC2).
+  // Controlled by the parent (mode/onMode) so it can fire the requirement-enrichment LLM only on the Requirement tab.
+  const [modeLocal, setModeLocal] = useState<'original' | 'profile' | 'requirement'>('profile');
+  const mode = modeProp ?? modeLocal;
+  const setMode = (m: 'original' | 'profile' | 'requirement') => { setModeLocal(m); onMode?.(m); };
+  const on = !!uc2 && mode === 'requirement';   // show the UC2-enriched requirement (corrected/added specs)
+  // Clickability by tab (owner): Original = nothing · Buyer Profile = RIGHT column only · Requirement = left+right+top.
+  const profileClickable = mode !== 'original';   // right column (buyer profile / identity) — Profile + Requirement
+  const reqClickable = mode === 'requirement';    // left + top (requirement: title · location · enriched specs)
+  // GST Verified ribbon — shown ONLY when the GST node returned a GSTIN; right of the "Buyer Details" heading.
+  // Expandable (clickable modes) to the decode; a static badge in Original.
+  const gstRibbon = !gstVerified ? null : profileClickable ?(
+    <details className="relative shrink-0">
+      <summary className="cursor-pointer list-none inline-flex items-center gap-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-300 px-2 py-0.5 text-[10px] font-bold">🧾 GST Verified{gstVerified.count > 1 ? ` (${gstVerified.count})` : ''} ▾</summary>
+      <div className="absolute right-0 mt-1 z-20 w-64 rounded-lg bg-white border border-emerald-200 shadow-lg p-2 text-[10.5px] text-gray-700 font-normal">
+        <div className="font-mono text-gray-800 break-all">{gstVerified.gstin}</div>
+        <div className="text-gray-500 mt-0.5">{gstVerified.state} · {gstVerified.entity}</div>
+        {gstVerified.list.length > 1 && <div className="mt-1 border-t border-gray-100 pt-1"><span className="text-gray-400">all GSTINs:</span> {gstVerified.list.map((g) => <div key={g} className="font-mono text-[9.5px] text-gray-600 break-all">{g}</div>)}</div>}
+        <div className="text-gray-400 mt-1">source: Mobile/Email→GST (KYB)</div>
+      </div>
+    </details>
+  ) : (
+    <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-300 px-2 py-0.5 text-[10px] font-bold shrink-0">🧾 GST Verified{gstVerified.count > 1 ? ` (${gstVerified.count})` : ''}</span>
+  );
   // a corrected scalar: ~~old~~ new, expandable to its reason
+  // ~~old~~ → new, expandable to the FULL reasoning drill (value · confidence · reason · sources). Falls back to the
+  // plain reason text if no rich drill was attached.
   const Corrected = ({ e }: { e: UC2Edit }) => (
-    <details className="inline-block align-middle"><summary className="cursor-pointer list-none inline-flex flex-wrap items-baseline gap-1"><span className="line-through text-rose-400">{e.from}</span><span className="text-violet-700 font-semibold">{e.to}</span><NewTag label="corrected" /></summary><div className="mt-1 rounded bg-violet-50 border border-violet-200 p-1.5 text-[10px] text-violet-900">{e.reason}</div></details>
+    <details className="inline-block align-middle"><summary className="cursor-pointer list-none inline-flex flex-wrap items-baseline gap-1"><span className="line-through text-rose-400">{e.from}</span><span className="text-violet-700 font-semibold">{e.to}</span><span className="text-[9px] text-gray-300">▾</span></summary><div className="mt-1 rounded bg-gray-50 border border-gray-200 p-2 text-[10px]">{e.drill || <span className="text-violet-900">{e.reason}</span>}</div></details>
   );
   return (
     <Band code="L6" title="" tone="sky" defaultOpen={defaultOpen}>
@@ -349,39 +385,28 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
       <div className="-mx-3 -mt-1 mb-3 px-4 py-2.5 bg-gradient-to-r from-blue-700 to-blue-500 rounded-t-lg flex items-center justify-between gap-2 flex-wrap">
         <span className="text-white font-bold text-[15px]">Buylead Details</span>
         <div className="flex items-center gap-2">
-          {/* GST Verified ribbon badge — shown ONLY when the GST node returned a GSTIN; expandable to the decode */}
-          {gstVerified && (
-            <details className="relative shrink-0">
-              <summary className="cursor-pointer list-none inline-flex items-center gap-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-300 px-2 py-0.5 text-[10px] font-bold">🧾 GST Verified{gstVerified.count > 1 ? ` (${gstVerified.count})` : ''} ▾</summary>
-              <div className="absolute right-0 mt-1 z-20 w-64 rounded-lg bg-white border border-emerald-200 shadow-lg p-2 text-[10.5px] text-gray-700 font-normal">
-                <div className="font-mono text-gray-800 break-all">{gstVerified.gstin}</div>
-                <div className="text-gray-500 mt-0.5">{gstVerified.state} · {gstVerified.entity}</div>
-                {gstVerified.list.length > 1 && <div className="mt-1 border-t border-gray-100 pt-1"><span className="text-gray-400">all GSTINs:</span> {gstVerified.list.map((g) => <div key={g} className="font-mono text-[9.5px] text-gray-600 break-all">{g}</div>)}</div>}
-                <div className="text-gray-400 mt-1">source: Mobile/Email→GST (KYB)</div>
-              </div>
-            </details>
-          )}
           {uc2 && (
-            <div className="inline-flex rounded-md overflow-hidden border border-white/40 text-[10px] font-semibold shrink-0" title="UC2 — see the requirement before vs after AI enrichment/correction">
-              <button type="button" onClick={() => setUc2Mode('original')} className={`px-2 py-0.5 ${!on ? 'bg-white text-blue-700' : 'text-white/90 hover:bg-white/10'}`}>Original</button>
-              <button type="button" onClick={() => setUc2Mode('enriched')} className={`px-2 py-0.5 ${on ? 'bg-white text-violet-700' : 'text-white/90 hover:bg-white/10'}`}>AI-Enriched</button>
+            <div className="inline-flex rounded-md overflow-hidden border border-white/40 text-[10px] font-semibold shrink-0">
+              <button type="button" onClick={() => setMode('original')} title="The recorded lead + resolved buyer details, frozen — nothing expands. The raw picture before any AI." className={`px-2 py-0.5 ${mode === 'original' ? 'bg-white text-blue-700' : 'text-white/90 hover:bg-white/10'}`}>Original</button>
+              <button type="button" onClick={() => setMode('profile')} title="AI-built buyer profile — persona, intent, maturity… — every claim clickable to its source." className={`px-2 py-0.5 border-l border-white/30 ${mode === 'profile' ? 'bg-white text-indigo-700' : 'text-white/90 hover:bg-white/10'}`}>Buyer Profile</button>
+              <button type="button" onClick={() => setMode('requirement')} title="AI-corrected & enriched requirement — fixed/added specs vs the recorded lead (runs the enrichment LLM)." className={`px-2 py-0.5 border-l border-white/30 ${mode === 'requirement' ? 'bg-white text-violet-700' : 'text-white/90 hover:bg-white/10'}`}>Requirement</button>
             </div>
           )}
           {picker}
         </div>
       </div>
-      {on && uc2 && (<div className="-mt-1 mb-2 px-1 text-[11px] flex flex-wrap items-center gap-x-1.5"><span className="font-semibold text-violet-700">{uc2.summary}</span>{uc2.isDummy && <span className="text-[9px] text-gray-400">· sample data — real enrichment LLM not yet wired</span>}</div>)}
+      {/* (declutter) Before→After count line removed — the ~~struck~~→violet coloring already conveys changes */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-3 px-1">
         {/* LEFT — the BuyLead */}
         <div>
           {!selectedReq ? <BandEmpty>No requirement selected.</BandEmpty> : (
             <>
-              {titleDrill ? (
+              {reqClickable && titleDrill ? (
                 <details className="group/t"><summary className="cursor-pointer list-none text-[15px] font-semibold text-indigo-700 underline break-words">{selectedReq.title}</summary><div className="mt-1 rounded bg-gray-50 border border-gray-200 p-2 text-[11px]">{titleDrill}</div></details>
-              ) : <div className="text-[15px] font-semibold text-indigo-700 underline break-words">{selectedReq.title}</div>}
+              ) : <div className="text-[15px] font-semibold text-indigo-700 break-words">{selectedReq.title}</div>}
               {on && uc2?.title && <div className="text-[12px] mt-0.5 text-gray-600">Title → <Corrected e={uc2.title} /></div>}
-              {locationDrill ? (
-                <details className="mt-1"><summary className="cursor-pointer list-none text-[12px] text-gray-600 flex flex-wrap items-center gap-x-1.5">{selectedReq.posted && <span>🕐 {selectedReq.posted}</span>}{selectedReq.location && <span className="text-indigo-600 hover:underline">🇮🇳 {selectedReq.location}</span>}</summary><div className="mt-1 rounded bg-gray-50 border border-gray-200 p-2 text-[11px]">{locationDrill}</div></details>
+              {reqClickable && locationDrill ? (
+                <details className="mt-1"><summary className="cursor-pointer list-none text-[12px] text-gray-600 flex flex-wrap items-center gap-x-1.5">{selectedReq.posted && <span>🕐 {selectedReq.posted}</span>}{locationCorrected ? <span className="text-indigo-600">🇮🇳 <span className="line-through text-rose-400">{locationCorrected.from}</span> <span className="text-violet-700 font-semibold">{locationCorrected.to}</span></span> : selectedReq.location && <span className="text-indigo-600 hover:underline">🇮🇳 {selectedReq.location}</span>}</summary><div className="mt-1 rounded bg-gray-50 border border-gray-200 p-2 text-[11px]">{locationDrill}</div></details>
               ) : (
                 <div className="text-[12px] text-gray-600 mt-1 flex flex-wrap items-center gap-x-1.5">{selectedReq.posted && <span>🕐 {selectedReq.posted}</span>}{selectedReq.location && <span>🇮🇳 {selectedReq.location}</span>}</div>
               )}
@@ -401,21 +426,19 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
                   {uc2.specs.map((s, j) => (
                     <div key={j} className="text-[12px]">
                       {s.kind === 'corrected' ? (
-                        <details><summary className="cursor-pointer list-none"><span className="font-semibold text-gray-700">{s.k}</span><span className="text-gray-400">: </span><span className="line-through text-rose-400">{s.from}</span> <span className="text-violet-700 font-semibold">{s.to}</span><NewTag label="corrected" /></summary>{s.reason && <div className="mt-1 ml-2 rounded bg-violet-50 border border-violet-200 p-1.5 text-[10px] text-violet-900">{s.reason}</div>}</details>
+                        <details><summary className="cursor-pointer list-none"><span className="font-semibold text-gray-700">{s.k}</span><span className="text-gray-400">: </span><span className="line-through text-rose-400">{s.from}</span> <span className="text-violet-700 font-semibold">{s.to}</span><span className="text-[9px] text-gray-300 ml-1">▾</span></summary>{(s.drill || s.reason) && <div className="mt-1 ml-2 rounded bg-gray-50 border border-gray-200 p-2 text-[10px]">{s.drill || <span className="text-violet-900">{s.reason}</span>}</div>}</details>
                       ) : s.kind === 'added' ? (
-                        <details><summary className="cursor-pointer list-none"><span className="font-semibold text-violet-700">{s.k}</span><span className="text-gray-400">: </span><span className="text-violet-700">{s.to}</span><NewTag /></summary>{s.reason && <div className="mt-1 ml-2 rounded bg-violet-50 border border-violet-200 p-1.5 text-[10px] text-violet-900">{s.reason}</div>}</details>
+                        <details><summary className="cursor-pointer list-none"><span className="font-semibold text-violet-700">{s.k}</span><span className="text-gray-400">: </span><span className="text-violet-700">{s.to}</span><span className="text-[9px] text-gray-300 ml-1">▾</span></summary>{(s.drill || s.reason) && <div className="mt-1 ml-2 rounded bg-gray-50 border border-gray-200 p-2 text-[10px]">{s.drill || <span className="text-violet-900">{s.reason}</span>}</div>}</details>
                       ) : (
                         <><span className="font-semibold text-emerald-700">{s.k}</span> <span className="text-emerald-700">: {s.to}</span></>
                       )}
                     </div>
                   ))}
-                  <div className="mt-2 text-[9.5px] text-gray-400"><span className="line-through text-rose-400">struck</span> = old · <span className="text-violet-700">violet</span> = AI corrected/added · green = buyer-filled (kept)</div>
                 </div>
               ) : selectedReq.specs && selectedReq.specs.length > 0 ? (
-                <>
-                  <div className="mt-2 space-y-0.5">{selectedReq.specs.map((s, j) => { const t = fillTone(s.filledBy); return (<div key={j} className="text-[12px]"><span className={`font-semibold ${t.cls}`}>{s.k}</span> <span className={t.cls}>: {s.v}</span></div>); })}</div>
-                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">{Object.values(FILL_TONE).map((t) => (<span key={t.label} className="inline-flex items-center gap-1"><span className={`w-2 h-2 rounded-full ${t.dot}`} />{t.label}</span>))}</div>
-                </>
+                // Original specs render neutral — the old Buyer/Auto/Agent/Predicted fill-colour legend is retired
+                // (owner: not required; the card's own consolidated colour key covers what matters).
+                <div className="mt-2 space-y-0.5">{selectedReq.specs.map((s, j) => (<div key={j} className="text-[12px]"><span className="font-semibold text-gray-700">{s.k}</span> <span className="text-gray-700">: {s.v}</span></div>))}</div>
               ) : selectedReq.specsStatus && selectedReq.specsStatus !== 'present' && !selectedReq.buyerInfo && !selectedReq.commercials ? (
                 <div className="mt-2 text-[11px] text-gray-400 italic">{selectedReq.specsStatus === 'getisq5_empty_run' ? '⚠ getisq5 returned NOTHING this pull (specs API empty/timed out) — re-pull to fetch ISQ' : selectedReq.specsStatus === 'beyond_fetch_cap' ? 'ISQ specs not fetched for this lead this pull (beyond the per-offer ISQ fetch cap)' : selectedReq.specsStatus === 'not_fetched' ? "no ISQ on file for this lead (getisq5 didn't return it)" : selectedReq.specsStatus === 'none' ? "no ISQ specs — buyer didn't answer the ISQ for this lead" : `no specs (${selectedReq.specsStatus})`}</div>
               ) : null}
@@ -425,30 +448,52 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
         {/* RIGHT — Buyer Details */}
         {buyerDetails && (
           <div>
-            <div className="text-[13px] font-semibold text-indigo-700 underline mb-1">Buyer Details{on && uc2?.profileNew && <NewTag label="AI-derived" />}</div>
-            {productsOfInterest && <DrillRow label={<>Products of Interest{on && uc2?.poiNew && <NewTag />}</>} value={productsOfInterest.value || '—'} drill={productsOfInterest.changed ? productsOfInterest.drill : undefined} />}
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-[13px] font-semibold text-indigo-700 underline">Buyer Details</span>
+              {gstRibbon}
+            </div>
+            {productsOfInterest && <DrillRow label={<span className="text-violet-700">Products of Interest</span>} value={productsOfInterest.value || '—'} drill={profileClickable ?productsOfInterest.drill : undefined} />}
             {requirementCount != null && <DrillRow label="Requirement till date" value={requirementCount} />}
             {(buyerDetails.responseCalls != null || buyerDetails.responseReplies != null) && <DrillRow label="Response" value={`Calls: ${buyerDetails.responseCalls ?? 0} | Replies: ${buyerDetails.responseReplies ?? 0}`} />}
+            {buyerDetails.ageGender && <DrillRow label={<span className="text-teal-700">Age / Gender</span>} value={buyerDetails.ageGender} drill={profileClickable ?buyerDetails.ageGenderDrill : undefined} />}
             {buyerDetails.memberSince && <DrillRow label="Member since" value={buyerDetails.memberSince} />}
             {/* Available — icons only; click an icon to reveal its value · source (✓ profile / ✓✓ external) */}
             <div className="flex items-start gap-2 text-[12px] py-1">
-              <span className="w-40 shrink-0 font-semibold text-gray-700">Available{on && <NewTag />}</span>
+              <span className="w-40 shrink-0 font-semibold text-teal-700">Available</span>
               <span className="flex-1 min-w-0"><span className="text-gray-400">: </span>
-                {avail.length === 0 ? <span className="text-gray-400">—</span> : avail.map((a) => (
-                  <details key={a.key} className="inline-block align-middle mr-1.5">
+                {avail.length === 0 ? <span className="text-gray-400">—</span> : avail.map((a) => profileClickable ?(
+                  // name="avail" → exclusive accordion (opening one closes the others); popover is ABSOLUTE so opening
+                  // it never reflows / shuffles the icon row (the "random" behaviour the owner hit).
+                  <details key={a.key} name="avail" className="relative inline-block align-middle mr-1.5">
                     <summary className={`cursor-pointer list-none relative inline-flex items-center justify-center w-7 h-7 rounded border text-[13px] ${a.verified ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-gray-50'}`} title={a.label}>{AVAIL_ICON[a.key] || '•'}<span className={`absolute -top-1 -right-1 text-[7px] font-bold ${a.verified ? 'text-emerald-600' : 'text-gray-400'}`}>{a.verified ? '✓✓' : '✓'}</span></summary>
-                    <div className="mt-1 rounded bg-gray-50 border border-gray-200 p-1.5 text-[10px] text-gray-600 w-52"><b>{a.label}</b>: {a.value || '—'}<div className="text-gray-500 mt-0.5">{a.note}</div><div className="text-gray-400">source: {a.source}</div></div>
+                    <div className="absolute left-0 top-full mt-1 z-30 w-52 rounded-lg bg-white border border-gray-200 shadow-lg p-1.5 text-[10px] text-gray-600"><b>{a.label}</b>: {a.value || '—'}<div className="text-gray-500 mt-0.5">{a.note}</div><div className="text-gray-400">source: {a.source}</div></div>
                   </details>
+                ) : (
+                  // Original (frozen) — static icon, no popover
+                  <span key={a.key} className={`relative inline-flex items-center justify-center w-7 h-7 rounded border text-[13px] align-middle mr-1.5 ${a.verified ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-gray-50'}`} title={`${a.label}: ${a.value || '—'}`}>{AVAIL_ICON[a.key] || '•'}<span className={`absolute -top-1 -right-1 text-[7px] font-bold ${a.verified ? 'text-emerald-600' : 'text-gray-400'}`}>{a.verified ? '✓✓' : '✓'}</span></span>
                 ))}
               </span>
             </div>
-            {/* Identity Confidence — trust signal about the anchors, pinned right below Available (owner) */}
-            {buyerDetails.identityConfidence && <DrillRow label={<>Identity Confidence{on && <NewTag />}</>} value={buyerDetails.identityConfidence.value || '—'} drill={buyerDetails.identityConfidence.drill} />}
-            {/* buyer-profile findings — clean clickable rows (value only; confidence% + LLM badge show on click) */}
-            {buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<>{p.label}{on && <NewTag />}</>} value={p.value || '—'} drill={p.drill} />))}
+            {/* Identity Confidence — trust signal about the anchors, pinned right below Available (owner). LLM-derived → violet key. */}
+            {buyerDetails.identityConfidence && <DrillRow label={<span className="text-violet-700">Identity Confidence</span>} value={buyerDetails.identityConfidence.value || '—'} drill={profileClickable ?buyerDetails.identityConfidence.drill : undefined} />}
+            {/* buyer-profile findings — key COLOURED by provenance (violet=LLM · teal=deterministic/direct); value plain; detail on click */}
+            {buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<span className={p.prov === 'det' ? 'text-teal-700' : 'text-violet-700'}>{p.label}</span>} value={p.value || '—'} drill={profileClickable ?p.drill : undefined} />))}
+            {/* Still-ask — questions that could NOT be deduced at high confidence (not everything can be); ask the buyer */}
+            {stillAsk && stillAsk.length > 0 && (
+              <div className="mt-3 rounded-md bg-amber-50/70 border border-amber-200 px-2.5 py-1.5">
+                <div className="text-[11px] font-semibold text-amber-800">Needs input — ask the buyer (+{stillAsk.length})</div>
+                <div className="text-[10.5px] text-amber-700 mt-0.5">{stillAsk.join(' · ')}</div>
+                <div className="text-[9px] text-amber-600/80 mt-0.5">not deduced at high confidence — surface these in the form</div>
+              </div>
+            )}
             {retailLead && <div className="mt-3 inline-block rounded-md bg-amber-50 border border-amber-200 px-2.5 py-1 text-[12px] font-semibold text-amber-800">This might be a retail lead</div>}
           </div>
         )}
+      </div>
+      {/* consolidated footer legend (subtext, bottom of card) — colours used above, in one place */}
+      <div className="mt-2 pt-1.5 border-t border-gray-100 text-[9.5px] text-gray-400 flex flex-wrap gap-x-3 gap-y-0.5">
+        <span><span className="line-through text-rose-400">struck</span> = old · <span className="text-violet-700">violet</span> = AI corrected/added · <span className="text-emerald-700">green</span> = buyer-filled (kept)</span>
+        <span><span className="text-violet-700 font-semibold">violet key</span> = LLM-derived · <span className="text-teal-700 font-semibold">teal key</span> = deterministic / verified</span>
       </div>
       {/* one collapsed debug expander (offer-LLM enrichment + correctness) — off the clean card */}
       {(fields.length > 0 || offerEval || enrichControl) && (
@@ -479,7 +524,8 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
 // ── UC2 · DEBUG (sits BETWEEN L6/UC1 and L7/UC2) — the AI-assisted-app honesty screen for the enrichment LLM:
 // INPUT (exact prompt) · LLM (model/tokens/cost/latency/prompt-ver) · EVAL (grounded%/hallucinations/leaks/verdict)
 // · per-edit before→after with cited [fN] evidence. Mirrors the L0 chip style + L6 field-diff. Tone violet (AI accent).
-export function UC2DebugBand({ status, model, promptVersion, usage, evalRes, edits, input, rawOutput, coverage, defaultOpen }: {
+export function UC2DebugBand({ reqTitle, status, model, promptVersion, usage, evalRes, edits, input, rawOutput, coverage, defaultOpen }: {
+  reqTitle?: string;
   status: 'idle' | 'loading' | 'done' | 'no-key';
   model?: string; promptVersion?: string;
   usage?: { in: number; out: number; reasoning: number; ms: number; costUsd?: number } | null;
@@ -491,10 +537,30 @@ export function UC2DebugBand({ status, model, promptVersion, usage, evalRes, edi
 }) {
   const chip = (label: string, v: ReactNode, tone = 'bg-gray-50 text-gray-600 border-gray-200') => <span className={`text-[10px] px-1.5 py-0.5 rounded border ${tone} tabular-nums`}>{label} <b>{v}</b></span>;
   const ed = edits || [];
-  const statusTxt = status === 'no-key' ? 'no LLM key — dummy fallback' : status === 'loading' ? 'enriching…' : status === 'done' ? `${evalRes?.changed ?? 0} change${(evalRes?.changed ?? 0) === 1 ? '' : 's'}` : 'idle';
+  const applied = ed.filter((e) => e.applied);   // what actually changed the requirement
+  const held = ed.filter((e) => !e.applied);     // assessed but NOT applied (ungrounded / below the confidence gate)
+  const statusTxt = status === 'no-key' ? 'no LLM key — dummy fallback' : status === 'loading' ? 'enriching…' : status === 'done' ? `${applied.length} applied${held.length ? ` · ${held.length} held` : ''}` : 'idle';
   const KIND_TONE: Record<string, string> = { corrected: 'text-violet-700 font-semibold', added: 'text-violet-700 font-semibold', kept: 'text-gray-400' };
+  const editRow = (e: UC2EditFull, i: number, open?: boolean) => (
+    <details key={`${e.group}:${e.field}:${e.kind}:${i}`} open={open} className="py-0.5">
+      <summary className="cursor-pointer list-none flex items-start justify-between gap-2 text-[11px]">
+        <span className="text-gray-400 shrink-0 w-28 truncate">{e.group}:{e.field}</span>
+        <span className="flex-1 min-w-0 text-right break-words">{e.from && e.kind !== 'kept' && <span className="line-through text-rose-300 mr-1">{e.from}</span>}<span className={KIND_TONE[e.applied ? e.kind : 'kept']}>{e.to || '—'}</span><span className="text-[9px] text-gray-300 ml-1">{e.applied ? e.kind : `${e.kind}·held`}</span> <span className={`text-[9px] ${e.grounded ? 'text-emerald-500' : 'text-rose-400'}`}>{e.confidence}%{e.grounded ? '✓' : '⚠'}</span></span>
+      </summary>
+      <div className="mt-1 ml-2 rounded bg-gray-50 border border-gray-200 p-1.5 text-[10px] text-gray-600">
+        {e.reason && <div className="mb-1">{e.reason}</div>}
+        {/* confidence reasoning — why this %, and what would make it 100 (model's §9 self-report) */}
+        <div className="mb-1 border-l-2 border-gray-200 pl-1.5 text-[9.5px] text-gray-500">
+          <div><span className="text-gray-400">confidence {e.confidence}% — how it's scored: </span>{CONF_CRITERIA_LLM}</div>
+          {e.confidenceReason && <div><span className="text-gray-400">why {e.confidence}%: </span>{e.confidenceReason}</div>}
+          {e.to100 && <div><span className="text-emerald-600">to reach 100%: </span>{e.to100}</div>}
+        </div>
+        {e.evidence.length ? e.evidence.map((ev) => <div key={ev.evidence_id} className="font-mono text-[9.5px] text-indigo-500">↳ [{ev.evidence_id}] <span className="text-gray-500">{ev.node}{ev.tag ? ` · ${ev.tag}` : ''}</span>: “{ev.raw.length > 80 ? ev.raw.slice(0, 80) + '…' : ev.raw}”</div>) : <div className="text-rose-400">no evidence cited{e.kind !== 'kept' ? ' — ungrounded (held)' : ''}</div>}
+      </div>
+    </details>
+  );
   return (
-    <Band code="UC2·debug" title="Requirement enrichment — input · LLM · eval" tone="violet" defaultOpen={defaultOpen}
+    <Band code="UC2·debug" title={reqTitle ? `Requirement: ${reqTitle}` : 'Requirement enrichment — input · LLM · eval'} subtitle={reqTitle ? 'input · LLM · eval — this requirement only' : undefined} tone="violet" defaultOpen={defaultOpen}
       status={statusTxt} statusTone={status === 'done' ? 'indigo' : 'slate'}
       meta={usage ? <>{usage.in.toLocaleString()} in → {usage.out.toLocaleString()} out tok{usage.reasoning ? <> · {usage.reasoning.toLocaleString()} reasoning</> : null} · {usage.ms ? `${usage.ms} ms` : '—'}{promptVersion ? <> · prompt <span className="font-mono">{promptVersion}</span></> : null}</> : undefined}>
       {status === 'no-key' ? <BandEmpty>No LLM key — UC2 shows the deterministic dummy enrichment. Set VITE_LLM_KEY to run the real grounded enrichment.</BandEmpty> : (
@@ -510,19 +576,20 @@ export function UC2DebugBand({ status, model, promptVersion, usage, evalRes, edi
             {coverage && chip('PNS coverage', `${coverage.consumed}/${coverage.total} used${coverage.unaccounted ? ` · ${coverage.unaccounted} unaccounted` : ''}`, coverage.unaccounted ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200')}
           </div>
           {ed.length > 0 ? (
-            <div className="space-y-0.5">
-              {ed.map((e, i) => (
-                <details key={i} className="py-0.5">
-                  <summary className="cursor-pointer list-none flex items-start justify-between gap-2 text-[11px]">
-                    <span className="text-gray-400 shrink-0 w-28 truncate">{e.group}:{e.field}</span>
-                    <span className="flex-1 min-w-0 text-right break-words">{e.from && e.kind !== 'kept' && <span className="line-through text-rose-300 mr-1">{e.from}</span>}<span className={KIND_TONE[e.applied ? e.kind : 'kept']}>{e.to || '—'}</span><span className="text-[9px] text-gray-300 ml-1">{e.applied ? e.kind : `${e.kind}·held`}</span> <span className={`text-[9px] ${e.grounded ? 'text-emerald-500' : 'text-rose-400'}`}>{e.confidence}%{e.grounded ? '✓' : '⚠'}</span></span>
-                  </summary>
-                  <div className="mt-1 ml-2 rounded bg-gray-50 border border-gray-200 p-1.5 text-[10px] text-gray-600">
-                    {e.reason && <div className="mb-1">{e.reason}</div>}
-                    {e.evidence.length ? e.evidence.map((ev) => <div key={ev.evidence_id} className="font-mono text-[9.5px] text-indigo-500">↳ [{ev.evidence_id}] <span className="text-gray-500">{ev.node}{ev.tag ? ` · ${ev.tag}` : ''}</span>: “{ev.raw.length > 80 ? ev.raw.slice(0, 80) + '…' : ev.raw}”</div>) : <div className="text-rose-400">no evidence cited{e.kind !== 'kept' ? ' — ungrounded (held)' : ''}</div>}
-                  </div>
+            <div className="space-y-1.5">
+              {applied.length > 0 && (
+                <div className="space-y-0.5">
+                  <div className="text-[9px] uppercase tracking-wide text-violet-600 font-semibold">Applied to the requirement ({applied.length})</div>
+                  {applied.map((e, i) => editRow(e, i, true))}
+                </div>
+              )}
+              {applied.length === 0 && status === 'done' && <div className="text-[11px] text-gray-500 italic">No changes applied — all {held.length} candidate edit{held.length === 1 ? ' was' : 's were'} held (ungrounded or below the confidence gate). The base requirement stands.</div>}
+              {held.length > 0 && (
+                <details className="rounded-lg border border-gray-150 bg-gray-50/50">
+                  <summary className="cursor-pointer list-none px-2 py-1 text-[10px] text-gray-500">Held / not applied ({held.length}) — assessed but ungrounded or below the confidence gate ▾</summary>
+                  <div className="px-2 pb-1.5 space-y-0.5">{held.map((e, i) => editRow(e, i))}</div>
                 </details>
-              ))}
+              )}
             </div>
           ) : status === 'done' ? <div className="text-[11px] text-gray-400 italic">No corrections/additions — requirement confirmed clean.</div> : <div className="text-[11px] text-gray-400">{status === 'loading' ? 'running enrichment…' : 'idle'}</div>}
           {input && (input.system || input.user) && (
@@ -617,23 +684,27 @@ export function L7Band({ rows, added, ask, dropped, coverage, hasBrain, drill, d
 }
 
 // ── UC3 · OPEN THE RFQ FORM FOR THIS BUYER (mobile / desktop CTAs → debug mode) ─────────────────────────────────
-export function UC3Band({ glid, onOpenForm, defaultOpen }: { glid: string; onOpenForm?: (variant: 'v3' | 'v4', glid: string) => void; defaultOpen?: boolean }) {
-  const can = !!onOpenForm && !!glid.trim();
+export function UC3Band({ glid, onOpenForm, upcoming, defaultOpen }: { glid: string; onOpenForm?: (variant: 'v3' | 'v4', glid: string) => void; upcoming?: boolean; defaultOpen?: boolean }) {
+  // `upcoming` (owner): the RFQ-form launch is built + wired but we're not enabling it yet — show it greyed,
+  // not-clickable, badged "Upcoming". The onOpenForm wiring is preserved behind the scenes for when we turn it on.
+  const can = !upcoming && !!onOpenForm && !!glid.trim();
   return (
-    <Band code="UC3" title="Open the RFQ form for this buyer" subtitle="prefilled with everything above · debug mode · expandable to last raw line" tone="rose" defaultOpen={defaultOpen}
-      status={glid ? `GLID ${glid}` : 'no GLID'} statusTone={can ? 'rose' : 'slate'}>
-      <p className="text-[11px] text-gray-500 mb-2">Launch the live RFQ for this buyer — the AI Inspector carries the same L1→L7 provenance into the form, every prefill traceable.</p>
-      <div className="flex gap-2">
-        <button type="button" disabled={!can} onClick={() => onOpenForm?.('v3', glid)}
-          className="flex-1 px-3 py-2.5 rounded-xl bg-[#52b788] text-white text-[12px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
-          📱 Mobile · Voice RFQ (V3)
-        </button>
-        <button type="button" disabled={!can} onClick={() => onOpenForm?.('v4', glid)}
-          className="flex-1 px-3 py-2.5 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 text-white text-[12px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
-          🖥 Desktop · AI Inspector (V4)
-        </button>
+    <Band code="UC3" title="Open the RFQ form for this buyer" subtitle={upcoming ? 'upcoming — RFQ form + AI Inspector are built & wired; not enabled here yet' : 'prefilled with everything above · debug mode · expandable to last raw line'} tone="slate" defaultOpen={defaultOpen}
+      status={upcoming ? '🔒 Upcoming' : (glid ? `GLID ${glid}` : 'no GLID')} statusTone="slate">
+      <div className={upcoming ? 'opacity-50 pointer-events-none select-none' : ''}>
+        <p className="text-[11px] text-gray-500 mb-2">Launch the live RFQ for this buyer — the AI Inspector carries the same L1→L7 provenance into the form, every prefill traceable.</p>
+        <div className="flex gap-2">
+          <button type="button" disabled={!can} onClick={() => onOpenForm?.('v3', glid)}
+            className="flex-1 px-3 py-2.5 rounded-xl bg-[#52b788] text-white text-[12px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
+            📱 Mobile · Voice RFQ (V3)
+          </button>
+          <button type="button" disabled={!can} onClick={() => onOpenForm?.('v4', glid)}
+            className="flex-1 px-3 py-2.5 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 text-white text-[12px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
+            🖥 Desktop · AI Inspector (V4)
+          </button>
+        </div>
       </div>
-      {!can && <p className="text-[10px] text-gray-400 mt-1.5">{!glid.trim() ? 'Open the Ledger from a staged GLID to enable.' : 'Form launch not wired in this context.'}</p>}
+      {upcoming ? <p className="text-[10px] text-gray-400 mt-1.5">UC3 is on the roadmap — kept behind the scenes for now.</p> : (!can && <p className="text-[10px] text-gray-400 mt-1.5">{!glid.trim() ? 'Open the Ledger from a staged GLID to enable.' : 'Form launch not wired in this context.'}</p>)}
     </Band>
   );
 }

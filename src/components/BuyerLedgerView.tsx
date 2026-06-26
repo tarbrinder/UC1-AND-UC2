@@ -6,11 +6,11 @@
 //   RIGHT  = Evidence Graph + Coverage — every source node (executive card) → its facts (used/ignored)
 // Standalone: it does its OWN pull (other-team path) or reuses an existing pull. No V3/V4 disruption.
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { buildLedger, evolveLedger, counterfactualFor, derivationTimeline, diffLedgerVersions, weightTree, attentionMap, attentionBySource, ignoredReasonFor, promotionLadder, alternativeTrees, type Ledger, type Decision, type Fact, type SourceNode } from '../lib/ledger';
 import { buildExternalCard } from '../lib/externalCard';
 import { N8N_HOOK } from '../lib/api';
-import { buildUC2Enrichment, buildUC2Prompt, mergeUC2LLM, type UC2Context, type UC2LLMOut } from '../lib/uc2Enrichment';
+import { buildUC2Enrichment, buildUC2Prompt, mergeUC2LLM, UC2_PROMPT_VERSION, type UC2Context, type UC2LLMOut, type UC2EditFull } from '../lib/uc2Enrichment';
 import { nodeCard } from '../lib/nodeCards';
 import { synthMeta } from '../lib/profileSynth';
 import { pruneTwinLLM, offerEnrichLLM, enrichRequirementLLM, extractBuyerProfileLLM, hasGeminiKey, type SynthLLMOut, type SynthUsage } from '../lib/gemini';
@@ -29,8 +29,18 @@ import { identityFromMerged, externalFromMerged, resolveAvailable, resolveBuyerN
 import { attributeLineage } from '../lib/attributeLineage';
 import { parseRequirementBrain, resolveRequirement } from '../lib/requirementBrain';
 import { stateFromFrequency } from '../lib/brains/threeBrainRegistry';
-import { L0Band, L1Band, L2Band, L3Band, L4Band, L5Band, L6Band, UC2DebugBand, CrawlerBand, L7Band, UC3Band, type SignalChannel, type OutAttr, type EvalRow, type CatalogRow, type OfferFieldRow, type L6Availability, type L6ProfileRow, type ReqRow } from './bands/ledgerBands';
-import { StatePill } from './bands/Band';
+import { L0Band, L1Band, L3Band, L4Band, L5Band, L6Band, UC2DebugBand, CrawlerBand, L7Band, UC3Band, confidenceChip, type SignalChannel, type OutAttr, type EvalRow, type CatalogRow, type OfferFieldRow, type L6Availability, type L6ProfileRow, type ReqRow, type L1NodeRow } from './bands/ledgerBands';
+import { Band, StatePill } from './bands/Band';
+
+// UI declutter (owner): L6 sits on top; everything else folds under ONE "Debug" container in 4 grouped sections.
+// L7 (a 2nd requirement-enrichment readable) overlaps L6's Original↔AI-Enriched toggle → dropped from view (flag-gated,
+// re-enable by flipping). The stale Evidence-Graph rail measured the RETIRED arithmetic path → hidden behind its flag.
+const SHOW_L7: boolean = false;
+const SHOW_EVIDENCE_GRAPH: boolean = false;
+// 👔 Business / 🤖 AI / ⚙️ Raw level tabs — they only gate the depth of the (now-rare) decision-chain drill; in the
+// V10 extract flow that drill almost never renders, so the tabs do nothing visible. Hidden (level fixed at 'system' =
+// full depth, so no info is lost). Flip to re-enable.
+const SHOW_LEVEL_TABS: boolean = false;
 
 const SOURCE_LABEL: Record<SourceNode, string> = { 'profile-api': 'Profile API', glusr: 'GLUSR', 'pns-insights': 'PNS', 'prev-bl': 'Prev BL', 'prev-isq': 'Prev ISQ', csl: 'CSL', 'wa-out': 'WA·ours', 'wa-in': 'WA·buyer', befisc: 'Befisc', sign3: 'Sign3' };
 
@@ -58,6 +68,52 @@ function Bar({ pct, tone = 'bg-teal-400' }: { pct: number; tone?: string }) {
   return <span className="inline-block w-16 h-1.5 rounded-full bg-gray-100 overflow-hidden align-middle"><span className={`block h-full rounded-full ${tone}`} style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} /></span>;
 }
 
+// a numbered section divider for the 4 grouped sections inside the one Debug container
+function DebugGroup({ n, label }: { n: string; label: string }) {
+  return (<div className="flex items-center gap-2 pt-1"><span className="shrink-0 w-5 h-5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold flex items-center justify-center">{n}</span><span className="text-[11px] font-semibold text-slate-600">{label}</span></div>);
+}
+
+// STAGED LOADER (owner: "put stages — got previous requirements, got CSL… no need to poll"). We DON'T poll n8n (that
+// would hang); since we know exactly which nodes the pull runs, we tick through the known stages on a TIMER — labelled
+// an estimate, not live truth. The last stage holds until the real data arrives (parent unmounts this on `ledger`).
+const LOAD_STAGES = [
+  'Connecting to n8n', 'Fetching previous requirements (BuyLeads + ISQ)', 'Pulling on-site behaviour (CSL)',
+  'Reading the WhatsApp timeline', 'Resolving identity (Profile ⊕ GLUSR)', 'Loading PNS sales-call insights',
+  'Triangulating external (Befisc ⊕ Sign3)', 'Checking GST (KYB)', 'Building the buyer twin',
+];
+function StagedLoader({ glid, complete }: { glid?: string; complete?: boolean }) {
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    setStage(0);
+    const id = setInterval(() => setStage((s) => { const next = Math.min(s + 1, LOAD_STAGES.length - 1); if (next >= LOAD_STAGES.length - 1) clearInterval(id); return next; }), 2200);
+    return () => clearInterval(id);
+  }, []);
+  // `complete` (owner: "mark done then move") — the n8n response arrived: snap EVERY stage to done before the card shows.
+  const shown = complete ? LOAD_STAGES.length : stage;
+  return (
+    <div className="flex-1 flex items-center justify-center p-8">
+      <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white shadow-sm p-5">
+        <div className="flex items-center gap-2 mb-1">
+          {complete ? <span className="w-4 h-4 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-[10px] font-bold">✓</span> : <span className="w-4 h-4 rounded-full border-2 border-teal-500 border-t-transparent animate-spin" />}
+          <span className="text-[14px] font-semibold text-gray-800">{complete ? `Buyer ${glid || ''} ready — opening…` : `Pulling buyer ${glid || ''}…`}</span>
+        </div>
+        <div className="text-[11px] text-gray-400 mb-3">{complete ? 'All sources in. Building the view…' : 'Live pull from n8n — can take ~3 min. Stages below are an estimate of what\'s running (not live polling).'}</div>
+        <div className="space-y-1.5">
+          {LOAD_STAGES.map((label, i) => {
+            const done = i < shown; const active = !complete && i === stage;
+            return (
+              <div key={i} className="flex items-center gap-2 text-[12px]">
+                <span className={`shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] ${done ? 'bg-emerald-100 text-emerald-600' : active ? 'bg-teal-100 text-teal-600' : 'bg-gray-100 text-gray-300'}`}>{done ? '✓' : active ? <span className="w-2 h-2 rounded-full border border-teal-500 border-t-transparent animate-spin" /> : '•'}</span>
+                <span className={done ? 'text-gray-500' : active ? 'text-gray-800 font-medium' : 'text-gray-300'}>{label}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // External (Befisc / Sign3 / World) is a SEPARATE mobile→external fetch — it is NOT in the webhook raw.
 // The form stores the normalised result on window.__buyerTwin.observed_external. Merge it in as one more
 // raw element so the ledger's extractor surfaces the External (Befisc/Sign3) nodes on a real pull. When no
@@ -78,8 +134,6 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const tab = 'ledger' as const; // V10: L1–L7 Ledger is the sole view (legacy tabs retired)
   const [level, setLevel] = useState<'business' | 'ai' | 'system'>('system');
   const [prevLedger, setPrevLedger] = useState<Ledger | null>(null); // for Replay (Run A vs Run B diff)
-  // ── Master Observatory (timeline) state ── selectedStage drives the pinned twin (scroll + click); expandedStage opens a stage body.
-  const [expandedStage, setExpandedStage] = useState<string | null>('span-fuse');
   const [highlightFact, setHighlightFact] = useState<string | null>(null); // an evidence id (fN) clicked in the LLM reasoning → jump + highlight its source line
   const [sampleOfferIdx, setSampleOfferIdx] = useState(0); // #3 enrichment "sample offer" picker — latest (0) auto-selected
 
@@ -96,6 +150,14 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
 
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
+  // Loader "finish then move" (owner): when the n8n pull returns, don't jump mid-stage — snap all loader stages to
+  // done for a beat, THEN reveal the card. pullFinishing keeps the (all-done) loader up briefly on the loading→false edge.
+  const [pullFinishing, setPullFinishing] = useState(false);
+  const wasLoading = useRef(false);
+  useEffect(() => {
+    if (loading) { setPullFinishing(false); wasLoading.current = true; return; }   // a (re)pull started → clear any stale finishing flag
+    if (wasLoading.current) { setPullFinishing(true); wasLoading.current = false; const t = setTimeout(() => setPullFinishing(false), 650); return () => clearTimeout(t); }
+  }, [loading]);
   useEffect(() => {
     if (presetLedger) { setLedger(presetLedger); setBuildError(null); return; }
     if (!raw) { setLedger(null); setBuildError(null); return; }
@@ -146,7 +208,11 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const extractOn = true; // V10: extract is the only twin builder (the legacy merged/arithmetic path is deleted)
   const extractSynth = useMemo(() => {
     if (!extractOn) return null; const rich = getEnrichmentRich(); if (!rich) return null;
-    try { const bundle = bundleFromResponse(rich as RichResponse); const rr = rich as { derived_anchors?: Record<string, unknown>; source_registry?: Record<string, Record<string, unknown>>; source_priority?: Record<string, unknown> }; const p = buildExtractPrompt(bundle, rr.derived_anchors || null, { source_registry: rr.source_registry || null, source_priority: rr.source_priority || null }); return { bundle, prompt: { system: p.system, user: p.user }, evidenceIds: p.evidenceIds }; } catch { return null; }
+    try { const bundle = bundleFromResponse(rich as RichResponse); const rr = rich as { derived_anchors?: Record<string, unknown>; source_registry?: Record<string, Record<string, unknown>>; source_priority?: Record<string, unknown> };
+      // V14: feed the DECODED PAN entity into the anchors so the persona use-case can reconcile (Individual-PAN vs Manufacturer).
+      let anchors: Record<string, unknown> | null = rr.derived_anchors || null;
+      try { const pe = decodeIdentityDocs(identityFromMerged(rich), externalFromMerged(rich)).entityType; if (pe && pe !== 'Unknown') anchors = { ...(anchors || {}), pan_entity: pe }; } catch { /* noop */ }
+      const p = buildExtractPrompt(bundle, anchors, { source_registry: rr.source_registry || null, source_priority: rr.source_priority || null }); return { bundle, prompt: { system: p.system, user: p.user }, evidenceIds: p.evidenceIds }; } catch { return null; }
   }, [extractOn, ledger]);
   // V10 (owner-locked #1/#2/#8): EXTRACT is the ONLY twin authority — "n8n → one LLM → display, nothing inbetween".
   // The merged/arithmetic path is retired as an authority (its symbols survive only in dead ternary branches below,
@@ -199,8 +265,9 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // the base-truth requirement + buyer-profile finals (corroboration, not re-derived) + the fN evidence bundle +
   // category criticals (requirement_brain) + identity anchors. No-key → deterministic dummy fallback.
   const PROFILE_CTX_KEYS = ['location_sourcing_preference', 'business_persona', 'buyer_maturity', 'sub_industry', 'products_of_interest', 'buyer_intent', 'purchase_frequency', 'procurement_model', 'digital_footprint'];
-  const uc2Ctx = useMemo<UC2Context | null>(() => {
-    const selReq = requirements[offerIdx]; if (!selReq) return null;
+  // UC2 context for ANY requirement index (so each enriched requirement gets its OWN debug block, not just the selected).
+  const uc2CtxFor = (i: number): UC2Context | null => {
+    const selReq = requirements[i]; if (!selReq) return null;
     const rich = getEnrichmentRich() as { derived_anchors?: { city?: string; state?: string } } | null;
     const anchors = rich?.derived_anchors; const anchorLoc = [anchors?.city, anchors?.state].filter(Boolean).join(', ') || undefined;
     const evidence = (synthCtx?.bundle.evidence || []).map((e) => ({ evidence_id: e.evidence_id, node: e.node, tag: e.tag, raw: e.raw }));
@@ -211,16 +278,28 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     const ext = externalFromMerged(getEnrichmentRich());
     const external = ext && (ext.age || ext.gender || ext.incomeBand) ? { age: ext.age, gender: ext.gender, incomeBand: ext.incomeBand } : undefined;
     return { selReq: { title: selReq.title, category: selReq.category, categoryId: selReq.categoryId, location: anchorLoc, specs: selReq.specs, specsStatus: selReq.specsStatus, description: selReq.description }, profile, evidence, addSpecs, anchors: anchors ? { city: anchors.city, state: anchors.state } : undefined, external };
-  }, [requirements, offerIdx, finals, synthCtx]);
-  const [uc2LLM, setUc2LLM] = useState<{ status: 'idle' | 'loading' | 'done' | 'no-key'; out: UC2LLMOut | null; usage: SynthUsage | null }>({ status: 'idle', out: null, usage: null });
-  useEffect(() => { setUc2LLM({ status: 'idle', out: null, usage: null }); }, [ledger, offerIdx]);
+  };
+  const uc2Ctx = useMemo<UC2Context | null>(() => uc2CtxFor(offerIdx), [requirements, offerIdx, finals, synthCtx]); // eslint-disable-line react-hooks/exhaustive-deps
+  // L6 card 3-way view: Original (frozen) · Buyer Profile (default, AI profile + drills) · Requirement (UC2-enriched).
+  // The requirement-enrichment LLM is LAZY — fires ONLY on the Requirement tab, so profile vs requirement calls are distinct.
+  const [cardMode, setCardMode] = useState<'original' | 'profile' | 'requirement'>('profile');
+  useEffect(() => { setCardMode('profile'); }, [ledger]);
+  // UC2 is PER-REQUIREMENT (owner): a MAP keyed by offer index keeps a debug block for EVERY requirement enriched this
+  // pull. The lazy effect writes map[offerIdx]; per-call cost is captured from the LLM health ring right after the call.
+  type Uc2Entry = { status: 'idle' | 'loading' | 'done' | 'no-key'; out: UC2LLMOut | null; usage: SynthUsage | null; costUsd?: number };
+  const [uc2Map, setUc2Map] = useState<Record<number, Uc2Entry>>({});
+  useEffect(() => { setUc2Map({}); }, [ledger]);                                  // reset enrichment history each pull
+  const uc2LLM: Uc2Entry = uc2Map[offerIdx] || { status: 'idle', out: null, usage: null };
   useEffect(() => {
+    if (cardMode !== 'requirement') return;       // lazy: only enrich when the user opens the Requirement tab
     if (!uc2Ctx || uc2LLM.status !== 'idle') return;
-    if (!hasGeminiKey()) { setUc2LLM({ status: 'no-key', out: null, usage: null }); return; }
-    setUc2LLM({ status: 'loading', out: null, usage: null });
-    const p = buildUC2Prompt(uc2Ctx);
-    enrichRequirementLLM(p.system, p.user).then(({ out, usage }) => setUc2LLM({ status: 'done', out, usage })).catch(() => setUc2LLM({ status: 'done', out: null, usage: null }));
-  }, [uc2Ctx, uc2LLM.status]);
+    if (!hasGeminiKey()) { setUc2Map((m) => ({ ...m, [offerIdx]: { status: 'no-key', out: null, usage: null } })); return; }
+    const idx = offerIdx; const p = buildUC2Prompt(uc2Ctx);
+    setUc2Map((m) => ({ ...m, [idx]: { status: 'loading', out: null, usage: null } }));
+    enrichRequirementLLM(p.system, p.user)
+      .then(({ out, usage }) => { const h = getLLMHealth().filter((r) => r.label === 'uc2Enrich').slice(-1)[0]; setUc2Map((m) => ({ ...m, [idx]: { status: 'done', out, usage, costUsd: h?.costUsd } })); })
+      .catch(() => setUc2Map((m) => ({ ...m, [idx]: { status: 'done', out: null, usage: null } })));
+  }, [uc2Ctx, uc2LLM.status, cardMode, offerIdx]);
   const uc2Result = useMemo(() => (uc2Ctx && uc2LLM.out ? mergeUC2LLM(uc2Ctx, uc2LLM.out) : null), [uc2Ctx, uc2LLM.out]);
   // evidence_id → evidence line, for resolving the clickable citations to a human-readable "node · value"
   const evMapAll = useMemo(() => new Map((synthCtx?.bundle.evidence || []).map((e) => [e.evidence_id, e] as const)), [synthCtx]);
@@ -234,13 +313,22 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const heldAttr = (f: FinalAttr) => { const v = String(f.value || '').trim(); const unknownVal = !v || /^(unknown|—|-|n\/?a|none|not (known|available|specified)|tbd|\?)$/i.test(v); return unknownVal || f.pruned || (msynth.status === 'done' && f.provenance === 'arithmetic') || (!!f.llm && !f.llm.grounded); };
   // WHY each held attribute is held (for the L5 held drawer — the governance made visible)
   const heldReason = (f: FinalAttr): string => { const v = String(f.value || '').trim(); const unknownVal = !v || /^(unknown|—|-|n\/?a|none|not (known|available|specified)|tbd|\?)$/i.test(v); if (unknownVal) return 'unknown — no value'; if (f.pruned) return 'pruned by critic'; if (!!f.llm && !f.llm.grounded) return 'ungrounded — citations don\'t entail the value'; if (msynth.status === 'done' && f.provenance === 'arithmetic') return 'arithmetic-only — LLM didn\'t surface it'; return 'held'; };
-  // click an evidence id (fN) in the LLM reasoning → open the Pull stage and scroll/highlight that exact source line
-  const jumpToFact = (id: string) => { setExpandedStage('span-pull'); setHighlightFact(id); };
+  // click an evidence id (fN) in the LLM reasoning → scroll to + flash that exact line in the L3 "evidence sent" list.
+  // The line lives nested inside Debug › L3 › node › evidence — all collapsed — so we open EVERY ancestor <details>.
+  const jumpToFact = (id: string) => setHighlightFact(id);
   useEffect(() => {
     if (!highlightFact) return;
-    const t = setTimeout(() => { const el = document.querySelector(`[data-fact-id="${highlightFact}"]`); if (el) { const d = el.closest('details'); if (d && !d.open) d.open = true; (el as HTMLElement).scrollIntoView({ block: 'center', behavior: 'smooth' }); } }, 220);
+    const t = setTimeout(() => {
+      const el = document.querySelector(`[data-fact-id="${highlightFact}"]`);
+      if (!el) return;
+      for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) { if (n.tagName === 'DETAILS') (n as HTMLDetailsElement).open = true; }
+      (el as HTMLElement).scrollIntoView({ block: 'center', behavior: 'smooth' });
+      const cls = ['ring-2', 'ring-amber-300', 'bg-amber-100', 'rounded']; // all literal elsewhere in source → safe from Tailwind purge
+      el.classList.add(...cls);
+      setTimeout(() => el.classList.remove(...cls), 1800);
+    }, 260);
     return () => clearTimeout(t);
-  }, [highlightFact, expandedStage]);
+  }, [highlightFact]);
 
   const factsBySource = useMemo(() => {
     const m = new Map<SourceNode, Fact[]>();
@@ -439,10 +527,10 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     const lin = attributeLineage(f, (id) => { const e = evMapAll.get(id); return e ? (SOURCE_LABEL[e.node as SourceNode] || e.node) : undefined; });
     return (
       <div className="text-[11px] space-y-1.5">
-        {/* TIER 1 — headline */}
+        {/* TIER 1 — headline (confidence % is click-to-expand: how it's scored · why this number · what would make it 100) */}
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-semibold text-gray-800">{f.value || '—'}</span>
-          <span className="text-[10px] tabular-nums text-gray-500">{f.confidence}%</span>
+          {confidenceChip(f.confidence, !!f.llm, f.llm?.confidenceReason, f.llm?.to100)}
           <span className={`text-[8px] uppercase font-bold tracking-wide px-1 py-px rounded border ${f.llm ? 'text-violet-700 bg-violet-50 border-violet-200' : 'text-emerald-700 bg-emerald-50 border-emerald-200'}`}>{f.llm ? 'LLM' : 'deterministic'}</span>
           {f.llm && f.llm.grounded === false && <span className="text-[9px] text-rose-500" title="no matching evidence">⚠ ungrounded</span>}
         </div>
@@ -454,25 +542,35 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
             {lin.conflictingSources.length ? <span className="text-rose-500">· ruled out {lin.conflictingSources.join('; ')}</span> : null}
           </div>
         )}
-        {/* TIER 2 — concise WHY + clickable evidence chips (→ jump to the exact source line) */}
+        {/* TIER 2 — each WHY line is itself CLICKABLE (owner: many chips inline looked messy). The line reveals its
+            source chips on click; each chip then reveals the exact raw line + a working jump to the prompt (L3). */}
         {steps.length > 0 && (
-          <div className="space-y-0.5">
-            {steps.map((r, i) => (
-              <div key={i} className="text-gray-600 leading-snug">• {r.claim}
-                {(r.evidence || []).map((id) => { const e = evMapAll.get(id); return (
-                  <details key={id} className="inline-block align-baseline ml-1">
-                    <summary className="cursor-pointer list-none inline-flex items-baseline gap-0.5 rounded px-1 text-[9.5px] text-indigo-500 hover:bg-indigo-50 hover:text-indigo-700" title="show the exact line sent to the LLM"><span className="font-mono">[{id}]</span><span className="text-gray-400">{e ? shortNode(id) : '⚠'}</span><span>▾</span></summary>
-                    <div className="mt-0.5 rounded bg-indigo-50/70 border border-indigo-200 p-1.5 text-[10px] text-gray-700 not-italic font-normal">
-                      {e ? (<>
-                        <div className="text-gray-500">{e.node}{e.tag ? <span className="text-gray-400"> · {e.tag}</span> : null} <span className="text-gray-300">(exact LLM-input line)</span></div>
-                        <div className="font-mono text-gray-800 break-words mt-0.5">“{e.raw}”</div>
-                        <button type="button" onClick={() => jumpToFact(id)} className="mt-1 text-[9px] text-indigo-400 hover:text-indigo-600 hover:underline">↗ also scroll to it in the L4 raw prompt</button>
-                      </>) : <span className="text-rose-500">[{id}] is NOT in the evidence bundle sent to the LLM — likely a hallucinated citation</span>}
-                    </div>
-                  </details>
-                ); })}
-              </div>
-            ))}
+          <div className="space-y-1">
+            {steps.map((r, i) => { const ev = r.evidence || []; return (
+              <details key={i} className="text-gray-600 leading-snug">
+                <summary className="cursor-pointer list-none flex items-baseline gap-1 hover:text-gray-800">
+                  <span className="text-gray-300 shrink-0">▸</span>
+                  <span className="flex-1 min-w-0">{r.claim}</span>
+                  {ev.length > 0 && <span className="shrink-0 text-[9px] text-indigo-400 whitespace-nowrap">{ev.length} source{ev.length === 1 ? '' : 's'}</span>}
+                </summary>
+                {ev.length > 0 && (
+                  <div className="mt-1 ml-4 flex flex-wrap gap-1">
+                    {ev.map((id) => { const e = evMapAll.get(id); return (
+                      <details key={id} className="inline-block align-baseline">
+                        <summary className="cursor-pointer list-none inline-flex items-baseline gap-0.5 rounded px-1 text-[9.5px] text-indigo-500 hover:bg-indigo-50 hover:text-indigo-700" title="show the exact line sent to the LLM"><span className="font-mono">[{id}]</span><span className="text-gray-400">{e ? shortNode(id) : '⚠'}</span><span>▾</span></summary>
+                        <div className="mt-0.5 rounded bg-indigo-50/70 border border-indigo-200 p-1.5 text-[10px] text-gray-700 not-italic font-normal">
+                          {e ? (<>
+                            <div className="text-gray-500">{e.node}{e.tag ? <span className="text-gray-400"> · {e.tag}</span> : null} <span className="text-gray-300">(exact LLM-input line)</span></div>
+                            <div className="font-mono text-gray-800 break-words mt-0.5">“{e.raw}”</div>
+                            <button type="button" onClick={() => jumpToFact(id)} className="mt-1 text-[9px] text-indigo-400 hover:text-indigo-600 hover:underline">↗ jump to this line in the prompt (L3)</button>
+                          </>) : <span className="text-rose-500">[{id}] is NOT in the evidence bundle sent to the LLM — likely a hallucinated citation</span>}
+                        </div>
+                      </details>
+                    ); })}
+                  </div>
+                )}
+              </details>
+            ); })}
           </div>
         )}
         {/* TIER 3 — raw decision chain (full weight · attention · governance · alternatives) behind one expand */}
@@ -534,15 +632,17 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 bg-white shrink-0">
         <div className="flex items-center gap-3">
-          <h2 className="font-bold text-gray-900 text-[15px]">{title || '🔬 Buyer Ledger'}</h2>
+          <h2 className="font-bold text-gray-900 text-[15px]">{title || '📊 Profile & Requirement Enrichment Analysis'}</h2>
           <span className="text-gray-400">GLID {glid || '—'}</span>
           {ledger && <span className="text-[11px] text-gray-400">· v{ledger.timeline[ledger.timeline.length - 1]?.version ?? 1} · {ledger.decisions.length} decisions · {ledger.facts.length} facts</span>}
         </div>
         <div className="flex items-center gap-3">
-          {/* 3-LEVEL view (Business / AI / System) — HOD never needs n8n */}
-          <div className="flex items-center gap-0.5 rounded-lg bg-gray-100 p-0.5 text-[11px] font-semibold">
-            {(['business', 'ai', 'system'] as const).map((lv) => (<button key={lv} onClick={() => setLevel(lv)} className={`rounded-md px-2 py-1 capitalize transition ${level === lv ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>{lv === 'business' ? '👔 Business' : lv === 'ai' ? '🤖 AI' : '⚙️ Raw'}</button>))}
-          </div>
+          {/* 3-LEVEL view (Business / AI / System) — vestigial in V10 (gates only the rare decision drill); hidden behind SHOW_LEVEL_TABS, level stays 'system' = full depth */}
+          {SHOW_LEVEL_TABS && (
+            <div className="flex items-center gap-0.5 rounded-lg bg-gray-100 p-0.5 text-[11px] font-semibold">
+              {(['business', 'ai', 'system'] as const).map((lv) => (<button key={lv} onClick={() => setLevel(lv)} className={`rounded-md px-2 py-1 capitalize transition ${level === lv ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>{lv === 'business' ? '👔 Business' : lv === 'ai' ? '🤖 AI' : '⚙️ Raw'}</button>))}
+            </div>
+          )}
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm rounded-full border border-gray-200 px-3 py-1">✕ close</button>
         </div>
       </div>
@@ -550,7 +650,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
       {/* V10: the L1–L7 Ledger is the sole view (legacy Observatory/Twin/System tabs retired — the extract twin is the one authority). */}
       {ledger && (
         <div className="flex items-center px-5 py-1.5 border-b border-gray-200 bg-white shrink-0 text-[12px] font-semibold">
-          <span className="rounded-lg px-3 py-1 bg-teal-50 text-teal-700 border border-teal-200">📋 L1–L7 Buyer Ledger</span>
+          <span className="rounded-lg px-3 py-1 bg-teal-50 text-teal-700 border border-teal-200">📊 Profile & Requirement Enrichment</span>
         </div>
       )}
 
@@ -576,12 +676,12 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         </div>
       ); })()}
 
-      {loading && <div className="flex-1 flex items-center justify-center text-gray-400">Pulling buyer data for GLID {glid}… (the live pull can take ~3 min)</div>}
+      {(loading || pullFinishing) && <StagedLoader glid={glid} complete={!loading} />}
       {!loading && buildError && <div className="flex-1 flex flex-col items-center justify-center gap-2 p-8 text-center"><div className="text-rose-600 font-semibold">⚠ Couldn't build the ledger from this pull</div><div className="text-[12px] text-gray-500 max-w-md">{buildError}</div><div className="text-[11px] text-gray-400">The raw pull is on <code>window.__enrichment</code> / <code>window.__ledgerError</code> for diagnosis — the screen no longer blanks.</div></div>}
       {!loading && !buildError && !ledger && <div className="flex-1 flex items-center justify-center text-gray-400">No buyer data. Pull a GLID first.</div>}
 
       {/* ═══ 📋 L1–L7 LEDGER — the "no black box" stack: nodes → signals → LLM input → prompt → output → UC1 → UC2 → UC3 ═══ */}
-      {ledger && tab === 'ledger' && (() => {
+      {ledger && !pullFinishing && tab === 'ledger' && (() => {
         const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
         // L1 · nodes & health
         const health = getEnrichmentHealth().map((h) => ({ node: h.node, ok: h.ok, latency_ms: h.latency_ms, output_count: h.output_count, source: h.source }));
@@ -715,12 +815,18 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         // location is clickable → reveals the location_sourcing_preference deduction (so it's NOT repeated as a profile row)
         const locAttr = finals.find((f) => f.key === 'location_sourcing_preference') || null;
         const locationDrill = locAttr ? finalAttrDetail(locAttr) : undefined;
+        // Location CORRECTION (owner): when the AI's deduced OPERATING city differs from the recorded BuyLead location,
+        // strike the recorded and show the operating city — the recorded value was really a sourcing/registration city.
+        const recordedLoc = idn ? ([idn.city, idn.state].filter(Boolean).join(', ') || '') : '';
+        const operatingCity = (locAttr?.value.match(/operates in\s+([^·|]+)/i)?.[1] || '').trim().replace(/[.;]+$/, '');
+        const locationCorrected = (operatingCity && recordedLoc && norm(operatingCity) !== norm(recordedLoc) && !norm(operatingCity).includes(norm(idn?.city || ' ')))
+          ? { from: recordedLoc, to: operatingCity } : undefined;
         const titleDrill = selReq ? (<div className="text-[10.5px] text-gray-600 space-y-0.5">{selReq.offerId && <div>offer id: <span className="font-mono">{selReq.offerId}</span></div>}{selReq.status && <div>status: {selReq.status}{selReq.isExpired ? ' (expired)' : ''}</div>}{selReq.posted && <div>posted: {selReq.posted}</div>}{selReq.expiry && <div>expiry: {selReq.expiry}</div>}{selReq.recencyDays != null && <div>age: {selReq.recencyDays}d</div>}{selReq.category && <div>category: {selReq.category}{selReq.categoryId ? ` (#${selReq.categoryId})` : ''}</div>}{selReq.orderValue && <div>probable order value: {selReq.orderValue} <span className="text-gray-400">(system-deduced)</span></div>}{selReq.requirementType && <div>requirement type: {selReq.requirementType} <span className="text-gray-400">(system-deduced)</span></div>}{selReq.productOrService && <div>type: {selReq.productOrService}</div>}{selReq.verified != null && selReq.verified !== '' && <div>verified flag: {selReq.verified}</div>}{selReq.queryId && <div>query id: <span className="font-mono">{selReq.queryId}</span></div>}</div>) : undefined;
         // V11 — LLM-derived (>1 source) buyer-profile rows. Headline is the VALUE ONLY; confidence% + LLM badge show
         // ON CLICK (finalAttrDetail drill). identity_confidence + digital_footprint are NOT here (id-conf renders below
         // Available; digital_footprint/social-presence dropped per owner — not useful, data is presence-only).
-        const PROFILE_KEYS = ['business_persona', 'buyer_maturity', 'sub_industry', 'buyer_intent', 'scale', 'price_vs_quality', 'procurement_model', 'purchase_frequency', 'communication', 'delivery_timeline', 'digital_footprint'];
-        const llmRows: L6ProfileRow[] = PROFILE_KEYS.map((k) => finals.find((f) => f.key === k)).filter((f): f is NonNullable<typeof f> => !!f).map((f) => ({ label: f.label, value: f.value, drill: finalAttrDetail(f) }));
+        const PROFILE_KEYS = ['business_persona', 'buyer_maturity', 'sub_industry', 'buyer_intent', 'scale', 'price_vs_quality', 'procurement_model', 'purchase_frequency', 'communication', 'delivery_timeline', 'urgency', 'payment_mode', 'digital_footprint'];
+        const llmRows: L6ProfileRow[] = PROFILE_KEYS.map((k) => finals.find((f) => f.key === k)).filter((f): f is NonNullable<typeof f> => !!f).map((f) => ({ label: f.label, value: f.value, drill: finalAttrDetail(f), prov: 'llm' as const }));
         // identity_confidence → its OWN row right below the Available block (trust signal about the anchors). % on click.
         const idConfAttr = finals.find((f) => f.key === 'identity_confidence') || null;
         const identityConfidence = idConfAttr ? { value: idConfAttr.value, drill: finalAttrDetail(idConfAttr) } : undefined;
@@ -730,7 +836,6 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         const idnForDocs = (idn || gstFetched.gst) ? ({ emails: [], mobiles: [], ...(idn || {}), gst: (idn?.gst || gstFetched.gst) || undefined } as typeof idn) : idn;
         const docs = decodeIdentityDocs(idnForDocs, ext, resolvedName?.name);
         if (resolvedName) availability.push({ key: 'name', label: 'Name', present: true, verified: resolvedName.confidence >= 85, value: resolvedName.name, source: resolvedName.source, note: `${resolvedName.full ? 'full name' : 'first name only'} · ${resolvedName.confidence}% (${resolvedName.source})` });
-        if (ext?.age || ext?.gender) availability.push({ key: 'age', label: 'Age / Gender', present: true, verified: false, value: [ext?.age && `${ext.age}y`, ext?.gender].filter(Boolean).join(' · '), source: 'Befisc (external)', note: 'external — single source' });
         if (docs.pan) availability.push({ key: 'pan', label: 'PAN', present: true, verified: docs.pan.nameMatch === 'match', value: `${docs.pan.pan} · ${docs.pan.entityType}${docs.pan.nameMatch !== 'unknown' ? ` · surname ${docs.pan.nameMatch}` : ''}${docs.panDuplicate ? ' · ⚠ 2 distinct PANs' : ''}`, source: 'Befisc / identity', note: `4th char "${docs.pan.entityChar}" → ${docs.pan.entityType}; format ${docs.pan.valid ? 'valid' : 'invalid'}` });
         if (docs.gst) availability.push({ key: 'gst', label: 'GST', present: true, verified: true, value: `${docs.gst.gstin} · ${docs.gst.state} · ${docs.gst.entityType}${gstFetched.count > 1 ? ` (+${gstFetched.count - 1} more)` : ''}`, source: 'Mobile/Email→GST', note: `state ${docs.gst.stateCode} → ${docs.gst.state}; embedded PAN ${docs.gst.pan}` });
         // de-dup by key — prefer the POPULATED row (resolveAvailable may carry an empty pan/gst placeholder)
@@ -738,26 +843,77 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         const availFinal = [...availMap.values()];
         // GST Verified ribbon badge — present ONLY when the GST node returned a decodable GSTIN (else hidden).
         const gstVerified = docs.gst ? { gstin: docs.gst.gstin, state: docs.gst.state, entity: docs.gst.entityType, count: gstFetched.count || gstFetched.gsts.length || 1, list: gstFetched.gsts.length ? gstFetched.gsts : [docs.gst.gstin] } : null;
+        // Q76 — "still ask": frozen buyer questions NOT deduced (LLM omitted = couldn't ground) or below-confidence → ask the buyer.
+        const ASK_LABELS: Record<string, string> = { business_persona: 'Buyer Persona', buyer_maturity: 'Buyer Maturity', buyer_intent: 'Buyer Intent', procurement_model: 'Procurement Model', purchase_frequency: 'Purchase Frequency', price_vs_quality: 'Price vs Quality', communication: 'Communication', delivery_timeline: 'Delivery Timeline', payment_mode: 'Payment Mode', location_sourcing_preference: 'Location & Sourcing' };
+        const stillAsk = Object.keys(ASK_LABELS).filter((k) => { if (k === 'delivery_timeline') return !finals.some((f) => f.key === 'delivery_timeline' || f.key === 'urgency'); const f = finals.find((x) => x.key === k); return !f || (f.confidence ?? 0) < 60; }).map((k) => ASK_LABELS[k]);
         // DETERMINISTIC profile rows that stay on the right (NOT identity anchors): purchasing power only. Detail on click.
         const detRows: L6ProfileRow[] = [];
-        if (ext?.incomeBand) detRows.push({ label: 'Purchasing power', value: ext.incomeBand, drill: (<div className="text-[10.5px] text-gray-600">{ext.incomeBand} — deterministic, Befisc income (single source). No LLM reasoning.</div>) });
+        if (ext?.incomeBand) detRows.push({ label: 'Purchasing power', value: ext.incomeBand, prov: 'det', drill: (<div className="text-[10.5px] text-gray-600">{ext.incomeBand} — deterministic, Befisc income (single source). No LLM reasoning.</div>) });
         const profileRows: L6ProfileRow[] = [...detRows, ...llmRows];
-        const buyerDetails = (idn || profileRows.length || availFinal.length) ? { name: resolvedName?.name || idn?.name, memberSince: humanizeSince(idn?.memberSince), responseCalls: pnsCards.length, responseReplies: waConvo?.inbound.buyerMsgs ?? 0, availability: availFinal, identityConfidence, profileRows } : null;
+        const ageGender = [ext?.age && `${ext.age}y`, ext?.gender].filter(Boolean).join(' · ') || undefined; // own row between Response & Available (owner)
+        const ageGenderDrill = ageGender ? (
+          <div className="text-[10.5px] text-gray-600 space-y-0.5">
+            <div className="font-semibold text-gray-800">{ageGender}</div>
+            <div><span className="text-gray-400">how it's known: </span>deterministic — read straight from the paid external identity lookup (Befisc). A single verified source, passed through as-is; this is not an LLM guess.</div>
+            <div><span className="text-emerald-600">to reach full confidence: </span>a second independent source confirming the same age/gender.</div>
+          </div>
+        ) : undefined;
+        const buyerDetails = (idn || profileRows.length || availFinal.length) ? { name: resolvedName?.name || idn?.name, memberSince: humanizeSince(idn?.memberSince), responseCalls: pnsCards.length, responseReplies: waConvo?.inbound.buyerMsgs ?? 0, ageGender, ageGenderDrill, availability: availFinal, identityConfidence, profileRows } : null;
         const selectedReqCard = selReq ? { title: selReq.title, posted: selReq.posted, expiry: selReq.expiry, status: selReq.status, isExpired: selReq.isExpired, recencyDays: selReq.recencyDays, category: selReq.category, location: idn ? ([idn.city, idn.state].filter(Boolean).join(', ') || undefined) : undefined, specs: selReq.specs, specsStatus: selReq.specsStatus, buyerInfo: selReq.buyerInfo, commercials: selReq.commercials } : null;
         const offerEvalCard = offerResult ? { groundedPct: offerResult.eval.groundedPct, hallucinations: offerResult.eval.hallucinations, verdict: offerResult.eval.verdict } : null;
         // UC2 · requirement enrichment/correction (base truth → AI-enriched). REAL grounded LLM path when a key is
         // present (uc2Result.enrichment); deterministic dummy fallback otherwise (no key / call failed/pending).
-        const uc2 = uc2Result ? uc2Result.enrichment : (selReq ? buildUC2Enrichment({
-          title: selReq.title, category: selReq.category,
-          location: idn ? ([idn.city, idn.state].filter(Boolean).join(', ') || undefined) : undefined,
-          specs: selReq.specs,
-          addSpecs: ['Delivery Timeline', 'Payment Terms'], // generic procurement attrs (never category-specific)
-          derivedCount: availability.filter((a) => a.present).length + profileRows.length + (productsOfInterest ? 1 : 0),
-        }) : null);
-        // UC2·debug band feed: usage (uc2LLM) + cost (LLM health ring) + the exact prompt input the LLM saw
-        const uc2Health = getLLMHealth().filter((r) => r.label === 'uc2Enrich').slice(-1)[0];
-        const uc2Usage = uc2LLM.usage ? { in: uc2LLM.usage.promptTokens, out: uc2LLM.usage.completionTokens, reasoning: uc2LLM.usage.reasoningTokens, ms: uc2LLM.usage.ms, costUsd: uc2Health?.costUsd } : null;
-        const uc2PromptIO = uc2Ctx ? (() => { const p = buildUC2Prompt(uc2Ctx); return { system: p.system, user: p.user }; })() : null;
+        // Rich drill for a UC2 edit (mirrors finalAttrDetail): clean value · confidence chip · reason · evidence chips
+        // (each clickable to its raw fN line + jump-to-prompt). This is what each LEFT-column enriched spec expands to.
+        const uc2EditDrill = (e: UC2EditFull): ReactNode => (
+          <div className="text-[11px] space-y-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-semibold text-gray-800">{e.to || '—'}</span>
+              {confidenceChip(e.confidence, true, e.confidenceReason, e.to100)}
+              <span className="text-[8px] uppercase font-bold tracking-wide px-1 py-px rounded border text-violet-700 bg-violet-50 border-violet-200">LLM</span>
+              {!e.grounded && <span className="text-[9px] text-rose-500" title="no matching evidence">⚠ ungrounded</span>}
+            </div>
+            {e.reason && <div className="text-gray-600 leading-snug">{e.reason}</div>}
+            {e.evidence.length > 0 && (
+              <details>
+                <summary className="cursor-pointer list-none text-[9.5px] text-indigo-400 hover:text-indigo-600">{e.evidence.length} source{e.evidence.length === 1 ? '' : 's'} ▾</summary>
+                <div className="mt-1 ml-2 flex flex-wrap gap-1">
+                  {e.evidence.map((ev) => (
+                    <details key={ev.evidence_id} className="inline-block align-baseline">
+                      <summary className="cursor-pointer list-none inline-flex items-baseline gap-0.5 rounded px-1 text-[9.5px] text-indigo-500 hover:bg-indigo-50 hover:text-indigo-700"><span className="font-mono">[{ev.evidence_id}]</span><span className="text-gray-400">{ev.node}</span><span>▾</span></summary>
+                      <div className="mt-0.5 rounded bg-indigo-50/70 border border-indigo-200 p-1.5 text-[10px] text-gray-700 not-italic font-normal">
+                        <div className="text-gray-500">{ev.node}{ev.tag ? <span className="text-gray-400"> · {ev.tag}</span> : null}</div>
+                        <div className="font-mono text-gray-800 break-words mt-0.5">“{ev.raw}”</div>
+                        <button type="button" onClick={() => jumpToFact(ev.evidence_id)} className="mt-1 text-[9px] text-indigo-400 hover:text-indigo-600 hover:underline">↗ jump to this line in the prompt (L3)</button>
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        );
+        const uc2 = (() => {
+          const base = uc2Result ? uc2Result.enrichment : (selReq ? buildUC2Enrichment({
+            title: selReq.title, category: selReq.category,
+            location: idn ? ([idn.city, idn.state].filter(Boolean).join(', ') || undefined) : undefined,
+            specs: selReq.specs,
+            addSpecs: ['Delivery Timeline', 'Payment Terms'], // generic procurement attrs (never category-specific)
+            derivedCount: availability.filter((a) => a.present).length + profileRows.length + (productsOfInterest ? 1 : 0),
+          }) : null);
+          if (!base || !uc2Result) return base; // dummy fallback (no real edits) → no rich drills
+          const edits = uc2Result.edits;
+          const editFor = (group: string, field?: string) => edits.find((e) => e.group === group && e.applied && (field == null || norm(e.field) === norm(field)));
+          // scalar fields (title/location/category) are only ever populated from a 'corrected' edit — match that kind so the drill describes the shown before→after
+          const attach = <T extends { drill?: ReactNode }>(o: T | undefined, group: string): T | undefined => { if (!o) return o; const e = edits.find((x) => x.group === group && x.applied && x.kind === 'corrected'); return e ? { ...o, drill: uc2EditDrill(e) } : o; };
+          return {
+            ...base,
+            specs: base.specs.map((s) => { const e = editFor('spec', s.k); return e && (s.kind === 'corrected' || s.kind === 'added') ? { ...s, drill: uc2EditDrill(e) } : s; }),
+            title: attach(base.title, 'title'),
+            location: attach(base.location, 'location'),
+            category: attach(base.category, 'category'),
+          };
+        })();
         // P11 — PNS hero-signal coverage: which PNS price/qty/GSM/application/location lines were cited (consumed)
         // by the extract twin OR UC2 vs left unaccounted. Makes "PNS never silently dropped" measurable per pull.
         const pnsCoverage = (() => {
@@ -771,26 +927,102 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           const consumed = hero.filter((e) => cited.has(e.evidence_id)).length;
           return { consumed, unaccounted: hero.length - consumed, total: hero.length };
         })();
+        // PER-REQUIREMENT enrichment debug — one block for EVERY requirement enriched this pull (owner: "more blocks as
+        // I enrich more"). Each carries its own prompt input · output · applied/held edits · eval · tokens & cost.
+        const enrichedReqs = Object.keys(uc2Map).map(Number).filter((i) => uc2Map[i] && uc2Map[i].status !== 'idle').sort((a, b) => a - b).map((i) => {
+          const entry = uc2Map[i]; const ctx = uc2CtxFor(i);
+          const result = (ctx && entry.out) ? mergeUC2LLM(ctx, entry.out) : null;
+          const promptIO = ctx ? (() => { const pp = buildUC2Prompt(ctx); return { system: pp.system, user: pp.user }; })() : null;
+          const usage = entry.usage ? { in: entry.usage.promptTokens, out: entry.usage.completionTokens, reasoning: entry.usage.reasoningTokens, ms: entry.usage.ms, costUsd: entry.costUsd } : null;
+          return { idx: i, title: requirements[i]?.title || `Requirement #${i + 1}`, status: entry.status, result, promptIO, usage };
+        });
+        // ── L1 unified node model (owner: "every node in health will have raw what LLM saw, and our readable version") ──
+        // Joins n8n __health (ok/latency/count) + rich.sources {summary, raw} + OUR humanised readable, on a canonical
+        // node id. GST is included even though n8n emits no __health row for it (decoded from rich.sources.gst).
+        const canonNode = (k: string): string => { const s = k.toLowerCase(); if (/gst/.test(s)) return 'gst'; if (/csl/.test(s)) return 'csl'; if (/req|buylead|isq|rfq/.test(s)) return 'requirement'; if (/whats|wa[-_]/.test(s)) return 'whatsapp'; if (/ident|profile|glusr/.test(s)) return 'identity'; if (/pns/.test(s)) return 'pns'; if (/ext|befisc|sign3/.test(s)) return 'external'; return s; };
+        const NODE_LABEL: Record<string, string> = { requirement: 'Requirement · BuyLeads ⨝ ISQ', whatsapp: 'WhatsApp · one timeline', pns: 'PNS · sales calls (spoken)', identity: 'Identity · Profile ⊕ GLUSR', external: 'External · Befisc ⊕ Sign3', csl: 'CSL · on-site behaviour', gst: 'GST · Mobile/Email→GST (KYB)' };
+        const NODE_ORDER = ['requirement', 'whatsapp', 'pns', 'identity', 'external', 'csl', 'gst'];
+        const readableByNode: Record<string, ReactNode> = {};
+        for (const c of channels) { const cn = canonNode(c.key); readableByNode[cn] = readableByNode[cn] ? (<div className="space-y-1.5">{readableByNode[cn]}{c.body}</div>) : c.body; }
+        if (idn && !readableByNode['identity']) readableByNode['identity'] = (
+          <div className="text-[10.5px] space-y-0.5">
+            {idn.name && <div><span className="text-gray-400">name: </span>{idn.name}</div>}
+            {idn.company && <div><span className="text-gray-400">company: </span>{idn.company}</div>}
+            {(idn.city || idn.state) && <div><span className="text-gray-400">location: </span>{[idn.city, idn.state].filter(Boolean).join(', ')}</div>}
+            {idn.memberSince && <div><span className="text-gray-400">member since: </span>{idn.memberSince}</div>}
+            {idn.emails.length > 0 && <div><span className="text-gray-400">emails: </span>{idn.emails.join(', ')}</div>}
+            {idn.mobiles.length > 0 && <div><span className="text-gray-400">mobiles: </span>{idn.mobiles.join(', ')}</div>}
+          </div>
+        );
+        if (gstVerified) readableByNode['gst'] = (
+          <div className="text-[10.5px] space-y-0.5">
+            <div><b className="font-mono">{gstVerified.gstin}</b></div>
+            <div className="text-gray-500">{gstVerified.state} · {gstVerified.entity}</div>
+            {gstVerified.list.length > 1 && <div className="text-gray-400">all GSTINs: {gstVerified.list.join(', ')}</div>}
+          </div>
+        );
+        const richSrcEntries = (richResp?.sources && typeof richResp.sources === 'object') ? Object.entries(richResp.sources as Record<string, unknown>) : [];
+        const summaryByNode: Record<string, unknown> = {}; const rawByNode: Record<string, unknown> = {};
+        for (const [k, node] of richSrcEntries) { const cn = canonNode(k); const n = (node && typeof node === 'object') ? node as Record<string, unknown> : {}; summaryByNode[cn] = 'summary' in n ? n.summary : node; if ('raw' in n) rawByNode[cn] = n.raw; }
+        const healthByNode: Record<string, { ok: boolean; latency_ms?: number; output_count?: number }> = {};
+        for (const h of health) healthByNode[canonNode(h.node)] = h;
+        const seenNodes = new Set<string>();
+        const nodeRows: L1NodeRow[] = [];
+        for (const cn of [...NODE_ORDER, ...Object.keys(healthByNode), ...Object.keys(summaryByNode), ...Object.keys(rawByNode)]) {
+          if (seenNodes.has(cn)) continue; seenNodes.add(cn);
+          const h = healthByNode[cn]; const hasReadable = readableByNode[cn] != null; const hasSummary = cn in summaryByNode; const hasRaw = cn in rawByNode;
+          if (!h && !hasReadable && !hasSummary && !hasRaw) continue;
+          nodeRows.push({ key: cn, label: NODE_LABEL[cn] || cn, ok: h?.ok, latency_ms: h?.latency_ms, output_count: h?.output_count, readable: readableByNode[cn], summary: hasSummary ? summaryByNode[cn] : undefined, raw: hasRaw ? rawByNode[cn] : undefined });
+        }
         return (
           <div className="flex-1 min-h-0 overflow-y-auto p-4 bg-gray-50/40">
-            <div className="max-w-3xl mx-auto space-y-2.5">
-              <div className="text-[11px] text-gray-400 mb-1">Every deduction below expands to its last raw line — L1 (what n8n pulled) flows down to L7 (the modified requirement), then UC3 opens the live form.</div>
-              <L1Band health={health} sources={sources} cov={covLLM} endpoint={endpoint} rich={richResp} defaultOpen drill={<details className="mt-1"><summary className="cursor-pointer list-none text-[10.5px] text-slate-600">＋ evidence graph — every node → its facts (role · used/ignored · ladder)</summary><div className="mt-1 space-y-2">{evidenceRail()}</div></details>} />
-              <L2Band channels={channels} />
-              <L3Band model={io?.model || 'google/gemini-2.5-flash'} maxTokens={io?.maxTokens ?? 16000} temperature={io?.temperature ?? 0} promptVersion={io?.promptVersion} catalog={catalog} signalCount={synthCtx?.bundle.evidence.length || 0} usage={msynth.usage ? { inputTokens: msynth.usage.promptTokens, outputTokens: msynth.usage.completionTokens, reasoningTokens: msynth.usage.reasoningTokens, ms: msynth.ms, costUsd: extractCost } : null} sourceGuide={sourceGuideNode} />
-              <L4Band system={io?.system || synthCtx?.prompt.system} user={io?.user || synthCtx?.prompt.user} output={getLLMRaw()['extractBuyerProfile']?.output} />
-              <L5Band attrs={outAttrs} evalRows={evalRows} evalDrill={evalDetail} prune={pruneInfo} status={l5status} drillFor={(key) => { const f = finals.find((x) => x.key === key); return f ? finalAttrDetail(f) : null; }} />
-              <L0Band calls={l0calls} totals={l0totals} evalDetail={evalDetail} harness={harnessNode} promptVersion={io?.promptVersion || 'extract-v4'} defaultOpen />
-              <UC2DebugBand status={uc2LLM.status} model="google/gemini-2.5-flash" promptVersion="uc2Enrich.v3" usage={uc2Usage} evalRes={uc2Result?.eval ?? null} edits={uc2Result?.edits} input={uc2PromptIO} rawOutput={getLLMRaw()['uc2Enrich']?.output} coverage={pnsCoverage} />
-              <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} defaultOpen />
-              <CrawlerBand glid={String((getEnrichmentRich() as { glid?: string | number } | null)?.glid || '')} />
-              <L7Band rows={reqRows} added={resolved.addedSpecs} ask={resolved.ask} dropped={reqDropped} coverage={reqCoverage} hasBrain={!!reqBrain} />
-              <UC3Band glid={glid} onOpenForm={onOpenForm} />
+            <div className="max-w-6xl mx-auto space-y-2.5">
+              {/* L6 — the Buylead / Buyer card on TOP (the product). Everything else is the debug pipeline behind it. */}
+              <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} locationCorrected={locationCorrected} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} stillAsk={stillAsk} mode={cardMode} onMode={setCardMode} defaultOpen />
+              {/* Debug ABOVE (owner) — everything else folds under ONE collapsed Debug container, in 4 clearly-grouped sections */}
+              <Band code="Debug" title="Debug — how the profile & each requirement were built" subtitle="nodes · the buyer-profile LLM · per-requirement enrichment · web verify" tone="slate" defaultOpen={false}>
+                <div className="space-y-2.5">
+                  <div className="text-[11px] text-gray-400">The pipeline behind the card above — every step expands to its last raw line.</div>
+                  <DebugGroup n="1" label="Nodes & Health — shared: every source raw · what the LLM saw · our readable view" />
+                  <L1Band nodes={nodeRows} cov={covLLM} endpoint={endpoint} defaultOpen drill={SHOW_EVIDENCE_GRAPH ? <details className="mt-1"><summary className="cursor-pointer list-none text-[10.5px] text-slate-600">＋ evidence graph — every node → its facts (role · used/ignored · ladder)</summary><div className="mt-1 space-y-2">{evidenceRail()}</div></details> : undefined} />
+                  <DebugGroup n="2" label="Buyer Profile (one-time) — the ONE extract: sent · raw prompt · output · run cost · grounding" />
+                  <L3Band model={io?.model || 'google/gemini-2.5-flash'} maxTokens={io?.maxTokens ?? 16000} temperature={io?.temperature ?? 0} promptVersion={io?.promptVersion} catalog={catalog} sources={sources} signalCount={synthCtx?.bundle.evidence.length || 0} usage={msynth.usage ? { inputTokens: msynth.usage.promptTokens, outputTokens: msynth.usage.completionTokens, reasoningTokens: msynth.usage.reasoningTokens, ms: msynth.ms, costUsd: extractCost } : null} sourceGuide={sourceGuideNode} />
+                  <L4Band system={io?.system || synthCtx?.prompt.system} user={io?.user || synthCtx?.prompt.user} output={getLLMRaw()['extractBuyerProfile']?.output} />
+                  <L5Band attrs={outAttrs} evalRows={evalRows} evalDrill={evalDetail} prune={pruneInfo} status={l5status} drillFor={(key) => { const f = finals.find((x) => x.key === key); return f ? finalAttrDetail(f) : null; }} />
+                  <L0Band calls={l0calls} totals={l0totals} evalDetail={evalDetail} harness={harnessNode} promptVersion={io?.promptVersion || 'extract-v8'} />
+                  <DebugGroup n="3" label={`Requirement Enrichment (per requirement) — ${enrichedReqs.length || 'no'} requirement${enrichedReqs.length === 1 ? '' : 's'} enriched this pull`} />
+                  {enrichedReqs.length === 0
+                    ? <div className="text-[11px] text-gray-400 italic px-1">Open the <b>Requirement</b> tab on the card above to enrich a requirement — each one you enrich gets its own debug block here.</div>
+                    : enrichedReqs.map((r) => (
+                      <UC2DebugBand key={r.idx} reqTitle={r.title} status={r.status} model="google/gemini-2.5-flash" promptVersion={UC2_PROMPT_VERSION} usage={r.usage} evalRes={r.result?.eval ?? null} edits={r.result?.edits} input={r.promptIO} rawOutput={r.idx === offerIdx ? getLLMRaw()['uc2Enrich']?.output : undefined} coverage={r.idx === offerIdx ? pnsCoverage : null} />
+                    ))}
+                  {SHOW_L7 && <L7Band rows={reqRows} added={resolved.addedSpecs} ask={resolved.ask} dropped={reqDropped} coverage={reqCoverage} hasBrain={!!reqBrain} />}
+                  <DebugGroup n="4" label="Web verify (OSINT) — on-demand entity scrape" />
+                  <CrawlerBand glid={String((getEnrichmentRich() as { glid?: string | number } | null)?.glid || '')} />
+                </div>
+              </Band>
+              {/* UC3 BELOW Debug (owner) — greyed "Upcoming", not clickable; the form wiring is kept behind it for later */}
+              <UC3Band glid={glid} onOpenForm={onOpenForm} upcoming />
             </div>
           </div>
         );
       })()}
 
+      {/* in-flight toaster — fires for ANY live LLM call: the extract twin, the critic prune, AND the per-offer
+          requirement (UC2) / offer enrichment (so changing the offer or hitting "enrich" shows it). Poppy gradient. */}
+      {ledger && (() => {
+        const busy = msynth.status === 'loading' || prune.status === 'loading' || uc2LLM.status === 'loading' || offerLLM.status === 'loading';
+        if (!busy) return null;
+        const label = (msynth.status === 'loading' || prune.status === 'loading') ? 'Fetching buyer profile…'
+          : uc2LLM.status === 'loading' ? 'Enriching the requirement…'
+          : 'Enriching the offer…';
+        return (
+          <div className="fixed bottom-5 right-5 z-[60] flex items-center gap-2.5 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-xl shadow-fuchsia-500/30 px-4 py-2.5 text-[13px] font-semibold ring-2 ring-white/40">
+            <span className="w-3.5 h-3.5 rounded-full border-2 border-white/80 border-t-transparent animate-spin" />
+            {label}
+          </div>
+        );
+      })()}
     </div>
   );
 }

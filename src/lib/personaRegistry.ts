@@ -110,10 +110,15 @@ const CANDIDATES: Cand[] = [
 
 // key → { display label, bucket } from the registry schema (used to group the pure-LLM twin attributes into the
 // same buckets the persona uses). Unknown keys (LLM-surfaced) fall back to a humanised label + "Other deduced".
+const ATTR_LABEL: Record<string, string> = {
+  business_persona: 'Buyer Persona', buyer_maturity: 'Buyer Maturity', delivery_timeline: 'Delivery Timeline',
+  payment_mode: 'Payment Mode', purchase_frequency: 'Purchase frequency', location_sourcing_preference: 'Location & Sourcing',
+  digital_footprint: 'Digital footprint', identity_confidence: 'Identity Confidence', products_of_interest: 'Products of Interest',
+};
 export function attrMeta(key: string): { label: string; group: string } {
   const c = CANDIDATES.find((x) => x.key === key);
   if (c) return { label: c.label, group: c.group };
-  return { label: key.replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()), group: 'Other deduced' };
+  return { label: ATTR_LABEL[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()), group: 'Other deduced' };
 }
 
 export function buildPersona(L: Ledger): Persona {

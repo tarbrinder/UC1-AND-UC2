@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Zap, ShieldCheck, Clock, Layers, Mic, FileText, Sparkles } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { Zap, Layers, Mic, FileText, Sparkles } from 'lucide-react';
 import RFQModalV3 from './components/RFQModalV3';
 import RFQModalV4 from './components/RFQModalV4';
 import BuyerLedgerView from './components/BuyerLedgerView';
@@ -9,17 +9,11 @@ import type { InspectorState } from './lib/inspectorData';
 
 type ModalVariant = 'v1' | 'v2' | 'v3' | 'smart' | 'v4' | null;
 
-const CYCLING_PRODUCTS = [
-  'Industrial Pumps',
-  'Steel Pipes',
-  'Solar Panels',
-  'Cotton Fabric',
-  'Ball Bearings',
-  'Electric Motors',
-  'PVC Pipes',
-  'LED Bulbs',
-  'CNC Machines',
-];
+// ── UI declutter (owner) — hide the public quote CTAs + the extra debug pulls/ledgers FOR NOW. Everything is kept
+//    in source (just gated) so we can re-enable in future by flipping a single flag. Debug landing keeps ONLY the
+//    Buyer-GLID input + the 🔬 Buyer Ledger entry. ─────────────────────────────────────────────────────────────
+const SHOW_QUOTE_CTAS: boolean = false;   // Quick Quote · Quick Quote V2 · Voice Quote V3 · Smart RFQ · AI Studio V4
+const SHOW_EXTRA_DEBUG: boolean = false;  // Pull → V3 · Pull → V4 · 🔬 RFQ Ledger · Ignore-Twin toggle · explainer line
 
 const VARIANT_BUTTONS: {
   id: ModalVariant;
@@ -98,8 +92,6 @@ const RFQ_DEMO_STATE = {
 
 export default function MainApp() {
   const [activeModal, setActiveModal] = useState<ModalVariant>(null);
-  const [productIndex, setProductIndex] = useState(0);
-  const [fadeIn, setFadeIn] = useState(true);
   // Step-0 debug staging: the GLID/Pull CTA now lives HERE (on the landing). It stages a GLID and
   // opens Smart with autoPull → the modal runs its existing pull on mount, so the product screen
   // stays clean. ?debug-gated (demo prefill). Opening any card directly = a clean cold run.
@@ -121,16 +113,6 @@ export default function MainApp() {
   // UC3 · launch the live RFQ form for the buyer in the Ledger (mobile=V3/voice, desktop=V4/inspector), debug staging.
   const openFormForBuyer = (variant: 'v3' | 'v4', g: string) => { if (!g.trim()) return; setLedgerOpen(false); setRfqLedgerOpen(false); setStagedGlid(g); setAutoPull(true); setStagingOnly(true); setActiveModal(variant === 'v4' ? 'v4' : 'smart'); };
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setFadeIn(false);
-      setTimeout(() => {
-        setProductIndex((i) => (i + 1) % CYCLING_PRODUCTS.length);
-        setFadeIn(true);
-      }, 300);
-    }, 2200);
-    return () => clearInterval(interval);
-  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#f0f4f8] to-[#e8edf2] flex flex-col items-center justify-center px-4 py-16">
@@ -142,42 +124,38 @@ export default function MainApp() {
           <Zap className="w-8 h-8 text-white" />
         </div>
 
-        {/* Headline */}
+        {/* Headline — this is the internal Buyer-Intelligence console, NOT a buyer-facing quote marketplace (owner) */}
         <div className="space-y-2">
           <h1 className="text-4xl sm:text-5xl font-extrabold text-gray-900">
-            Get quotes for
+            Buyer Intelligence
           </h1>
-
-          {/* Cycling product pill */}
-          <div className="inline-flex items-center justify-center min-w-[200px]">
-            <span
-              className={`inline-block bg-gray-100 text-gray-700 font-semibold text-2xl sm:text-3xl px-5 py-1.5 rounded-2xl transition-opacity duration-300 ${fadeIn ? 'opacity-100' : 'opacity-0'}`}
-            >
-              {CYCLING_PRODUCTS[productIndex]}
+          <div className="inline-flex items-center justify-center">
+            <span className="inline-block bg-gray-100 text-gray-600 font-semibold text-sm sm:text-base px-4 py-1 rounded-full">
+              RFQ · Profile &amp; Requirement Enrichment
             </span>
           </div>
         </div>
 
-        {/* Subtitle */}
-        <p className="text-gray-500 text-base sm:text-lg leading-relaxed max-w-sm">
-          Connect with verified B2B suppliers in under 2 minutes.
+        {/* Subtitle — what the tool actually does */}
+        <p className="text-gray-500 text-base sm:text-lg leading-relaxed max-w-md">
+          Drop a buyer&apos;s GLID → an AI-built profile + enriched requirement,
           <br />
-          Get competitive quotes fast.
+          every deduction traced back to its raw source.
         </p>
 
-        {/* Trust badges */}
+        {/* What this is — replaces the old marketplace trust badges */}
         <div className="flex items-center justify-center gap-6 flex-wrap">
           <div className="flex items-center gap-1.5 text-sm text-gray-600">
-            <ShieldCheck className="w-4 h-4 text-teal-600" />
-            <span>Verified Suppliers</span>
+            <Sparkles className="w-4 h-4 text-teal-600" />
+            <span>One LLM · no black box</span>
           </div>
           <div className="flex items-center gap-1.5 text-sm text-gray-600">
-            <Clock className="w-4 h-4 text-teal-600" />
-            <span>Quotes in 24h</span>
+            <Layers className="w-4 h-4 text-teal-600" />
+            <span>Every claim → raw source</span>
           </div>
           <div className="flex items-center gap-1.5 text-sm text-gray-600">
-            <Zap className="w-4 h-4 text-teal-600" />
-            <span>AI-Matched</span>
+            <FileText className="w-4 h-4 text-teal-600" />
+            <span>Profile + Requirement enrichment</span>
           </div>
         </div>
 
@@ -191,54 +169,65 @@ export default function MainApp() {
                 type="text"
                 value={stagedGlid}
                 onChange={(e) => setStagedGlid(e.target.value.replace(/[^0-9]/g, ''))}
-                onKeyDown={(e) => { if (e.key === 'Enter') openStaged(); }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && stagedGlid.trim()) setLedgerOpen(true); }}
                 placeholder="e.g., 268590579"
                 className="flex-1 min-w-0 border border-purple-200 rounded-xl px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-purple-300 focus:border-purple-400"
               />
-              <button
-                type="button"
-                disabled={!stagedGlid.trim()}
-                onClick={() => openStaged('smart')}
-                className="px-3 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-900 disabled:opacity-50"
-              >
-                Pull → V3
-              </button>
-              <button
-                type="button"
-                disabled={!stagedGlid.trim()}
-                onClick={() => openStaged('v4')}
-                title="Pull buyer history, then Start RFQ into the V4 AI Inspector"
-                className="px-3 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50"
-              >
-                Pull → V4
-              </button>
+              {SHOW_EXTRA_DEBUG && (
+                <button
+                  type="button"
+                  disabled={!stagedGlid.trim()}
+                  onClick={() => openStaged('smart')}
+                  className="px-3 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-900 disabled:opacity-50"
+                >
+                  Pull → V3
+                </button>
+              )}
+              {SHOW_EXTRA_DEBUG && (
+                <button
+                  type="button"
+                  disabled={!stagedGlid.trim()}
+                  onClick={() => openStaged('v4')}
+                  title="Pull buyer history, then Start RFQ into the V4 AI Inspector"
+                  className="px-3 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+                >
+                  Pull → V4
+                </button>
+              )}
               <button
                 type="button"
                 disabled={!stagedGlid.trim()}
                 onClick={() => setLedgerOpen(true)}
                 title="Standalone Buyer Ledger — click any attribute to see its full Fact→Belief→Decision→Consumption→Outcome chain"
-                className="px-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                className="px-4 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
               >
-                🔬 Ledger
+                📊 Profile & Enrichment
               </button>
-              <button
-                type="button"
-                onClick={() => setRfqLedgerOpen(true)}
-                title="Module 2 — the SAME Decision Ledger over the RFQ surfaces (intent, planner questions, specs, logistics)"
-                className="px-3 rounded-xl bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700"
-              >
-                🔬 RFQ Ledger
-              </button>
+              {SHOW_EXTRA_DEBUG && (
+                <button
+                  type="button"
+                  onClick={() => setRfqLedgerOpen(true)}
+                  title="Module 2 — the SAME Decision Ledger over the RFQ surfaces (intent, planner questions, specs, logistics)"
+                  className="px-3 rounded-xl bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700"
+                >
+                  🔬 RFQ Ledger
+                </button>
+              )}
             </div>
-            <label className="flex items-center gap-1.5 mt-2 text-[11px] text-purple-700 cursor-pointer select-none">
-              <input type="checkbox" checked={stagedIgnoreTwin} onChange={(e) => setStagedIgnoreTwin(e.target.checked)} className="accent-purple-600" />
-              🧪 Ignore Twin (cold run — skip persona/concierge)
-            </label>
-            <p className="text-[10px] text-purple-400 mt-1.5">Pull → inspect the pulled buyer data (Twin · Dossier · Pipeline · External · raw) → Start the clean RFQ.</p>
+            {SHOW_EXTRA_DEBUG && (
+              <>
+                <label className="flex items-center gap-1.5 mt-2 text-[11px] text-purple-700 cursor-pointer select-none">
+                  <input type="checkbox" checked={stagedIgnoreTwin} onChange={(e) => setStagedIgnoreTwin(e.target.checked)} className="accent-purple-600" />
+                  🧪 Ignore Twin (cold run — skip persona/concierge)
+                </label>
+                <p className="text-[10px] text-purple-400 mt-1.5">Pull → inspect the pulled buyer data (Twin · Dossier · Pipeline · External · raw) → Start the clean RFQ.</p>
+              </>
+            )}
           </div>
         )}
 
-        {/* Version buttons */}
+        {/* Version buttons — hidden for now (owner: declutter; re-enable via SHOW_QUOTE_CTAS) */}
+        {SHOW_QUOTE_CTAS && (
         <div className="flex flex-wrap justify-center gap-3 w-full">
           {VARIANT_BUTTONS.map((btn) => {
             const { Icon } = btn;
@@ -265,6 +254,7 @@ export default function MainApp() {
             );
           })}
         </div>
+        )}
 
       </div>
 

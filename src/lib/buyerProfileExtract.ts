@@ -14,13 +14,13 @@ import type { FinalAttr } from './synthesisEngine';
 import type { SynthLLMOut } from './gemini';
 import { attrMeta } from './personaRegistry';
 
-export const EXTRACT_PROMPT_VERSION = 'extract-v4'; // v4: removed repeat_buyer · next_best_seller_action · purchasing_power(→deterministic) · urgency; added buyer_maturity · purchase_frequency · delivery_timeline(explicit-only) · digital_footprint; WhatsApp location → evidence; expired leads = NEUTRAL (content still used, expiry never discards data)
+export const EXTRACT_PROMPT_VERSION = 'extract-v8'; // v8: simple INDIA-B2B English values+reasoning (professional, not casual/tacky, not Hindi — e.g. "early-stage manufacturer in <industry>") · v7: plain-English first pass · v6: per-attribute confidence_reason + to_100 (why this %, what would make it 100) · v5: PAN-entity ↔ persona reconciliation (Individual-PAN + Manufacturer → "early-stage/aspiring") · urgency back as a delivery_timeline FALLBACK (with explainer) · added payment_mode (explicit-only). v4: removed repeat_buyer/next_best/purchasing_power/urgency; added buyer_maturity/purchase_frequency/delivery_timeline/digital_footprint; WA location → evidence; expired = NEUTRAL
 
 // the new n8n response shape (bi-user-insights): { glid, fetched_at, derived_anchors, sources:{ key:{summary,raw} } }
 export interface RichResponse { glid?: string | number; fetched_at?: string; derived_anchors?: Record<string, unknown>; sources?: Record<string, { summary?: unknown; raw?: unknown } | unknown>; }
 // one LLM attribute — a strict SUPERSET of SynthLLMOut's attribute (adds state/sources/evidence). reasoning_steps
 // drive grounding exactly like the synthesis path, so the per-attribute reasoning drill + grounded badge work free.
-export interface ExtractAttr { key: string; value: string; state?: BuyerFieldState; confidence: number; grounded?: boolean; sources?: string[]; evidence?: string[]; reasoning_steps?: Array<{ claim: string; from_evidence?: string[]; rejected?: string; delta?: number }>; }
+export interface ExtractAttr { key: string; value: string; state?: BuyerFieldState; confidence: number; grounded?: boolean; sources?: string[]; evidence?: string[]; reasoning_steps?: Array<{ claim: string; from_evidence?: string[]; rejected?: string; delta?: number }>; confidence_reason?: string; to_100?: string; }
 export interface ExtractBuyerProfileOut { attributes: ExtractAttr[] }
 export type BuyerFieldState = 'Confirmed' | 'Likely' | 'Conflicted' | 'Unknown';
 
@@ -160,6 +160,7 @@ export const EXTRACT_BUYER_PROFILE_SYSTEM = [
   'YOUR JOB (responsibilities — frozen): ANSWER the frozen Buyer Profile questions below. Do NOT summarize, do NOT invent,',
   'do NOT editorialize, do NOT rank beyond what a question asks. Answer ONLY from the supplied evidence ids, and prefer',
   'sources per the priority order stated for each question. Every answer = value + confidence + grounded reasoning citing real fN.',
+  'SIMPLE INDIA-B2B ENGLISH (MANDATORY — every VALUE and every reasoning_step): write in clear, professional Indian-B2B English — the plain business terms a procurement / sourcing reader uses (manufacturer, wholesaler, distributor, trader, retailer, importer, OEM). Keep it SIMPLE but PROFESSIONAL — not casual or tacky, and NEVER Hindi. NO jargon-stacking, NO parenthetical qualifiers, NO slash-separated synonyms. e.g. write "early-stage manufacturer in paper & notebooks" — NOT the verbose "Early-stage / aspiring Manufacturer (individual proprietor) · Paper & Notebook Manufacturing", and NOT the over-casual "early-stage maker". Each answer = ONE short professional phrase. (The KEY/question name is fixed — only the value and reasoning get this wording.)',
   '',
   'SOURCE DEFINITIONS (each evidence id is tagged with its source — what the data IS, and how to trust it):',
   '- PNS · sales calls = AI-distilled insights from IndiaMART cloud-telephony recordings of seller↔buyer phone calls — the buyer SPOKE → HIGHEST trust for intent / requirement / location.',
@@ -176,12 +177,14 @@ export const EXTRACT_BUYER_PROFILE_SYSTEM = [
   '',
   'ANSWER THESE FROZEN BUYER USE-CASES (triangulate across the cited sources in the priority order; emit ONE attribute per use-case, combined — do NOT split into redundant rows):',
   '- location_sourcing_preference = where the buyer OPERATES + every distinct city they SOURCE-FROM. Emit BOTH the operating city AND ALL sourcing cities when they differ (e.g. "Operates in Auraiya · Sources from Kanpur, Delhi") — do NOT collapse multiple sourcing cities to one. Priority: PNS > Befisc/Sign3 > WhatsApp(buyer-stated location / "near me" / seller cities) > CSL > Profile.',
-  '- business_persona = business_type AND industry as ONE (format "<type> · <industry>", both DERIVED from this buyer\'s own evidence — never a default category). Priority: PNS persona > BuyLead/ISQ product cluster > CSL. (Displayed to the seller as "Buyer Persona".)',
-  '- buyer_maturity = the buyer\'s business lifecycle stage: "New-entrant" (setting up a new unit / first venture / just installed machines) vs "Established". Read it from PNS seller-DISCOVERY questions ("Are you setting up a unit or already working?", "Have you installed the machines?", "What business did you do before this?") and "new venture / startup" call narratives. New-entrant ONLY when those signals appear; else Established. (This is the read that distinguishes "Entrepreneur setting up a notebook unit" from a generic "Manufacturer".)',
+  '- business_persona = business_type AND industry as ONE (format "<type> · <industry>", both DERIVED from this buyer\'s own evidence — never a default category). Priority: PNS persona > BuyLead/ISQ product cluster > CSL. (Displayed as "Buyer Persona".) RECONCILE WITH PAN (in PLAIN words): if the anchor "pan_entity" is "Individual" yet the persona reads "Manufacturer", do NOT call them an established company — when setup / just-starting signals are present, say it in simple B2B terms, e.g. "early-stage manufacturer in <industry>" (NOT the verbose "Early-stage / aspiring Manufacturer (individual proprietor)", and NOT the over-casual "maker"). (An individual can still run a registered business; external may simply not have returned the GST-linked PAN — so never treat the Individual PAN as proof they are NOT manufacturing.)',
+  '- buyer_maturity = where the business is in its life — say it in simple B2B terms: "early-stage business" (setting up a new unit / first venture / just installed machines) vs "established business". Read it from PNS seller-discovery questions ("Are you setting up a unit or already working?", "Have you installed the machines?", "What did you do before this?") and new-venture / startup call narratives. Use "early-stage business" ONLY when those signals appear; otherwise "established business". (Displayed as "Buyer Maturity"; avoid jargon like "New-entrant" and over-casual phrasing.)',
   '- products_of_interest = the buyer\'s product lines. RANK by relevance to the buyer\'s CURRENT / core line (most recent + repeated categories first); DEMOTE clearly off-core one-offs (e.g. a stray vehicle / hardware lead for a paper buyer). Surface the top 3 most-relevant. If fewer than 3 are clearly on-core, fill with the next best, but mark them as the lower-relevance tail. Cite the evidence ids for each.',
   '- buyer_intent = the buyer\'s CURRENT purchasing SERIOUSNESS + STAGE as ONE read (Low/Medium/High + lifecycle stage: Browsing / Comparing / Ready-to-buy). Read it from CURRENT-STAGE signals ONLY, in this order: PNS call seriousness + callback-urgency (spoken intent is strongest), recent on-site browsing (CSL repeat views = active research), live WhatsApp activity (real enquiries, not one-tap auto-replies), and FRESH (non-expired) BuyLeads. CRITICAL: an EXPIRED or old BuyLead is PAST demand — it is NOT evidence of low intent. Do NOT downgrade to Dormant/Cold merely because the leads are expired; IGNORE expiry as a negative signal and judge intent purely from the live signals above. Only when there are NO live signals at all (no recent calls, no browsing, no live WhatsApp, no fresh leads) is the buyer genuinely Dormant. Equally, do NOT call them "Hot" off a single one-tap WhatsApp "YES" auto-reply.',
   '- identity_confidence = how corroborated the identity is: High when name AND city agree across >=2 of {Profile, Befisc, Sign3}; Medium with one strong verified source; Low otherwise. This is a TRUST signal, not a behavioral trait.',
-  '- delivery_timeline = the buyer\'s required DELIVERY timeframe — emit ONLY when EXPLICITLY stated: a spec/ISQ field, or the buyer literally said "same day" / "within 15 days" / "this month" / a date. Output the concrete timeframe verbatim. If it is NOT explicitly stated, OMIT this attribute entirely — do NOT infer it from callback-urgency or general eagerness.',
+  '- delivery_timeline = the buyer\'s required DELIVERY timeframe — emit ONLY when EXPLICITLY stated (a spec/ISQ field, or the buyer literally said "same day" / "within 15 days" / "this month" / a date). Output the concrete timeframe verbatim. If NOT explicitly stated, OMIT delivery_timeline and emit "urgency" instead (see below).',
+  '- urgency = a FALLBACK for delivery_timeline — emit ONLY when no explicit delivery timeframe exists. Value Low/Medium/High deduced from PNS callback-urgency + live engagement. Your FIRST reasoning_step MUST state: "no explicit delivery-timeline signal in the evidence — urgency deduced as the fallback (rule)." If delivery_timeline IS emitted, OMIT urgency. (This makes WHO decided the fallback explicit: a deterministic rule chose urgency; the LLM only explains the urgency value.)',
+  '- payment_mode = the buyer\'s payment preference (Advance / Credit / COD / part-advance, etc.) — emit ONLY when EXPLICITLY stated on a call or in chat; otherwise OMIT (it surfaces in the "still-ask" needs-input list, never guessed).',
   '- price_vs_quality = ONE axis (Price-sensitive / Balanced / Quality-led) from WhatsApp objections + PNS rate-talk.',
   '- procurement_model = One-time / Recurring / Bulk (distinct repeat purchases = recurring; same spec re-posted close in time = re-posted, NOT recurring).',
   '- purchase_frequency = how often the buyer procures this line — One-time / Occasional / Recurring (state the cadence when evidenced, e.g. "Recurring · multiple leads over ~3 weeks") — from PNS order_types(Recurring) + the cadence of distinct prior BuyLeads. Recurring ONLY when repeat procurement is actually evidenced.',
@@ -200,11 +203,13 @@ export const EXTRACT_BUYER_PROFILE_SYSTEM = [
   '  India-B2B patterns (trial-before-bulk, price sensitivity, local-supplier preference, recurring procurement) apply ONLY when cited.',
   '',
   'OUTPUT — strict JSON: { "attributes": [ {',
-  '  "key": "business_persona|sub_industry|products_of_interest|buyer_intent|buyer_maturity|scale|',
-  '          procurement_model|purchase_frequency|communication|price_vs_quality|delivery_timeline|location_sourcing_preference|identity_confidence|digital_footprint",  // V11: identity_confidence = trust signal; NO raw name/PAN/DOB/income as a behavioral attribute (those are deterministic upstream).',
+  '  "key": "business_persona|buyer_maturity|sub_industry|products_of_interest|buyer_intent|scale|',
+  '          procurement_model|purchase_frequency|communication|price_vs_quality|delivery_timeline|urgency|payment_mode|location_sourcing_preference|identity_confidence|digital_footprint",  // V11: identity_confidence = trust signal; NO raw name/PAN/DOB/income as a behavioral attribute (those are deterministic upstream).',
   '  "value": "<concise value>",',
   '  "state": "Confirmed|Likely|Conflicted|Unknown",',
-  '  "confidence": 0-100,        // YOUR honest self-assessed confidence',
+  '  "confidence": 0-100,        // YOUR honest self-assessed confidence (use the CONFIDENCE FORMULA above)',
+  '  "confidence_reason": "<ONE plain line: WHY this number, per the formula — e.g. \'2 sources agree incl. a spoken PNS call → 90\'>",',
+  '  "to_100": "<the single thing that would raise it to 100 — e.g. \'a live (non-expired) BuyLead\', \'a 2nd independent source\', or \'an explicit buyer statement\'. If already 100, \"\">",',
   '  "grounded": true|false,     // YOUR honest self-assessment: is every word of the value supported by the cited lines?',
   '  "sources": ["PNS","CSL", …],',
   '  "reasoning_steps": [ { "claim": "<why>", "from_evidence": ["f3","f12"], "rejected": "<alt ruled out, optional>", "delta": <+points> } ]',
@@ -281,7 +286,7 @@ export function extractedToFinals(out: ExtractBuyerProfileOut | SynthLLMOut | nu
       key: la.key, label: m.label, group: m.group, value: la.value, confidence,
       provenance: 'llm-confirmed', state,
       method: `LLM extraction (${EXTRACT_PROMPT_VERSION}) — self-grounded:${grounded} · cited ${cites.length} id(s), ${resolveCount} resolve${la.sources && la.sources.length ? ' · sources: ' + la.sources.join(', ') : ''}`,
-      llm: { value: la.value, confidence, reasoning, grounded },
+      llm: { value: la.value, confidence, reasoning, grounded, confidenceReason: la.confidence_reason, to100: la.to_100 },
     });
   }
   return finals;
