@@ -18,7 +18,7 @@ function distinctLocations(locs) {
   }
   return groups;
 }
-const SEVERITY_SCORE = { location: 9, persona_vs_order: 8, approval: 6, installation: 6, po_process: 5, buyer_type: 5, supplier_radius: 4 };
+const SEVERITY_SCORE = { location: 9, persona_vs_order: 8, scale_vs_role: 7, approval: 6, installation: 6, new_direction: 6, po_process: 5, buyer_type: 5, supplier_radius: 4 };
 function detectContradictions(i) {
   const out = [];
   const personal = isPersonalish(i);
@@ -32,7 +32,8 @@ function detectContradictions(i) {
     if ((i.qty || 0) > PERSONAL_DISCRETE_CEILING && (!i.unit || UNIT_DISCRETE.test(i.unit))) ev.push('bigQty');
     if (ev.length) push({ type: 'persona_vs_order', severity: 'high', options: ['Personal use', 'Business / resale', 'Workshop / fitment', 'Fleet'], evidence: ev, field: 'buyerKind' });
   }
-  if (!out.some((n) => n.type === 'persona_vs_order') && i.profileType && i.twinType) {
+  const natureResolved = /academic|research|government|psu/i.test(i.nature || '') && (i.natureConfidence || 0) >= 80;
+  if (!natureResolved && !out.some((n) => n.type === 'persona_vs_order') && i.profileType && i.twinType) {
     if (slug(i.profileType) !== slug(i.twinType) && !i.profileType.includes(i.twinType) && !i.twinType.includes(i.profileType))
       push({ type: 'buyer_type', severity: 'medium', options: [i.profileType, i.twinType, 'Other'], evidence: [], field: 'buyerType' });
   }
@@ -40,6 +41,11 @@ function detectContradictions(i) {
   if (/researcher/i.test(i.authorityRole || '')) push({ type: 'approval', severity: 'medium', options: ['Yes — needs approval', 'No — I can decide', 'Already approved'], evidence: ['authority: Researcher'], field: 'approval' });
   if (/capex/i.test(i.procurementModel || '')) push({ type: 'installation', severity: 'medium', options: ['Yes', 'No', 'Not sure yet'], evidence: ['procurement: Capex'], field: 'installation' });
   if (/procurement/i.test(i.authorityRole || '')) push({ type: 'po_process', severity: 'medium', options: ['PO / tender', 'Direct buy', 'Rate contract'], evidence: ['authority: Procurement'], field: 'po_process' });
+  // P3.8 cross-signal: bulk/wholesale role placing a SINGLE/sample order
+  const bulkRole = /trader|wholesal|distributor|stockist|reseller/i.test(`${i.profileType || ''} ${i.twinType || ''}`);
+  if (bulkRole && i.orderScale === 'single' && !personal) push({ type: 'scale_vs_role', severity: 'medium', options: ['Sample / trial', 'For own use', 'Same as usual (bulk)', 'New requirement'], evidence: ['usual: bulk role', 'this order: single'], field: 'scale_context' });
+  // P3.8 cross-signal: the current product is unrelated to the buyer's entire history
+  if (i.offProfileNewProduct) push({ type: 'new_direction', severity: 'medium', options: ['A new line / expansion', 'A one-off or project', 'Just trying it out'], evidence: ['off-profile product'], field: 'new_direction' });
   out.sort((a, b) => b.score - a.score);
   return out;
 }
@@ -97,5 +103,66 @@ ok('R3: Authority=Procurement → PO/tender nudge', !!has(detectContradictions({
 ok('R3: influencer/decision_maker → NO approval/po nudge (only the relevant roles)', (() => { const ns = detectContradictions({ authorityRole: 'influencer' }); return !has(ns, 'approval') && !has(ns, 'po_process'); })());
 ok('R3: no procurement model → no installation nudge', !has(detectContradictions({ procurementModel: 'Recurring Supply' }), 'installation'));
 
-console.log(`\ncontradictiontest (location · persona consolidation · buyer-type · supplier-radius · R2 priority+cap · R3 engine-nudges · no false positives): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// ── history ↔ external-world token-overlap (the inline check in RFQModalV3) ──
+// Bug it guards: "Frosted PVC Bag" history was flagged as CONTRADICTING a World result for a company
+// that LITERALLY MAKES PVC bags — because the old check used a 60-char-truncated summary + ≥4-char tokens
+// (dropping "pvc"/"bag"). Fix: FULL summary + ≥3-char tokens. A real domain mismatch must still flag.
+const HV_STOP = new Set(['product', 'products', 'trading', 'trader', 'traders', 'service', 'services', 'supplier', 'suppliers', 'manufacturer', 'manufacturers', 'wholesale', 'wholesaler', 'retail', 'retailer', 'company', 'india', 'limited', 'private', 'export', 'exporter', 'import', 'importer', 'industries', 'industrial', 'goods', 'item', 'items', 'material', 'materials', 'the', 'and', 'for', 'are', 'our', 'was', 'has', 'new', 'pvt', 'ltd', 'with', 'from', 'about']);
+const hvTok = (xs) => new Set(xs.flatMap((x) => (String(x).toLowerCase().match(/[a-z]{3,}/g) || [])).filter((w) => !HV_STOP.has(w)));
+const historyVsWorld = (cats, world) => { const a = hvTok(cats), b = hvTok(world); return !!(a.size && b.size && ![...a].some((w) => b.has(w))); };
+const hvOLD = (cats, world) => { const t = (xs) => new Set(xs.flatMap((x) => (String(x).toLowerCase().match(/[a-z]{4,}/g) || [])).filter((w) => !HV_STOP.has(w))); const a = t(cats), b = t(world.map((s) => String(s).slice(0, 60))); return !!(a.size && b.size && ![...a].some((w) => b.has(w))); };
+const TT_HISTORY = ['Frosted PVC Bag', 'A4 Paper Rim', 'Customised Wooden Stamps'];
+const TT_WORLD = ['Shri Tirumala Traders - Retailer from New Delhi, India | About Us. Established in 1992, we are Manufacturer, Trader and Retailer of Office File, Button File Folder, Jute Gift Bag, Jute File Folder, PVC Bag, Portfolio Bag and more.'];
+ok('HV: FIXED — PVC-bag history vs a company that MAKES PVC bags → NO contradiction', historyVsWorld(TT_HISTORY, TT_WORLD) === false);
+ok('HV: the OLD truncated/≥4 version WOULD have false-flagged it (the bug was real)', hvOLD(TT_HISTORY, TT_WORLD) === true);
+ok('HV: genuinely unrelated history vs world → contradiction still flags', historyVsWorld(['Diesel Generator', 'Forklift'], ['Sharma Events — wedding planner and decoration in Mumbai']) === true);
+ok('HV: no external evidence → no contradiction', historyVsWorld(['PVC Bag'], []) === false);
+ok('HV: no history → no contradiction', historyVsWorld([], TT_WORLD) === false);
+ok('HV: short distinctive product word ("box") now overlaps → no false contradiction', historyVsWorld(['Corrugated Box'], ['We make box and carton packaging']) === false);
+
+// ── P1.1: nudge RESOLUTION routing (mirror answerNudge) — every answer must be CONSUMED, not inert ──
+// Returns what a tapped option writes: a form field and/or a CONFIRMED coverage fact (system-of-record).
+function resolveNudge(field, type, opt) {
+  const out = { page1Choice: null, deliveryLocation: null, buyerType: null, fact: null };
+  if (field === 'buyerKind') {
+    if (/personal/i.test(opt)) out.page1Choice = 'personal';
+    else if (/business|resale|workshop|fleet/i.test(opt)) out.page1Choice = 'business';
+  }
+  if (field === 'deliveryCity' && opt && opt !== 'Other') out.deliveryLocation = opt;
+  if (field === 'buyerType' && opt && opt !== 'Other') out.buyerType = opt;
+  if (opt && opt !== 'Other') {
+    const concept = { supplier_radius: 'supplier radius', approval: 'approval needed', installation: 'installation support', po_process: 'procurement process' }[type];
+    if (concept) out.fact = { concept, value: opt, source: 'User' };
+  }
+  return out;
+}
+ok('resolve: buyerKind "Personal use" → page1Choice=personal', resolveNudge('buyerKind', 'persona_vs_order', 'Personal use').page1Choice === 'personal');
+ok('resolve: buyerKind "Business / resale" → page1Choice=business', resolveNudge('buyerKind', 'persona_vs_order', 'Business / resale').page1Choice === 'business');
+ok('resolve: deliveryCity "Amritsar" → deliveryLocation=Amritsar', resolveNudge('deliveryCity', 'location', 'Amritsar').deliveryLocation === 'Amritsar');
+ok('resolve: buyerType "Manufacturer" → form.buyerType=Manufacturer', resolveNudge('buyerType', 'buyer_type', 'Manufacturer').buyerType === 'Manufacturer');
+ok('resolve: supplier_radius "Within the state" → CONFIRMED fact (was inert before)', (() => { const f = resolveNudge('supplierRadius', 'supplier_radius', 'Within the state').fact; return f && f.concept === 'supplier radius' && f.value === 'Within the state' && f.source === 'User'; })());
+ok('resolve: approval "Yes — needs approval" → CONFIRMED fact', (() => { const f = resolveNudge('approval', 'approval', 'Yes — needs approval').fact; return f && f.concept === 'approval needed' && f.source === 'User'; })());
+ok('resolve: installation "Yes" → CONFIRMED fact', resolveNudge('installation', 'installation', 'Yes').fact?.concept === 'installation support');
+ok('resolve: po_process "PO / tender" → CONFIRMED fact', resolveNudge('po_process', 'po_process', 'PO / tender').fact?.concept === 'procurement process');
+ok('resolve: "Other" writes nothing (no spurious field/fact)', (() => { const r = resolveNudge('buyerType', 'buyer_type', 'Other'); return r.buyerType === null && r.fact === null; })());
+
+// ── P3.8: cross-signal contradictions (qty-scale × role; trajectory/off-profile × current product) ──
+const scaleMismatch = detectContradictions({ profileType: 'Wholesaler', twinType: 'Trader', orderScale: 'single' });
+ok('scale_vs_role: a known wholesaler ordering a SINGLE qty fires the nudge', !!has(scaleMismatch, 'scale_vs_role'));
+ok('scale_vs_role: NOT fired for a wholesaler on a bulk order (normal)', !has(detectContradictions({ profileType: 'Wholesaler', orderScale: 'wholesale' }), 'scale_vs_role'));
+ok('scale_vs_role: NOT fired for an end-user on a single order (normal personal buy)', !has(detectContradictions({ profileType: 'End User', orderScale: 'single' }), 'scale_vs_role'));
+ok('scale_vs_role: suppressed when the buyer is personal (no business-role clash)', !has(detectContradictions({ profileType: 'Wholesaler', orderScale: 'single', isPersonal: true }), 'scale_vs_role'));
+const newDir = detectContradictions({ offProfileNewProduct: true });
+ok('new_direction: an off-profile product (unrelated to all history) fires the nudge', !!has(newDir, 'new_direction'));
+ok('new_direction: NOT fired when the product is on-profile', !has(detectContradictions({ offProfileNewProduct: false }), 'new_direction'));
+ok('new_direction: options are new-line / one-off / trying-out (shape intent as fresh)', has(newDir, 'new_direction').options.length === 3);
+ok('cross-signal nudges carry a field a tap can route back (P1.1 loop)', has(scaleMismatch, 'scale_vs_role').field === 'scale_context' && has(newDir, 'new_direction').field === 'new_direction');
+ok('priority: scale_vs_role (7) outranks supplier_radius (4) in the top-N cut', SEVERITY_SCORE.scale_vs_role > SEVERITY_SCORE.supplier_radius);
+
+// P0 identity hierarchy — a confident institutional Nature SUPPRESSES the "which buyer type?" nudge.
+ok('IIT-K: buyer_type nudge SUPPRESSED when Nature=Academic conf 95 (not asked)', !has(detectContradictions({ profileType: 'Business Buyer', twinType: 'Manufacturer', nature: 'Academic / Research Institution', natureConfidence: 95 }), 'buyer_type'));
+ok('buyer_type nudge STILL fires for a corporate buyer with conflicting profile/twin (no Nature lock)', !!has(detectContradictions({ profileType: 'Retailer', twinType: 'Manufacturer', nature: 'Corporate / Business', natureConfidence: 90 }), 'buyer_type'));
+ok('buyer_type nudge fires when Nature confidence is low (<80)', !!has(detectContradictions({ profileType: 'Retailer', twinType: 'Manufacturer', nature: 'Academic / Research Institution', natureConfidence: 50 }), 'buyer_type'));
+
+console.log(`\ncontradictiontest (location · persona consolidation · buyer-type · supplier-radius · R2 priority+cap · R3 engine-nudges · history↔world overlap · no false positives): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

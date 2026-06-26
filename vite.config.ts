@@ -67,6 +67,27 @@ export default defineConfig(({ mode }) => {
             })
           },
         },
+        // Seller / entity web-verify crawler (OSINT). FRONTEND-only async job: the form calls
+        // `/api/sellerverify/api/v2/seller/verify` (+ /status/<job>); the proxy forwards to the scraper host.
+        // The X-Gemini-Key is sent browser-side (debug mode) — no server-side injection needed.
+        '/api/sellerverify': {
+          target: 'http://34.93.111.50',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/sellerverify/, ''),
+        },
+        // Firecrawl web search (REAL World/OSINT). The form calls `/api/firecrawl/v2/search`; the proxy
+        // forwards to api.firecrawl.dev and injects the Bearer SERVER-SIDE (from env.FIRECRAWL_API_KEY)
+        // so the key never enters the browser bundle.
+        '/api/firecrawl': {
+          target: 'https://api.firecrawl.dev',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/firecrawl/, ''),
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              if (env.FIRECRAWL_API_KEY) proxyReq.setHeader('Authorization', `Bearer ${env.FIRECRAWL_API_KEY}`)
+            })
+          },
+        },
       },
     },
   }

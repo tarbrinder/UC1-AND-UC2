@@ -84,5 +84,21 @@ ok('G1: ON-profile + persona=repeat → recurs TRUE (still consumed when relevan
 ok('G1: re-post always recurs (current-order signal, even if off-profile flag set)', computeRecurs(true, false, '', true) === true);
 ok('G1: current-product repeat-overlap recurs (it IS on-product)', computeRecurs(false, true, '', true) === true);
 
-console.log(`\nrequirementmodetest (R v2 modes + hierarchy lean + T3 nudge + T1 gate + G1 off-profile guard): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// ── P1.5: profile-field CONSUMPTION — responseSensitivity finally drives the urgency dimension ──
+// The "seller SLA" label promised this but never read responseSensitivity. Now: emergency mode is the
+// strongest signal; otherwise a delay-averse profile gives a softer "Time-sensitive"; Patient/Unknown
+// gives NO urgency (no guessing).
+const urgencyDim = (mode, responseSensitivity) => {
+  const delayAverse = /low tolerance|delay/i.test(responseSensitivity || '');
+  if (mode === 'emergency') return { value: 'Immediate', conf: 75, ev: true };
+  if (delayAverse) return { value: 'Time-sensitive', conf: 60, ev: true };
+  return { value: '', conf: 0, ev: false };
+};
+ok('PF: emergency mode → Immediate (strongest)', urgencyDim('emergency', '').value === 'Immediate');
+ok('PF: responseSensitivity "Low Tolerance For Delay" → Time-sensitive (CONSUMED, was inert)', urgencyDim('one_off', 'Low Tolerance For Delay').value === 'Time-sensitive');
+ok('PF: responseSensitivity "Patient" → no false urgency', urgencyDim('one_off', 'Patient').ev === false);
+ok('PF: responseSensitivity Unknown/absent → no urgency (no guessing)', urgencyDim('one_off', '').ev === false && urgencyDim('one_off', 'Unknown').ev === false);
+ok('PF: emergency still wins even for a Patient buyer (current order beats profile)', urgencyDim('emergency', 'Patient').value === 'Immediate');
+
+console.log(`\nrequirementmodetest (R v2 modes + hierarchy lean + T3 nudge + T1 gate + G1 off-profile guard + PF consumption): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

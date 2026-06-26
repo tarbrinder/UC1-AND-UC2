@@ -43,9 +43,11 @@ export interface ExternalSeed {
   mobile?: string;
   companyName?: string;
   gstin?: string;
+  udyam?: string; // Udyam / Udyog Aadhaar — a unique MSME business id (strong OSINT anchor)
   website?: string;
   name?: string;
   city?: string;
+  industry?: string; // the product / mcat the buyer is sourcing — an extra disambiguating anchor
   glid?: string;
 }
 // The ledger feeds the dossier + the registry bridge; only TIER-1 (OSINT/GST/…) entries
@@ -134,10 +136,24 @@ export function crossValidateExternal(sources: ExtSourceResult[], seed: External
     providers.push({ provider: s.source, facts: extractFacts(s, seed) });
   }
   const map = new Map<string, { key: string; value: string; sources: Set<string> }>();
+  const nameToks = (v: string) => v.toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
   for (const { provider, facts } of providers) {
     for (const [key, value] of Object.entries(facts)) {
       const nv = xslug(value);
       if (!nv) continue;
+      // NAMES: variants that share a ≥3-char token are the SAME person (mirrors identity.ts N6) —
+      // "Ashraffunnisa" ≡ "Ashraffunnisa Late Abdul". Merge into an existing name entry that shares a
+      // token (it CORROBORATES, not duplicates), keeping the first (usually cleanest, first-party) label.
+      if (key === 'name') {
+        const toks = nameToks(value);
+        let merged = false;
+        for (const entry of map.values()) {
+          if (entry.key !== 'name') continue;
+          if (toks.some((t) => nameToks(entry.value).includes(t))) { entry.sources.add(provider); merged = true; break; }
+        }
+        if (!merged) map.set(`name::${nv}`, { key, value, sources: new Set([provider]) });
+        continue;
+      }
       const id = `${key}::${nv}`;
       if (!map.has(id)) map.set(id, { key, value, sources: new Set() });
       map.get(id)!.sources.add(provider);
@@ -176,24 +192,39 @@ export function getExternalConfig(): ExternalConfig {
   };
 }
 
-// THE gate. A web search needs a UNIQUE business anchor or it returns the wrong entity.
+// THE gate. A web search needs a BUSINESS-SPECIFIC anchor set or it returns the WRONG entity.
+// Rule (per the directive — "name + location is too broad" → it returns namesakes):
+//   • a UNIQUE business id (GSTIN / Udyam / website) → eligible alone.
+//   • otherwise eligible only with a BUSINESS SPECIFIER (company OR industry) PLUS a 2nd anchor —
+//     so company+city, company+industry, name+industry, name+industry+city all qualify.
+//   • name + location ALONE → NOT eligible (too broad — namesakes). A single anchor → NOT eligible.
+//   • mobile is a contact, never a search anchor.
 export function anchorStrength(seed: ExternalSeed): { osintEligible: boolean; strongest: string; reason: string } {
   if (seed.gstin && /^[0-9A-Z]{15}$/i.test(seed.gstin.trim()))
     return { osintEligible: true, strongest: 'GSTIN', reason: 'GSTIN is a unique business identifier' };
+  if (seed.udyam && seed.udyam.trim().length >= 6)
+    return { osintEligible: true, strongest: 'Udyam', reason: 'Udyam / Udyog-Aadhaar is a unique MSME identifier' };
   if (seed.website && /\./.test(seed.website))
     return { osintEligible: true, strongest: 'website', reason: 'a website resolves to exactly one business' };
-  // A company name ALONE is too generic ("M Enterprises" → dozens of cities) — require company + city
-  // before the open web is searched, else a match is likely the WRONG business. GSTIN/website above
-  // are unique anchors and don't need a city.
-  if (seed.companyName && seed.companyName.trim().length >= 4 && seed.city && seed.city.trim())
-    return { osintEligible: true, strongest: 'company_name', reason: 'company name + city is specific enough' };
-  const have = [seed.mobile && 'mobile', seed.name && 'name', seed.companyName && 'company(no city)', seed.city && 'city'].filter(Boolean).join('+') || 'nothing';
+  const has = {
+    company: !!(seed.companyName && seed.companyName.trim().length >= 4),
+    name: !!(seed.name && seed.name.trim().length >= 3),
+    location: !!(seed.city && seed.city.trim().length >= 2),
+    industry: !!(seed.industry && seed.industry.trim().length >= 3),
+  };
+  const anchors = (Object.keys(has) as Array<keyof typeof has>).filter((k) => has[k]);
+  const hasSpecifier = has.company || has.industry; // a real business specifier — not bare name/location
+  if (hasSpecifier && anchors.length >= 2)
+    return { osintEligible: true, strongest: anchors.join('+'), reason: `${anchors.join(' + ')} together are specific enough to disambiguate` };
+  const have = [...anchors, seed.mobile && 'mobile(contact-only)'].filter(Boolean).join('+') || 'nothing';
   return {
     osintEligible: false,
     strongest: have,
-    reason: seed.companyName
-      ? 'company name without a city is too generic — could match the wrong business'
-      : 'only a mobile/first-name — too weak to search the open web without returning the wrong company',
+    reason: !hasSpecifier && has.name && has.location
+      ? 'name + location alone is too broad (returns namesakes) — need a company / industry / GST / Udyam / website anchor'
+      : anchors.length === 1
+        ? `only one anchor (${anchors[0]}) — too thin to search without the wrong match`
+        : 'only a mobile/first-name — too weak to search the open web without returning the wrong entity',
   };
 }
 
@@ -277,7 +308,6 @@ export async function runExternal(
 ): Promise<ExternalRunResult> {
   const cfg = opts.config || getExternalConfig();
   const fetchImpl = opts.fetchImpl || fetch;
-  const gate = anchorStrength(seed);
   const sources: ExtSourceResult[] = [];
   const ledger: LedgerEntry[] = [];
 
@@ -307,29 +337,42 @@ export async function runExternal(
     sources.push({ source: 'Sign3', tier: 'observed', status: r.status, ms: r.ms, anchor: `mobile ${mob10}`, value: r.data });
   }
 
-  // 3) World / OSINT web search — Tier-1 → Verified. GATED on a strong anchor.
-  if (!gate.osintEligible) {
-    sources.push({ source: 'World', tier: 'verified', status: 'skipped_low_confidence', ms: 0, anchor: gate.strongest, detail: gate.reason });
+  // 3) World / OSINT web search — Tier-1 → Verified. GATED on the permutation rule. We RE-GATE here
+  // using anchors Befisc just gave us (name/city often arrive ONLY from Befisc) + the product industry,
+  // so a buyer who looked too thin at pull-time becomes searchable once enriched.
+  const befiscVal = (sources.find((s) => s.source === 'Befisc' && s.status === 'ok')?.value || {}) as Record<string, unknown>;
+  const pi = (befiscVal.personal_information || {}) as Record<string, unknown>;
+  const befName = String(befiscVal.name || befiscVal.full_name || pi.name || pi.full_name || '').trim();
+  // Befisc `address` is an array of { detailed_address, state(code), city, pincode } — the full state
+  // NAME lives inside detailed_address. Concatenate them and pull the state name; fall back to city.
+  const addrArr = Array.isArray(befiscVal.address) ? (befiscVal.address as Array<Record<string, unknown>>) : [];
+  const addrStr = addrArr.map((a) => String((a || {}).detailed_address || '')).join(' ') || String(befiscVal.address || '');
+  const stateM = addrStr.match(/\b(Andhra Pradesh|Arunachal Pradesh|Assam|Bihar|Chhattisgarh|Goa|Gujarat|Haryana|Himachal Pradesh|Jharkhand|Karnataka|Kerala|Madhya Pradesh|Maharashtra|Manipur|Meghalaya|Mizoram|Nagaland|Odisha|Punjab|Rajasthan|Sikkim|Tamil Nadu|Telangana|Tripura|Uttar Pradesh|Uttarakhand|West Bengal|Delhi|Jammu|Ladakh|Puducherry|Chandigarh)\b/i);
+  const befCity = (addrArr.map((a) => String((a || {}).city || '').trim()).find(Boolean)) || (stateM ? stateM[1] : '');
+  const worldSeed: ExternalSeed = { ...seed, name: seed.name || befName || undefined, city: seed.city || befCity || undefined };
+  const gateW = anchorStrength(worldSeed);
+  if (!gateW.osintEligible) {
+    sources.push({ source: 'World', tier: 'verified', status: 'skipped_low_confidence', ms: 0, anchor: gateW.strongest, detail: gateW.reason });
   } else if (!opts.osintFn) {
-    sources.push({ source: 'World', tier: 'verified', status: 'not_run', ms: 0, anchor: gate.strongest, detail: 'eligible — no web-search provider wired (Claude/sandbox injects osintFn)' });
+    sources.push({ source: 'World', tier: 'verified', status: 'not_run', ms: 0, anchor: gateW.strongest, detail: 'eligible — no web-search provider wired (Claude/sandbox injects osintFn)' });
   } else {
     const t0 = now();
     try {
-      const o = await opts.osintFn(seed);
+      const o = await opts.osintFn(worldSeed);
       const ms = Math.round(now() - t0);
-      const matchBasis = o.match_basis || (gate.strongest === 'GSTIN' ? ['gst'] : gate.strongest === 'website' ? ['website'] : seed.city ? ['company_name', 'location'] : ['company_name']);
+      const matchBasis = o.match_basis || (gateW.strongest === 'GSTIN' ? ['gst'] : gateW.strongest === 'website' ? ['website'] : worldSeed.city ? ['company_name', 'location'] : ['company_name']);
       const conf = typeof o.confidence === 'number' ? o.confidence : osintMatchConfidence(matchBasis);
       const found = !!(o.summary || (o.productLines && o.productLines.length) || (o.sourceUrls && o.sourceUrls.length));
-      sources.push({ source: 'World', tier: 'verified', status: found ? 'ok' : 'no_record', ms, anchor: gate.strongest, value: o as Record<string, unknown>, confidence: conf });
-      if (found) ledger.push({ source: 'OSINT', key_used: gate.strongest, confidence: conf, fetched_at: opts.nowIso, raw_value: o.summary, value_summary: o.summary });
+      sources.push({ source: 'World', tier: 'verified', status: found ? 'ok' : 'no_record', ms, anchor: gateW.strongest, value: o as Record<string, unknown>, confidence: conf });
+      if (found) ledger.push({ source: 'OSINT', key_used: gateW.strongest, confidence: conf, fetched_at: opts.nowIso, raw_value: o.summary, value_summary: o.summary });
     } catch {
-      sources.push({ source: 'World', tier: 'verified', status: 'failed', ms: Math.round(now() - t0), anchor: gate.strongest });
+      sources.push({ source: 'World', tier: 'verified', status: 'failed', ms: Math.round(now() - t0), anchor: gateW.strongest });
     }
   }
 
   // P4 — cross-validate everything that returned a record against the first-party seed.
   const crossValidation = crossValidateExternal(sources, seed);
-  return { sources, externalEvidenceLedger: ledger, ranAt: opts.nowIso, seed, gate, crossValidation };
+  return { sources, externalEvidenceLedger: ledger, ranAt: opts.nowIso, seed, gate: gateW, crossValidation };
 }
 
 // ── DEMO / synthetic OSINT provider ─────────────────────────────────────────
@@ -352,4 +395,36 @@ export async function osintDemoProvider(seed: ExternalSeed): Promise<WorldOsint>
     match_basis: matchBasis,
     confidence: osintMatchConfidence(matchBasis),
   };
+}
+
+// ── REAL World/OSINT via Firecrawl web search (POST /v2/search) ───────────────────────────────
+// A genuine web search — returns TRACEABLE source URLs, never a fabricated profile (unlike an LLM
+// guess). The Firecrawl key is injected server-side by the Vite proxy (/api/firecrawl), so it never
+// ships to the client. Gated upstream by anchorStrength (≥2 anchors). Builds a business-oriented query
+// from the seed (company/name + location + industry) and maps the top results into a WorldOsint.
+export async function firecrawlOsint(seed: ExternalSeed, fetchImpl: typeof fetch = fetch): Promise<WorldOsint> {
+  // Lead with the strongest descriptive anchors. A bare website resolves the business directly; else
+  // company/name + location + industry. (GST/Udyam gate eligibility but aren't good free-text terms.)
+  const query = [seed.website, seed.companyName || seed.name, seed.city, seed.industry].map((x) => (x || '').trim()).filter(Boolean).join(' ');
+  if (query.length < 4) return {};
+  try {
+    const r = await fetchImpl('/api/firecrawl/v2/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, limit: 5 }),
+    });
+    if (!r.ok) return {};
+    const j = (await r.json()) as { success?: boolean; data?: { web?: Array<{ url?: string; title?: string; description?: string }> } };
+    const results = j?.data?.web || [];
+    if (!results.length) return {};
+    const urls = results.map((x) => x.url).filter((u): u is string => !!u).slice(0, 5);
+    const top = results[0];
+    const summary = [top?.title, top?.description].filter(Boolean).join(' — ').slice(0, 240);
+    // a result on a B2B marketplace / directory ⇒ the buyer (or a namesake) has a live catalog presence.
+    const isAlsoSeller = results.some((x) => /indiamart|tradeindia|justdial|exportersindia|alibaba|dial4trade|sulekha/i.test(x.url || ''));
+    const matchBasis = [seed.companyName && 'company_name', seed.name && 'name', seed.city && 'location', seed.industry && 'industry'].filter(Boolean) as string[];
+    return { summary, productLines: [], isAlsoSeller, sourceUrls: urls, match_basis: matchBasis, confidence: osintMatchConfidence(matchBasis) };
+  } catch {
+    return {};
+  }
 }

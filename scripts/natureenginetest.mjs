@@ -65,5 +65,42 @@ ok('no email → does NOT drive', !natureDrives(classifyEmailDomain('')));
 ok('malformed (no @) → unknown', classifyEmailDomain('not-an-email').institutionType === 'unknown');
 ok('@ but no dot in domain → unknown', classifyEmailDomain('x@localhost').institutionType === 'unknown');
 
-console.log(`\nnatureenginetest (email-domain → institution-type · evidence-gated · anti-hallucination): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// ── P0 IDENTITY HIERARCHY: institutionalRole + canonicalBuyerType precedence (Nature > Business Type) ──
+// Mirror of nature.ts institutionalRole(): an evidence-gated academic/gov Nature → the institutional
+// buyer-type label; corporate/generic → '' (a real company keeps its inferred business_type).
+function institutionalRole(n, authorityRole) {
+  if (!n || n.confidence < 80) return '';
+  if (n.institutionType === 'academic') return authorityRole === 'procurement' ? 'Institution — Procurement' : 'Research / Academic Institution';
+  if (n.institutionType === 'government') return 'Government / PSU';
+  return '';
+}
+const iitNature = classifyEmailDomain('skkakodia@iitk.ac.in');
+ok('institutionalRole: iitk.ac.in → "Research / Academic Institution"', institutionalRole(iitNature) === 'Research / Academic Institution');
+ok('institutionalRole: academic + procurement authority → "Institution — Procurement"', institutionalRole(iitNature, 'procurement') === 'Institution — Procurement');
+ok('institutionalRole: gov domain → "Government / PSU"', institutionalRole(classifyEmailDomain('x@dst.gov.in')) === 'Government / PSU');
+ok('institutionalRole: corporate domain → "" (a real company keeps its business_type)', institutionalRole(classifyEmailDomain('procurement@tatasteel.com')) === '');
+ok('institutionalRole: generic gmail → "" (no override)', institutionalRole(classifyEmailDomain('someone@gmail.com')) === '');
+
+// Mirror of canonicalBuyerType(): Nature (academic/gov, conf≥80) outranks an LLM business_type AND a
+// CONTRADICTING pick; a deliberate institutional pick stands; corporate/generic → pick > business_type.
+function canonicalBuyerType({ nature, natConf, authorityRole, pick, businessType, persona }) {
+  const nat = (nature || '').toLowerCase();
+  const institutional = /academic|research/.test(nat) ? (authorityRole === 'procurement' ? 'Institution — Procurement' : 'Research / Academic Institution') : /government|psu/.test(nat) ? 'Government / PSU' : '';
+  if (institutional && (natConf || 0) >= 80) {
+    if (pick && /institut|research|academ|government|psu|college|univers|\blab\b|\bdept\b|department|faculty/i.test(pick)) return pick;
+    return institutional;
+  }
+  if (pick) return pick;
+  return businessType || persona || '';
+}
+// THE IIT-KANPUR FIX: Twin guessed "Manufacturer", buyer was led to pick "Manufacturer" — Nature wins.
+ok('IIT: Nature(academic,95) BEATS a "Manufacturer" pick → Research Institution', canonicalBuyerType({ nature: 'Academic / Research Institution', natConf: 95, pick: 'Manufacturer', businessType: 'Manufacturer' }) === 'Research / Academic Institution');
+ok('IIT: Nature BEATS the Twin business_type when there is no pick', canonicalBuyerType({ nature: 'Academic / Research Institution', natConf: 95, businessType: 'Manufacturer' }) === 'Research / Academic Institution');
+ok('IIT: a DELIBERATE institutional pick is respected (not overwritten)', canonicalBuyerType({ nature: 'Academic / Research Institution', natConf: 95, pick: 'Institution — Procurement', businessType: 'Manufacturer' }) === 'Institution — Procurement');
+ok('corporate manufacturer: Nature does NOT override → "Manufacturer" stands', canonicalBuyerType({ nature: 'Corporate / Business', natConf: 90, pick: 'Manufacturer', businessType: 'Manufacturer' }) === 'Manufacturer');
+ok('corporate, no pick → Twin business_type wins', canonicalBuyerType({ nature: 'Corporate / Business', natConf: 90, businessType: 'Trader' }) === 'Trader');
+ok('low-confidence Nature does NOT override a pick', canonicalBuyerType({ nature: 'Academic / Research Institution', natConf: 50, pick: 'Manufacturer' }) === 'Manufacturer');
+ok('no Nature, no pick → persona fallback', canonicalBuyerType({ businessType: '', persona: 'Business Buyer' }) === 'Business Buyer');
+
+console.log(`\nnatureenginetest (email-domain → institution-type · evidence-gated · anti-hallucination · P0 identity hierarchy): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

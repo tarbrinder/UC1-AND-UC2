@@ -48,5 +48,17 @@ ok('T5 tier:intent dup DROPPED when page-1 intent answered', keepQuestion(intent
 ok('T5 tier:intent KEPT when intent NOT yet answered (no stated purpose)', keepQuestion(intentDupQ, { archetype: 'commodity', quantity: '5', unit: 'Tonne', application: '' }) === true);
 ok('T5 scale question KEPT even when intent answered (only intent-tier dropped)', keepQuestion(scaleQ, { archetype: 'commodity', quantity: '500', unit: 'Tonne', application: "Buyer's stated purpose: x = y." }) === true);
 
-console.log(`\nplannerguardtest (A0 relevance + A1 grounding + T5 intent-dup): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// P1.3 — explicit_unknowns prioritisation. buildTwinPlanInput drops unknowns we've ALREADY learned this
+// session (covered in the registry) before they reach the planner, so the scarce question slots target
+// only the genuinely-open unknowns. Mirror that filter.
+const filterUnknowns = (unknowns, isCovered) => (unknowns || []).filter((u) => !(isCovered && isCovered(u)));
+const COVERED = new Set(['budget']); // e.g. budget already answered via a deduced/last-page fact
+const isCov = (u) => COVERED.has(u);
+ok('U: an already-covered unknown (budget) is dropped before the planner', !filterUnknowns(['budget', 'cadence', 'install location'], isCov).includes('budget'));
+ok('U: genuinely-open unknowns survive the filter', (() => { const r = filterUnknowns(['budget', 'cadence', 'install location'], isCov); return r.includes('cadence') && r.includes('install location'); })());
+ok('U: no coverage predicate → all unknowns pass through (planner still prioritises)', filterUnknowns(['budget', 'cadence'], undefined).length === 2);
+ok('U: empty unknowns → empty (no crash)', filterUnknowns([], isCov).length === 0);
+ok('U: all covered → planner gets none (a fully-known buyer asks nothing extra)', filterUnknowns(['budget'], isCov).length === 0);
+
+console.log(`\nplannerguardtest (A0 relevance + A1 grounding + T5 intent-dup + U: unknowns prioritisation): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

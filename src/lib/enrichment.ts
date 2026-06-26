@@ -9,7 +9,7 @@
 // PROD: move behind a server proxy that strips contact + auths the GLID from the
 // session (the prior PII-safe contract is preserved in git history).
 
-import { api } from './api';
+import { api, N8N_HOOK } from './api';
 
 // Debug-only stand-in mobile (key: glusr_usr_ph_mobile) so the mobile→external
 // chain (Befisc identity / GST→HSN) can be EXERCISED on a SPECIFIC test GLID whose
@@ -42,6 +42,8 @@ export interface EnrichmentProfile {
     companyName?: string;
     designation?: string;
     website?: string;
+    gst?: string; // GSTIN from the profile (unique business anchor for OSINT + Verified facts)
+    udyam?: string; // Udyam / Udyog Aadhaar registration (unique MSME business anchor)
     customerType?: string; // mapped label, e.g. "Reseller", "Industrialist"
     mobile?: string; // DEBUG: raw contact (no PII guard for now)
     email?: string; // DEBUG
@@ -542,6 +544,9 @@ export function deriveEnrichment(raw: unknown, nowIso: string): EnrichmentProfil
 
   // ── Compact digest for the LLM behavioural pass ──
   const digestParts = [
+    // The buyer's OWN business description — carries the establishment year + what they make/trade, so
+    // the profile pass can read maturity correctly (an "Established 1995…" firm is NOT a setup-phase business).
+    companyDesc ? `Own business (from profile): ${companyDesc.slice(0, 300)}` : '',
     persona?.type ? `Persona evidence: ${persona.type}, scale ${persona.scale || '?'}, ${persona.commercial ? 'commercial' : 'order type ?'}, repeat=${persona.repeatBuyer}` : '',
     domains.length ? `Categories enquired (${domains.length} → ${domains.length > 1 ? 'MULTI-SKU' : 'single-SKU'}): ${domains.slice(0, 12).join('; ')}` : '',
     applications.length ? `Applications: ${[...new Set(applications)].slice(0, 6).join('; ')}` : '',
@@ -566,6 +571,10 @@ export function deriveEnrichment(raw: unknown, nowIso: string): EnrichmentProfil
       companyName: str(bp.company_name),
       designation: str(bp.designation),
       website: str(bp.website),
+      // Strong UNIQUE business anchors when the profile carries them — these make a World/OSINT search
+      // precise (vs a broad name+location search that returns namesakes).
+      gst: str(bp.glusr_usr_gst) || str(bp.gstin) || str(bp.gst),
+      udyam: str(bp.udyam) || str(bp.udyam_no) || str(bp.udyog_aadhar) || str(bp.glusr_usr_udyam),
       customerType: str(bp.glusr_usr_custtype_name),
       mobile: str(bp.glusr_usr_ph_mobile) || str(bp.mobile1) || str(bp.mobile) || debugFallbackMobile(str(bp.glid) || str(bp.Gluser_id)),
       email: str(bp.email1),
@@ -592,16 +601,189 @@ export function deriveEnrichment(raw: unknown, nowIso: string): EnrichmentProfil
 // Calls the raw webhook directly (via the Vite proxy for CORS) and derives the
 // profile client-side. Returns { profile, raw } so debug mode can show the raw
 // payload too. Returns nulls on any failure → the form runs cold (additive).
+// ── SERVER TRACE (n8n · E1) — the `_trace` the E1 node appends to the buyer-pull response. Captured
+//    here (where the response lands) into a module store the V4 Observatory reads. null when E1 is
+//    inactive / absent — the UI then shows "not active" rather than fabricating server data. ──
+export interface ServerTraceNode { node?: string; status?: string; items_out?: number; confidence?: number | null; latency_ms?: number | null; output_keys?: string[]; output_sample?: string | null }
+export interface ServerTrace { schema?: string; summary?: { trace_id?: string; session_id?: string; glid?: string; bl?: string; execution_id?: string | null; node_count?: number; nodes_ok?: number; nodes_missing?: number; total_items?: number; emitted_at?: string }; nodes?: ServerTraceNode[] }
+let lastServerTrace: ServerTrace | null = null;
+export function getServerTrace(): ServerTrace | null { return lastServerTrace; }
+// raw buyer-pull response kept for the lineage resolver (fact → exact JSON path → value). Last pull only.
+let lastRaw: unknown = null;
+export function getEnrichmentRaw(): unknown { return lastRaw; }
+// the ORIGINAL rich {sources:{…}} response (only when the bi-user-insights endpoint was used) — for the LLM-native
+// extract path, which reads the per-source summaries. null when on the legacy -advanced endpoint.
+let lastRich: unknown = null;
+export function getEnrichmentRich(): unknown { return lastRich; }
+
+// ── bi-user-insights adapter (dual-mode) ──────────────────────────────────────────────────────────────────
+// The new flow returns { glid, derived_anchors, sources:{ key:{summary,raw} } }. The legacy regex path (getTop)
+// expects an ARRAY of singly-keyed objects ([{csl_data},{pns_data},…]). normalizeNewUserInsights reshapes the new
+// shape → legacy so the FALLBACK regex path keeps working; an OLD-shape (array) response passes through unchanged
+// (safe during a canary window where both endpoints are live). The EXTRACT path does NOT use this — it reads the
+// rich {sources} directly via buyerProfileExtract.bundleFromResponse (no regex). derived_anchors are stored
+// separately (identity prefill HINT) and NEVER injected into facts (keeps the ledger deterministic).
+let lastAnchors: Record<string, unknown> | null = null;
+export function getEnrichmentAnchors(): Record<string, unknown> | null { return lastAnchors; }
+export function isNewUserInsightsShape(raw: unknown): raw is { sources: Record<string, { summary?: unknown; raw?: unknown }>; derived_anchors?: Record<string, unknown> } {
+  return !!raw && typeof raw === 'object' && !Array.isArray(raw) && 'sources' in (raw as Record<string, unknown>) && typeof (raw as { sources?: unknown }).sources === 'object';
+}
+// Helpers shared by normalizeNewUserInsights + the inline copy in mergedTwinStore.richToLegacy — keep them in sync.
+const _obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+const _arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+// v7 `sources.isq.summary.isq_offers` ({mcat_id, specs:["Name: Value"]}) → the legacy {title, isq:[{IM_SPEC_MASTER_DESC,
+// ISQ_RESPONSE}]} shape both deriveEnrichment AND ledger.buildLedger read. Pure reshape (no regex mining).
+export function isqOffersToLegacy(isqSummary: unknown): Array<Record<string, unknown>> {
+  return _arr(_obj(isqSummary).isq_offers).map((o) => {
+    const oo = _obj(o);
+    return {
+      title: oo.category || oo.mcat_id, post_date: '', requirement_type: oo.requirement_type, probable_order_value: oo.probable_order_value,
+      isq: _arr(oo.specs).map((sp) => { const t = String(sp); const i = t.indexOf(': '); return i > 0 ? { IM_SPEC_MASTER_DESC: t.slice(0, i), ISQ_RESPONSE: t.slice(i + 2) } : { IM_SPEC_MASTER_DESC: t, ISQ_RESPONSE: '' }; }),
+    };
+  });
+}
+// Reshape a rich {sources} response → the legacy array of singly-keyed objects. CRUCIAL: pns/bl/wa nest the array the
+// legacy consumers ITERATE — deriveEnrichment does `for…of` (throws "X is not iterable" on the wrapper object) and
+// buildLedger does asArr() (silently empties). Both want the INNER array, so we unwrap pns.raw.data /
+// rfq.raw.RESPONSE.DATA.Listing / wa.raw.data.records. profile/whatsapp_inbound/befisc/sign3 are already the right
+// shape. Verified against deriveEnrichment + ledger.buildLedger field reads. NOTE: the EXTRACT path does NOT use this.
+export function normalizeNewUserInsights(raw: unknown): unknown {
+  if (!isNewUserInsightsShape(raw)) { lastAnchors = null; return raw; }            // old shape → identity passthrough
+  const s = raw.sources as Record<string, { summary?: unknown; raw?: unknown } | undefined>;
+  lastAnchors = (raw.derived_anchors && typeof raw.derived_anchors === 'object') ? raw.derived_anchors : null;
+  const rawOf = (k: string) => { const v = s[k]; return v && typeof v === 'object' && 'raw' in v ? (v as { raw?: unknown }).raw : v; };
+  const sumOf = (k: string) => { const v = s[k]; return v && typeof v === 'object' && 'summary' in v ? (v as { summary?: unknown }).summary : undefined; };
+  const pnsCalls = _arr(_obj(rawOf('pns')).data);                                                  // pns.raw = {Code,data:[calls]}
+  const blListing = _arr(_obj(_obj(_obj(rawOf('rfq')).RESPONSE).DATA).Listing);                    // rfq.raw.RESPONSE.DATA.Listing
+  const waRecords = _arr(_obj(_obj(rawOf('whatsapp_conversations')).data).records);                // wa.raw.data.records
+  const usRaw = _obj(rawOf('usersince')); const usrx = _obj(usRaw.glusr_extra).glusr_usr_id ? usRaw.glusr_extra : rawOf('usersince'); // unwrap nested glusr_extra
+  const legacy: Array<Record<string, unknown>> = [
+    { csl_data: rawOf('csl') }, { pns_data: pnsCalls }, { buyer_profile: rawOf('profile') },
+    { prev_bl_data: blListing }, { prev_isq_data: isqOffersToLegacy(sumOf('isq')) },
+    { whatsapp_data: waRecords }, { whatsapp_inbound: rawOf('whatsapp_inbound') },
+    { befisc: rawOf('befisc') }, { sign3: rawOf('sign3') }, { glusr_extra: usrx },
+  ].filter((o) => { const v = Object.values(o)[0]; return v != null && !(Array.isArray(v) && v.length === 0); });
+  // P7 · if the v9 node now carries a top-level requirement_brain (BUYER side), append it so UC2/L7 works
+  // WITHOUT the dual-fetch. It's a FALLBACK: the parallel -advanced requirement_brain (which also has category
+  // criticals) is unshifted ahead of it in fetchEnrichment, so the richer one still wins when both are present.
+  const topRB = (raw as { requirement_brain?: unknown }).requirement_brain;
+  if (topRB && typeof topRB === 'object') legacy.push({ requirement_brain: topRB });
+  return legacy;
+}
+export function extractServerTrace(raw: unknown): ServerTrace | null {
+  const pick = (o: unknown): ServerTrace | null => {
+    if (o && typeof o === 'object' && '_trace' in o) { const t = (o as { _trace?: unknown })._trace; if (t && typeof t === 'object') return t as ServerTrace; }
+    return null;
+  };
+  if (Array.isArray(raw)) { for (const it of raw) { const t = pick(it); if (t) return t; } return null; }
+  return pick(raw);
+}
+
+// L1 · per-node health (n8n emits __health on the bi-user-insights response; the default -advanced path does not).
+export interface HealthNode { node: string; ok: boolean; source?: string; latency_ms?: number; output_count?: number; keys?: number }
+let lastHealth: HealthNode[] = [];
+export function getEnrichmentHealth(): HealthNode[] { return lastHealth; }
+export function extractHealth(raw: unknown): HealthNode[] {
+  const h = raw && typeof raw === 'object' ? (raw as { __health?: unknown }).__health : undefined;
+  if (!Array.isArray(h)) return [];
+  return h.map((n) => { const o = (n && typeof n === 'object') ? (n as Record<string, unknown>) : {}; return { node: String(o.node || ''), ok: o.ok !== false, source: o.source != null ? String(o.source) : undefined, latency_ms: typeof o.latency_ms === 'number' ? o.latency_ms : undefined, output_count: typeof o.output_count === 'number' ? o.output_count : undefined, keys: typeof o.keys === 'number' ? o.keys : undefined }; });
+}
+// (v11) pickRequirementBrain removed with the dual-fetch — requirement_brain now rides the single response's
+// top-level field, recovered in normalizeNewUserInsights (lines ~666-670). One webhook, one call.
+
 export async function fetchEnrichment(glid: string): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> {
   if (!glid?.trim()) return { profile: null, raw: null };
   try {
-    const res = await fetch(api(`/api/imworkflow/webhook/user-insights-glid123?glid=${encodeURIComponent(glid.trim())}`));
+    // `-advanced` is the v12 path: same 7 buyer sources PLUS the appended `requirement_brain`
+    // item (Buyer Brain facts + known specs/intent) that the form-side resolver consumes. The
+    // response is a strict superset of the old path, so existing get()-by-key parsing is unaffected.
+    // TIMEOUT = SAFETY BACKSTOP ONLY (not the normal path). The n8n workflow is genuinely slow — observed
+    // runs are 2m30s–3m12s because "Respond to Webhook2" waits for the slow EBI/Firecrawl + category
+    // branches before responding (see the workflow: the buyer FACTS are ready in ~15-20s, but the response
+    // is gated on the slowest branch). So the deadline must sit ABOVE the real pull time or it would abort a
+    // working-but-slow pull. 240s lets a legit pull finish while still capping a TRUE infinite hang.
+    // The real fix is server-side (respond after FACTS, async the EBI/category branches) + a non-blocking
+    // client pull — a 3-minute blocking loader is the UX bug, not the timeout.
+    // ENDPOINT (flag-gated): default = -advanced (current). VITE_BI_USER_INSIGHTS='1' → the new lean-CSL flow,
+    // whose response is the rich {sources:{…}} shape. Default OFF = byte-for-byte current behaviour.
+    const BI = ((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BI_USER_INSIGHTS) !== '0'; // DEFAULT ON (v9 is the live flow); set VITE_BI_USER_INSIGHTS=0 to fall back to -advanced
+    const path = N8N_HOOK; // owner consolidated every n8n call onto one hook (api.ts N8N_HOOK); BI now only switches response-shape handling, not the URL
+    const g = encodeURIComponent(glid.trim());
+    // SINGLE FETCH (v11) — the dual-fetch is GONE (fixes the "4 executions"). The old second call hit the IDENTICAL
+    // N8N_HOOK, so it was a pure duplicate. requirement_brain now rides the SAME response's top-level field
+    // (recovered in normalizeNewUserInsights), so UC2/L7 keep working with ONE call. (StrictMode still double-invokes in dev.)
+    const res = await fetch(api(`/api/imworkflow/webhook/${path}?glid=${g}`), { signal: AbortSignal.timeout(240000) });
     if (!res.ok) return { profile: null, raw: null };
-    const raw = await res.json();
-    return { profile: deriveEnrichment(raw, new Date().toISOString()), raw };
+    const _resp = await res.json();
+    // n8n "Respond to Webhook" may emit the single final-assemble item WRAPPED IN AN ARRAY ([{ glid, sources, … }]).
+    // Unwrap to the {sources} object so the rich consumers (requirementsFromMerged / bundleFromResponse / identity / L1)
+    // read it — obj(array) is {} and would silently blank every merged source (specs, category, buyer details).
+    const rich = Array.isArray(_resp) ? (_resp.find((x) => x && typeof x === 'object' && 'sources' in x) ?? _resp[0] ?? _resp) : _resp;
+    // flag-on → normalize the rich shape to legacy for ALL getTop() consumers (deriveEnrichment, lineage), but feed
+    // the RICH response to ensureMergedTwin so the LLM extract path can read the per-source summaries.
+    const legacy = BI ? normalizeNewUserInsights(rich) : rich; // normalizeNewUserInsights appends the response's top-level requirement_brain (no dual-fetch)
+    lastRich = BI ? rich : null;                   // original rich {sources} → the LLM-native extract path
+    lastRaw = legacy;                              // legacy shape → lineage resolver + getTop consumers unaffected
+    lastServerTrace = extractServerTrace(legacy); // capture n8n E1 `_trace` if present (null otherwise)
+    lastHealth = extractHealth(rich);              // L1 — per-node __health (BI path only; [] on -advanced)
+    // EAGER synthesis — fired here so EVERY real pull (V3/V4/Observatory) builds the twin once, cached per GLID.
+    try { import('./mergedTwinStore').then((m) => m.ensureMergedTwin(glid.trim(), BI ? rich : legacy)).catch(() => undefined); } catch { /* noop */ }
+    // deriveEnrichment is the legacy regex profile (built for the -advanced array shape). The BI-normalized
+    // shape can differ per source (e.g. pns_data arrives as an object, not the array it iterates) → guard it so a
+    // throw NEVER drops `raw`. The extract path + the ledger/trace consume `raw`/`rich`, not this profile, so
+    // null here is a safe degrade. Default OFF (-advanced) → old array shape → computes exactly as before.
+    let profile: EnrichmentProfile | null = null;
+    try { profile = deriveEnrichment(legacy, new Date().toISOString()); } catch { profile = null; }
+    return { profile, raw: legacy };
   } catch {
     return { profile: null, raw: null };
   }
+}
+
+// ── CATEGORY BRAIN (mcat-keyed, cacheable, channel-agnostic) ──────────────────
+// Separate call from the buyer pull: the buyer pull runs at GLID-fetch time (no product yet),
+// but Category intelligence needs an mcat — known only AFTER the product resolves. So the form
+// fires this when the mcat is committed. `mode=category` is a cheap READ; it returns the cached
+// insights (`status:'hit'`) or `status:'building'` if the 7-day cache is cold. Reads never build —
+// a cold mcat must be built once (fetchCategoryBuild) and then polled. NO category literals here.
+export type CategoryIntelStatus = 'hit' | 'building' | 'error';
+export interface CategoryIntelResult { status: CategoryIntelStatus; insights: unknown | null; mcatId: string }
+
+export async function fetchCategoryIntel(mcatId: string, opts?: { fresh?: boolean }): Promise<CategoryIntelResult> {
+  const id = String(mcatId || '').trim();
+  if (!id) return { status: 'error', insights: null, mcatId: id };
+  try {
+    const fresh = opts?.fresh ? '&fresh=1' : '';
+    const res = await fetch(api(`/api/imworkflow/webhook/${N8N_HOOK}?mode=category&mcat_id=${encodeURIComponent(id)}${fresh}`), { signal: AbortSignal.timeout(25000) });
+    if (!res.ok) return { status: 'error', insights: null, mcatId: id };
+    const raw = await res.json();
+    const item = Array.isArray(raw) ? raw.find((x) => x && (x.category_insights !== undefined || x.category_cache !== undefined)) : raw;
+    const rawInsights = (item && (item as Record<string, unknown>).category_insights) || null;
+    // CRITICAL: n8n caches + returns category_insights as a JSON STRING (JSON.stringify(entry)).
+    // Parse it so the resolver/consumer receive a real object — without this, category_intelligence
+    // is a string, critical_specs is undefined, and catCriticals stays 0 on a HIT (silent consumption
+    // failure: "Category intelligence used: No" despite a successful build). Already-object payloads
+    // (defensive / future shape) pass through. A non-empty string that fails to parse → no usable
+    // insights → keep polling (treat as still-building) rather than feeding garbage downstream.
+    let insights: unknown = rawInsights;
+    if (typeof rawInsights === 'string') { try { insights = JSON.parse(rawInsights); } catch { insights = null; } }
+    if (insights && typeof insights === 'object') return { status: 'hit', insights, mcatId: id };
+    // Any non-hit is "keep polling": cold cache, fresh-requested, or a malformed/unparseable entry.
+    return { status: 'building', insights: null, mcatId: id };
+  } catch {
+    return { status: 'error', insights: null, mcatId: id };
+  }
+}
+
+// Kick ONE category build (slow: ~3 min, Redash→LLM distill). DEBUG/testing convenience — in
+// production a pre-warm job builds and the form only ever READS. Fire-and-forget; the caller polls
+// fetchCategoryIntel until `hit`. The form guards this to once-per-mcat so it can't restart the
+// build clock (the race that returns `building` forever).
+export async function fetchCategoryBuild(mcatId: string, opts?: { fresh?: boolean }): Promise<void> {
+  const id = String(mcatId || '').trim();
+  if (!id) return;
+  const fresh = opts?.fresh ? '&fresh=1' : '';
+  try { await fetch(api(`/api/imworkflow/webhook/${N8N_HOOK}?mode=build_category&mcat_id=${encodeURIComponent(id)}${fresh}`), { signal: AbortSignal.timeout(25000) }); } catch { /* fire-and-forget */ }
 }
 
 // ─── Shared product-token normaliser (the ONE matcher) ────────────────────────

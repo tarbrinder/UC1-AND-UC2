@@ -86,6 +86,7 @@ export interface PlanQuestion {
   order?: number;
   reason?: string; // ≤12 words; why a seller asks it
   groundedIn?: string; // A1: the concrete registry signal that justifies THIS question (qty / category / buyer history / profile pattern) — empty ⇒ the parser DROPS it
+  priority?: number; // DEBUG observability: the planner's own 0-100 score for this question. Does NOT affect selection/order (the parser's tier+cap logic is unchanged) — it only EXPLAINS the ranking in the leaderboard.
 }
 
 export interface RequirementPlan {
@@ -103,6 +104,7 @@ export interface RequirementPlan {
   // ── P5b: Twin-aware planning (the "ruthless editor") ──
   twinResolved?: string[]; // topics the planner SKIPPED because the Twin already knew them (≥80 conf) — drives the question-budget metric ("high-confidence buyer → fewer questions")
   twinMode?: 'fast_track' | 'cold_discover' | 'off_profile' | 'none'; // which track the planner took (code-derived), for the debug readout
+  considered?: Array<{ label: string; score: number; reason: string }>; // DEBUG observability: questions the planner WEIGHED but did NOT select (lost to the 3-cap, or covered by a sibling/spec/intent), each with a 0-100 score + a one-line why-not. Pure provenance — never rendered to the buyer, never affects the asked set.
 }
 
 // ─── A6: Requirement Intent (first-class — NOT the per-category ISQ "Use Case") ──

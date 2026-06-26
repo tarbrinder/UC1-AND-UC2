@@ -5,6 +5,9 @@ import { api } from './api';
 import type { DynQuestion, Segment, RequirementPlan, PlanQuestion } from './questions/types';
 import type { SeedQuestion } from './questions/seed';
 import type { BuyerProfile, BuyerTwin, InferredTrait, TwinSignal, TwinSource } from './enrichment';
+import type { OfferLLMOut } from './offerEnrich';
+import type { UC2LLMOut } from './uc2Enrichment';
+import { SIGNAL_PRIORITY } from './provenance';
 
 const LLM_KEY = import.meta.env.VITE_LLM_KEY as string;
 const ENDPOINT = api('/api/llm/chat/completions');
@@ -47,7 +50,30 @@ interface LLMOpts {
 // Network-level outcome (ok/status/ms/bytes) captured at the single chokepoint. Parse-level
 // success (returned null/{}) shows downstream as the caller's fallback; this ring proves the
 // CALL itself. Mirrored to window.__llmHealth for the debug panel + console introspection.
-export interface LLMCallRecord { label: string; ok: boolean; ms: number; status: number; bytes: number; model: string; at: number; }
+export interface LLMCallRecord { label: string; ok: boolean; ms: number; status: number; bytes: number; model: string; at: number; promptTokens?: number; completionTokens?: number; reasoningTokens?: number; costUsd?: number; promptVersion?: string; maxTokens?: number; temperature?: number; }
+
+// VERSIONING (regression attribution): a build stamp for all form prompts + a per-prompt version for
+// the ones that change most. When an eval/score regresses, the trace says exactly which prompt-version
+// produced it. Bump a prompt's entry when you materially change that prompt. Model version = `model`.
+export const PROMPTS_VERSION = '2026.06.14';
+const PROMPT_VER: Record<string, string> = {
+  planRequirement: 'plan-v7', deriveIntent: 'intent-v5', refineQuestions: 'refine-v2',
+  inferSpecsFromApplication: 'cascade-v3', deriveBuyerTwin: 'twin-v1.2', deriveBuyerProfile: 'profile-v1',
+  getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1', extractBuyerProfile: 'extract-v4', // MUST mirror EXTRACT_PROMPT_VERSION (v4: removed repeat_buyer/next_best_seller_action/purchasing_power/urgency; added buyer_maturity/purchase_frequency/delivery_timeline/digital_footprint)
+  offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v2', // MUST mirror UC2_PROMPT_VERSION in uc2Enrichment.ts (v2: pure-LLM · location-lock + sourcing-preference · PNS-hero into specs · qty-conflict)
+};
+const promptVer = (label: string): string => PROMPT_VER[label] || PROMPTS_VERSION;
+
+// Approx per-1M-token USD rates (for RELATIVE cost visibility in Node Logs, not billing). Unknown
+// models fall back to a mid rate. Reasoning tokens bill as output on Gemini 2.5.
+const LLM_RATES: Record<string, { in: number; out: number }> = {
+  'google/gemini-2.5-flash': { in: 0.30, out: 2.50 },
+  'google/gemini-2.5-flash-lite': { in: 0.10, out: 0.40 },
+};
+function estCostUsd(model: string, promptTok: number, complTok: number): number {
+  const r = LLM_RATES[model] || { in: 0.15, out: 0.60 };
+  return (promptTok / 1e6) * r.in + (complTok / 1e6) * r.out;
+}
 const LLM_HEALTH: LLMCallRecord[] = [];
 function recordLLM(rec: LLMCallRecord): void {
   LLM_HEALTH.push(rec);
@@ -56,10 +82,41 @@ function recordLLM(rec: LLMCallRecord): void {
 }
 export const getLLMHealth = (): LLMCallRecord[] => LLM_HEALTH.slice();
 
-async function callLLM(messages: object[], opts: LLMOpts = {}): Promise<string> {
-  const { jsonMode = true, model = MODEL_FAST, maxTokens = 1024, temperature, label = 'llm' } = opts;
+// Raw prompt INPUT / OUTPUT per label (last call) — for the Output-Acceptance ledger (P2 · Gap 3).
+// Truncated; debug-only. Keyed by label so the Observatory can show "what went in / what came out".
+export interface LLMRawIO { input?: string; output?: string; system?: string; user?: string; at: number; model?: string; maxTokens?: number; temperature?: number; promptVersion?: string }
+const LLM_RAW: Record<string, LLMRawIO> = {};
+export const getLLMRaw = (): Record<string, LLMRawIO> => ({ ...LLM_RAW });
+
+// L4 · prompt-template registry — prompt-owning libs register their STATIC system template at module load
+// (e.g. buyerProfileExtract registers 'extractBuyerProfile' → EXTRACT_BUYER_PROFILE_SYSTEM) so the dashboard can
+// render the verbatim, version-stamped template even before a call fires. getLLMRaw still carries the resolved per-call text.
+const PROMPT_TEMPLATES: Record<string, string> = {};
+export function registerPromptTemplate(label: string, system: string): void { PROMPT_TEMPLATES[label] = system; }
+export const getPromptTemplates = (): Record<string, string> => ({ ...PROMPT_TEMPLATES });
+
+// ── Live LLM-activity signal — drives a GLOBAL "working…" loader in the UI so the form NEVER looks
+// frozen while a model call (or background pass) is running. The single chokepoint below inc/decrements
+// an in-flight counter and notifies subscribers (pub-sub, so React subscribes without polling). `label`
+// lets the UI show WHAT is running (mapped to friendly copy). Every callLLM — intent, planner, refine,
+// deduce, profile, twin — reports automatically, so this is "a loader everywhere" by construction.
+let llmInFlight = 0;
+let llmLastLabel = '';
+type LLMActivityCb = (active: number, label: string) => void;
+const llmActivityListeners = new Set<LLMActivityCb>();
+function emitLLMActivity(): void { for (const cb of llmActivityListeners) { try { cb(llmInFlight, llmLastLabel); } catch { /* noop */ } } }
+export function onLLMActivity(cb: LLMActivityCb): () => void {
+  llmActivityListeners.add(cb);
+  cb(llmInFlight, llmLastLabel); // prime with the current state
+  return () => { llmActivityListeners.delete(cb); };
+}
+export const llmActive = (): number => llmInFlight;
+
+async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } }): Promise<string> {
+  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
   const t0 = Date.now();
   let status = 0;
+  llmInFlight++; llmLastLabel = label; emitLLMActivity();
   try {
     const res = await fetch(ENDPOINT, {
       method: 'POST',
@@ -78,17 +135,129 @@ async function callLLM(messages: object[], opts: LLMOpts = {}): Promise<string> 
     status = res.status;
     if (!res.ok) {
       const body = await res.text();
-      recordLLM({ label, ok: false, ms: Date.now() - t0, status, bytes: 0, model, at: Date.now() });
+      recordLLM({ label, ok: false, ms: Date.now() - t0, status, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) });
       throw new Error(`LLM error: ${res.status} ${body}`);
     }
     const data = await res.json();
     const content = (data.choices?.[0]?.message?.content ?? '{}') as string;
-    recordLLM({ label, ok: true, ms: Date.now() - t0, status, bytes: content.length, model, at: Date.now() });
+    // capture truncated raw I/O for the Output-Acceptance ledger (P2) — last call per label
+    try { const msgs = messages as Array<{ role?: string; content?: unknown }>; const inText = msgs.map((m) => String(m.content ?? '')).join(' — '); const sys = msgs.find((m) => m.role === 'system'); const usr = [...msgs].reverse().find((m) => m.role === 'user' || !m.role); LLM_RAW[label] = { input: inText, output: content, system: sys ? String(sys.content ?? '') : undefined, user: usr ? String(usr.content ?? '') : undefined, at: Date.now(), model, maxTokens, temperature, promptVersion: promptVer(label) }; } catch { /* noop */ } // V10 (owner #4/#13): capture FULL prompt+output (was 12000/4000/8000) so L4 'nothing hidden' is literally true. Debug mode, PII ok.
+    const u = data.usage || {};
+    const promptTokens = u.prompt_tokens ?? 0;
+    const completionTokens = u.completion_tokens ?? 0;
+    const reasoningTokens = u.completion_tokens_details?.reasoning_tokens ?? 0;
+    recordLLM({ label, ok: true, ms: Date.now() - t0, status, bytes: content.length, model, at: Date.now(), promptTokens, completionTokens, reasoningTokens, costUsd: estCostUsd(model, promptTokens, completionTokens), promptVersion: promptVer(label), maxTokens, temperature });
+    if (meta) meta.usage = { promptTokens, completionTokens, reasoningTokens };
     return content;
   } catch (e) {
-    if (!status) recordLLM({ label, ok: false, ms: Date.now() - t0, status: 0, bytes: 0, model, at: Date.now() });
+    if (!status) recordLLM({ label, ok: false, ms: Date.now() - t0, status: 0, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) });
     throw e;
+  } finally {
+    llmInFlight = Math.max(0, llmInFlight - 1); emitLLMActivity();
   }
+}
+
+// ── PROFILE SYNTHESIS (Wave 1 · #8 live round-trip) — env-gated; deterministic ledger stays the floor ──
+// Real callLLM path (temp 0, json mode). Returns the model's structured attributes (value/confidence +
+// grounded reasoning_steps citing evidence_ids) or null when no key. The caller (profileSynth) runs the
+// SAME deterministic verifier on the result, so a hallucinated citation is caught regardless of source.
+export interface SynthLLMOut { attributes: Array<{ key: string; value: string; confidence: number; reasoning_steps: Array<{ claim: string; from_evidence: string[]; rejected?: string; delta: number }> }> }
+// usage surfaced to the Observatory's LLM-synthesis block (#7 "where are the tokens consumed") — REAL counts
+// from the gateway's usage block, not an estimate. ms is the round-trip wall-clock.
+export interface SynthUsage { promptTokens: number; completionTokens: number; reasoningTokens: number; ms: number }
+export async function synthesizeProfileLLMWithUsage(system: string, user: string): Promise<{ out: SynthLLMOut | null; usage: SynthUsage }> {
+  const usage: SynthUsage = { promptTokens: 0, completionTokens: 0, reasoningTokens: 0, ms: 0 };
+  if (!hasGeminiKey()) return { out: null, usage };
+  const t0 = Date.now();
+  const meta: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } } = {};
+  const applyMeta = () => { usage.ms = Date.now() - t0; if (meta.usage) { usage.promptTokens = meta.usage.promptTokens; usage.completionTokens = meta.usage.completionTokens; usage.reasoningTokens = meta.usage.reasoningTokens; } };
+  try {
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 16000, label: 'profileSynth' }, meta); // 16000: no practical cap from us — a full profile needs ~3-4k. The ONLY hard ceiling is the model's own max output (gemini-2.5 family ≈ 64k), which we can't exceed (physics, not our choice).
+    applyMeta();
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    // tolerant shape: {attributes:[…]} · a bare array · or the first array-valued property the model used
+    const attrs = Array.isArray((parsed as { attributes?: unknown }).attributes) ? (parsed as { attributes: unknown[] }).attributes
+      : Array.isArray(parsed) ? (parsed as unknown[])
+      : (Object.values(parsed || {}).find((v) => Array.isArray(v)) as unknown[] | undefined);
+    return { out: Array.isArray(attrs) ? { attributes: attrs as SynthLLMOut['attributes'] } : null, usage };
+  } catch { applyMeta(); return { out: null, usage }; }
+}
+// thin back-compat wrapper (the Prompts tab still uses the out-only shape)
+export async function synthesizeProfileLLM(system: string, user: string): Promise<SynthLLMOut | null> {
+  return (await synthesizeProfileLLMWithUsage(system, user)).out;
+}
+
+// BUYER PROFILE EXTRACTOR (the "no facts regex" path) — one exhaustive pass over the whole bi-user-insights
+// response. MODEL_RICH because it reconciles 10 sources + cites evidence. Same usage/cost/health plumbing as the
+// synthesizer (label 'extractBuyerProfile' → Run-detail tokens/ms/cost band works free). The per-attribute extra
+// fields (state/sources/evidence) ride through the tolerant parse untouched; extractedToFinals reads them.
+export async function extractBuyerProfileLLM(system: string, user: string): Promise<{ out: SynthLLMOut | null; usage: SynthUsage }> {
+  const usage: SynthUsage = { promptTokens: 0, completionTokens: 0, reasoningTokens: 0, ms: 0 };
+  if (!hasGeminiKey()) return { out: null, usage };
+  const t0 = Date.now();
+  const meta: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } } = {};
+  const applyMeta = () => { usage.ms = Date.now() - t0; if (meta.usage) { usage.promptTokens = meta.usage.promptTokens; usage.completionTokens = meta.usage.completionTokens; usage.reasoningTokens = meta.usage.reasoningTokens; } };
+  try {
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 16000, model: MODEL_RICH, label: 'extractBuyerProfile' }, meta);
+    applyMeta();
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    const attrs = Array.isArray((parsed as { attributes?: unknown }).attributes) ? (parsed as { attributes: unknown[] }).attributes
+      : Array.isArray(parsed) ? (parsed as unknown[])
+      : (Object.values(parsed || {}).find((v) => Array.isArray(v)) as unknown[] | undefined);
+    return { out: Array.isArray(attrs) ? { attributes: attrs as SynthLLMOut['attributes'] } : null, usage };
+  } catch { applyMeta(); return { out: null, usage }; }
+}
+
+// CRITIC / PRUNE pass — a small fast call that returns the keep-set ({"keep":[...]}). Null on no-key / failure
+// (caller leaves the twin un-pruned rather than dropping silently).
+export async function pruneTwinLLM(system: string, user: string): Promise<string[] | null> {
+  if (!hasGeminiKey()) return null;
+  try {
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 2000, label: 'twinPrune' });
+    const p = JSON.parse(out) as Record<string, unknown>;
+    const keep = Array.isArray((p as { keep?: unknown }).keep) ? (p as { keep: unknown[] }).keep
+      : Array.isArray(p) ? (p as unknown[])
+      : (Object.values(p || {}).find((v) => Array.isArray(v)) as unknown[] | undefined);
+    return Array.isArray(keep) ? keep.map(String) : null;
+  } catch { return null; }
+}
+
+// OFFER ENRICHMENT (Case 2) — the authority pass: re-reads the raw BuyLead + the buyer-originated signals and
+// returns the per-field correction verdict ({"fields":[…]}). Null on no-key / failure (caller keeps the raw lead).
+export async function offerEnrichLLM(system: string, user: string): Promise<OfferLLMOut | null> {
+  if (!hasGeminiKey()) return null;
+  try {
+    // MODEL_RICH (not FAST): offer reconstruction must READ buried call-narrative specs (e.g. "54 GSM", "0.5–1 ton")
+    // and reconcile several conflicting PNS calls — the lite model demonstrably missed these; the rich model gets them.
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 4000, model: MODEL_RICH, label: 'offerEnrich' });
+    const p = JSON.parse(out) as Record<string, unknown>;
+    const fields = Array.isArray((p as { fields?: unknown }).fields) ? (p as { fields: unknown[] }).fields
+      : Array.isArray(p) ? (p as unknown[])
+      : (Object.values(p || {}).find((v) => Array.isArray(v)) as unknown[] | undefined);
+    return Array.isArray(fields) ? ({ fields } as OfferLLMOut) : null;
+  } catch { return null; }
+}
+
+// UC2 · REQUIREMENT ENRICHMENT — reconstruct the buyer's TRUE requirement (title/category/location/specs) from the
+// merged sources + buyer-profile context, grounded in the fN bundle. Returns {out, usage} (usage powers the UC2·debug
+// band + L0 RUN strip). MODEL_RICH + 16k like extractBuyerProfile (reconciles per-lead specs + brain + call narrative).
+// Null out on no-key / failure → caller falls back to the deterministic dummy (buildUC2Enrichment). label 'uc2Enrich'.
+export async function enrichRequirementLLM(system: string, user: string): Promise<{ out: UC2LLMOut | null; usage: SynthUsage }> {
+  const usage: SynthUsage = { promptTokens: 0, completionTokens: 0, reasoningTokens: 0, ms: 0 };
+  if (!hasGeminiKey()) return { out: null, usage };
+  const t0 = Date.now();
+  const meta: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } } = {};
+  const applyMeta = () => { usage.ms = Date.now() - t0; if (meta.usage) { usage.promptTokens = meta.usage.promptTokens; usage.completionTokens = meta.usage.completionTokens; usage.reasoningTokens = meta.usage.reasoningTokens; } };
+  try {
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 16000, model: MODEL_RICH, label: 'uc2Enrich' }, meta);
+    applyMeta();
+    const p = JSON.parse(out) as Record<string, unknown>;
+    const edits = Array.isArray((p as { edits?: unknown }).edits) ? (p as { edits: unknown[] }).edits
+      : Array.isArray((p as { fields?: unknown }).fields) ? (p as { fields: unknown[] }).fields
+      : Array.isArray(p) ? (p as unknown[])
+      : (Object.values(p || {}).find((v) => Array.isArray(v)) as unknown[] | undefined);
+    return { out: Array.isArray(edits) ? ({ edits } as UC2LLMOut) : null, usage };
+  } catch { applyMeta(); return { out: null, usage }; }
 }
 
 // ── Voice transcription + spec extraction ────────────────────────────
@@ -393,22 +562,32 @@ export async function deriveIntent(args: {
   unit?: string;
   buyerKind?: 'business' | 'personal';
   twinTruths?: string; // HIGH-confidence facts only, PII-free + brand-free
-}): Promise<{ journey: string; question: string; chips: string[]; derivedIntent: string; confidence: number } | null> {
+  observedContext?: string; // OBSERVED external footprint (Befisc/Sign3/identity) — soft signal, not a fact
+  orderScale?: string; // single / small / bulk / wholesale (classifyOrderScale) — magnitude guard
+  buyerStory?: string; // P2.7 narrative arc from the category timeline (SOFT) — bridges off-profile token gaps
+  categoryFusion?: { applications: string[] }; // BUYER×CATEGORY fusion — passed ONLY when category confidence is RICH (gated upstream); the category's REAL seller-call use-cases, to frame the purpose around THIS buyer's operation
+}): Promise<{ journey: string; question: string; chips: string[]; derivedIntent: string; confidence: number; intentCandidates?: Array<{ label: string; score: number; reason: string }> } | null> {
   const prompt = `${INDIA_CTX}
 A buyer is starting an RFQ. BEFORE any product spec, ask ONE question that reveals WHY they need this — the single most decisive purpose/end-use driver. Adapt the question AND chips to the buyer's JOURNEY, inferred from the product, quantity and who's buying.
 Product: "${args.productName}"
-Quantity: ${args.quantity?.trim() ? `${args.quantity} ${args.unit || ''}`.trim() : 'not specified yet'}
+Quantity: ${args.quantity?.trim() ? `${args.quantity} ${args.unit || ''}`.trim() : 'not specified yet'}${args.orderScale && args.orderScale !== 'unknown' ? ` (order scale: ${args.orderScale})` : ''}
 Who's buying: ${args.buyerKind || 'unknown'}
 ${args.twinTruths ? `Known about this buyer (high-confidence — use to pre-judge journey + a derived guess): ${args.twinTruths}` : ''}
+${args.buyerStory ? `Buyer's STORY (the arc across their category history — SOFT, but high-signal): ${args.buyerStory}. A buyer whose history shows they MAKE or TRADE a line of goods is buying an INPUT / raw material / tooling for THAT line → journey is industrial / resale, NOT personal. This bridges cases where the product name doesn't literally match past categories (e.g. a notebook maker buying "paper"), and it outweighs a soft individual footprint.` : ''}
+${args.observedContext ? `Observed footprint (mobile-lookup — Befisc/Sign3/identity; SOFT signal, may be stale, NOT a fact): ${args.observedContext}. An INDIVIDUAL on consumer marketplaces may lean "personal" — but ONLY when the order is also small AND the buyer-kind is not business; a bulk order or a business buyer OVERRIDES this.` : ''}
+${args.categoryFusion?.applications?.length ? `BUYER × CATEGORY FUSION — this category's REAL buyer use-cases (from seller-call data; this is a high-traffic, trustworthy category): ${args.categoryFusion.applications.slice(0, 6).join(' / ')}. The buyer above has a KNOWN operation/business. FUSE the two: frame the ONE purpose question around what THIS buyer will use the product FOR in THEIR operation, and draw the chips from these real category use-cases adapted to the buyer — e.g. a notebook manufacturer buying a diesel generator → "What will this generator power at your unit?" with chips ["Notebook production line","Whole factory","Office & utilities","New expansion unit"]. This is still a CONFIRM question (the buyer picks) — NEVER assume the answer, and do NOT invent a use-case the category data doesn't support.` : ''}
 RULES:
 - ONE question. PLAIN simple English, ≤12 words, no preamble, no jargon, warm and human.
 - 3-5 SPECIFIC, mutually-exclusive chips tailored to THIS product + journey (the form adds "Other…").
 - QUANTITY-AWARE: if the quantity is a SINGLE or very small number of discrete units (e.g. "1 Piece"), this is almost never bulk resale/wholesale — it's likely the buyer's OWN use, a sample, a trial, or a small need. Fit the chips to THAT reality; do NOT offer only wholesale/distribution options when the quantity is 1. (A single MACHINE/equipment unit is the exception — that's a real capital buy, not retail.)
+- BUYER-KIND & SCALE GUARD (decisive, overrides the footprint): if "Who's buying" is BUSINESS, the journey is NEVER "personal" — pick the business journey (industrial / resale / retail / project / maintenance). Likewise a LARGE / BULK order — hundreds or thousands of units, or a bulk unit (kg, tonne, truck, container, roll, bundle, quintal) at scale, i.e. order scale "bulk" or "wholesale" — is a BUSINESS / industrial / resale buy, NEVER "personal", whatever the external footprint says. Only a SMALL discrete quantity bought by a non-business / unknown buyer may be "personal".
 - It MUST capture end-use / purpose — NOT a spec, NOT quantity / location / budget / timeline / payment.
 - "journey": EXACTLY one of: retail | resale | industrial | project | maintenance | personal | unknown.
 - DERIVE, don't ask, when the purpose is ALREADY clear: if the PRODUCT NAME itself states the end-use (e.g. "tyre polish for car wash", "school bags for resale") OR the buyer's known truths make it unambiguous (e.g. they only ever buy this for resale), set "derivedIntent" to that purpose with "confidence" 85-95 — the form will show it as a one-tap CONFIRMATION, not a question. If the truths merely hint, set "derivedIntent" with "confidence" 50-80. If genuinely unknown, "" and 0.
+- CRITICAL — derivedIntent must be SPECIFIC, never a generic umbrella: it is shown as the buyer's pre-filled answer, so it MUST be your single BEST chip (use that chip's exact text) or something even more specific — NEVER a vague parent term. E.g. for a notebook manufacturer buying corrugated boxes, derivedIntent = "Notebook packaging" (a real chip), NOT "Packaging". If your best guess would only be a generic umbrella, you are not confident enough — lower the confidence and let the chips do the work. The chips are buyer- and category-aware; the derived answer must be at least as good as the best chip, never worse.
+- DEBUG OBSERVABILITY (this does NOT change anything above): also return "intent_candidates" — the 2-5 plausible end-use intents you actually weighed, RANKED best-first, each with a "score" 0-100 (your confidence it is the buyer's ACTUAL purpose) and a one-line "reason" citing the concrete signals (product / quantity / who's-buying / known truths / story / category use-cases). Your TOP candidate's label SHOULD equal your "derivedIntent" (or, if you derived nothing, your single best chip). This array merely EXPLAINS your decision; it must NOT alter the question, chips, derivedIntent or confidence.
 EXAMPLES (shape only — do NOT hardcode): Cotton Tote Bag → journey "retail" → "What will you use these bags for?" · ["Retail shopping","Corporate gifting","Event giveaway","Resale","Packaging"]. Industrial Filter → "industrial" → "What's driving this requirement?" · ["New plant","Replacement","Capacity expansion","Maintenance"]. Solar Panel → "project" → "Where will these be installed?" · ["Home rooftop","Commercial building","Industrial plant","Government tender"].
-Return ONLY JSON: { "journey":"...", "question":"...", "chips":["..."], "derivedIntent":"", "confidence":0 }`;
+Return ONLY JSON: { "journey":"...", "question":"...", "chips":["..."], "derivedIntent":"", "confidence":0, "intent_candidates":[{"label":"","score":0,"reason":""}] }`;
   try {
     const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 512, label: 'deriveIntent' });
     const p = JSON.parse(text);
@@ -416,12 +595,27 @@ Return ONLY JSON: { "journey":"...", "question":"...", "chips":["..."], "derived
     const question = typeof p?.question === 'string' ? indiaize(p.question.trim()) : '';
     if (!question || chips.length < 2) return null; // graceful → caller falls back to planner-first
     const JOURNEYS = ['retail', 'resale', 'industrial', 'project', 'maintenance', 'personal', 'unknown'];
+    const journey = JOURNEYS.includes(String(p?.journey).toLowerCase()) ? String(p.journey).toLowerCase() : 'unknown';
+    // GUARD: a BUSINESS buyer, or a BULK / WHOLESALE order, can NEVER be a "personal" journey — if the
+    // model slipped (e.g. a notebook maker's 10,000 kg paper buy read as "personal" off an individual
+    // footprint), fall back gracefully to planner-first rather than ask a wrong "for personal use?" question.
+    if (journey === 'personal' && (args.buyerKind === 'business' || args.orderScale === 'bulk' || args.orderScale === 'wholesale')) return null;
     return {
-      journey: JOURNEYS.includes(String(p?.journey).toLowerCase()) ? String(p.journey).toLowerCase() : 'unknown',
+      journey,
       question,
       chips,
       derivedIntent: typeof p?.derivedIntent === 'string' ? p.derivedIntent.trim() : '',
       confidence: Number.isFinite(p?.confidence) ? Math.max(0, Math.min(100, p.confidence as number)) : 0,
+      // DEBUG-ONLY: the ranked candidate intents the model weighed (label · score · reason). Defensive parse;
+      // absent/garbled → undefined (no leaderboard, graceful). NEVER consumed by behavior — observability only.
+      intentCandidates: Array.isArray(p?.intent_candidates)
+        ? (p.intent_candidates as unknown[])
+            .filter((c): c is Record<string, unknown> => !!c && typeof c === 'object')
+            .map((c) => ({ label: indiaize(String(c.label ?? '').trim()), score: Number.isFinite(c.score) ? Math.max(0, Math.min(100, Number(c.score))) : 0, reason: String(c.reason ?? '').trim() }))
+            .filter((c) => c.label)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 6)
+        : undefined,
     };
   } catch {
     return null;
@@ -446,10 +640,37 @@ export async function planRequirement(args: {
   // facts the planner must NOT re-ask (fast-track); `unknowns` = open questions to
   // prioritise; `confidence` = twin_confidence (cold vs warm); `offProfile` = current
   // product is unrelated to history → circuit-breaker (don't assume usual intent).
-  twin?: { known: string; unknowns: string[]; confidence: number; offProfile: boolean; whyKnown?: string[] };
+  twin?: { known: string; unknowns: string[]; negativeSignals?: string[]; confidence: number; offProfile: boolean; whyKnown?: string[] };
   buyerKind?: 'business' | 'personal'; // page-1 "who's buying" — shapes plan depth/tone
+  // OBSERVED external footprint (Befisc/Sign3 mobile-lookup + composite identity) distilled to a SOFT
+  // signal — demographics/location/individual-vs-business/consumer-marketplace. NEVER a hard fact.
+  observedContext?: string;
+  // P2.7 — the BUYER STORY: the narrative arc inferred from their category TIMELINE (setting up /
+  // expanding / replenishing / diversifying). A SOFT signal that explains an odd current product; it
+  // shapes persona / framing, NEVER a hard fact and NEVER overrides the current order mode.
+  buyerStory?: string;
+  // Intelligence Consumption — of the transferable buyer intelligence, which traits should actually SHAPE
+  // THIS product's plan (drivers, lead with them) vs are carried-but-quiet (must NOT dominate — e.g. a
+  // research-authority on a generic office chair, a language preference which is seller-routing).
+  intelligenceDrivers?: string;
+  intelligenceQuiet?: string;
+  // P3 — the PROCUREMENT PROCESS this buyer is in (research prototype / lab / project / department /
+  // institutional supply / capex / production / resale / maintenance). Shapes approval flow, quote format,
+  // GST need and follow-up far more than any spec — a research prototype is spec-led + single-unit + PO,
+  // not bulk/credit-trader. SOFT framing, never overrides the current order mode.
+  procurementContext?: string;
+  // Richer CATEGORY layers (v13 distill) — population-level patterns from seller calls. deal_blockers
+  // = what sellers commonly stall on (proactively cover the TOP one as a panel question); applications
+  // = recurring use-cases (intent chips); budgetBands = category-grounded budget options to use VERBATIM
+  // for any budget question instead of generic guesses. SOFT context — shapes questions, never a hard fact.
+  categoryDealBlockers?: string[];
+  categoryApplications?: string[];
+  categoryBudgetBands?: string[];
 }): Promise<RequirementPlan | null> {
   const bpf = args.buyerProfile;
+  const catBlock = ((args.categoryDealBlockers?.length || args.categoryApplications?.length || args.categoryBudgetBands?.length)
+    ? `\nCATEGORY SELLER-CALL PATTERNS (population-level, this mcat — SOFT, shapes questions only):${args.categoryApplications?.length ? `\n• common use-cases: ${args.categoryApplications.slice(0, 5).join(' · ')} (use to frame the intent question).` : ''}${args.categoryDealBlockers?.length ? `\n• sellers commonly STALL on: ${args.categoryDealBlockers.join(' · ')} — proactively cover the TOP one as a panel question so the buyer settles it up-front.` : ''}${args.categoryBudgetBands?.length ? `\n• observed BUDGET BANDS for this category: ${args.categoryBudgetBands.join(' · ')} — if you ask a budget question, use THESE bands VERBATIM as the options (do NOT invent generic ₹ ranges).` : ''}\n`
+    : '');
   // ── P5b: Twin track. Pick ONE mode, build a directive block. North Star: a
   // known buyer must get FEWER questions — never re-ask what the Twin already knows.
   const tw = args.twin;
@@ -466,7 +687,10 @@ export async function planRequirement(args: {
     twinBlock = `\nCOLD BUYER (confidence ${tw.confidence}/100) — we know very little about them. LEAD WITH INTENT (what is this for?) then SCALE (how big / how much per cycle) as chip questions, BEFORE product specs. Specs are secondary until intent + scale are known.\n`;
   }
   if (tw && tw.unknowns && tw.unknowns.length) {
-    twinBlock += `Open unknowns to PRIORITISE (ask only the ones relevant to THIS product, as chips): ${tw.unknowns.slice(0, 8).join(', ')}.\n`;
+    twinBlock += `OPEN UNKNOWNS — the Twin has EXPLICITLY flagged these as still NOT known about this buyer: [${tw.unknowns.slice(0, 8).join(', ')}]. These are your HIGHEST-PRIORITY question candidates. For EACH unknown that is relevant to THIS product, prefer asking it (as a grounded chip question) OVER any generic question — fill the scarce question slots with the relevant open unknowns FIRST, then any other decisive gap. Skip an unknown ONLY if it is irrelevant to this product, already captured by an ISQ spec, or already answered by the intent step. An unknown you ask still obeys the chip-only + grounding + 3-question-cap rules.\n`;
+  }
+  if (tw && tw.negativeSignals && tw.negativeSignals.length) {
+    twinBlock += `HARD CONSTRAINTS (never violate) — the buyer has EXPLICITLY stated these: [${tw.negativeSignals.slice(0, 6).join(', ')}]. NEVER ask about them, NEVER offer an option chip / personaOption that violates them, and NEVER suggest anything against them. Silently honour them — do not surface a question just to re-confirm a stated constraint.\n`;
   }
   const bpfLine = bpf && Object.keys(bpf).length
     ? [bpf.nature && `Nature: ${bpf.nature}`, bpf.authority && `Authority: ${bpf.authority}`, bpf.procurementModel && `Procurement model: ${bpf.procurementModel}`,
@@ -487,8 +711,8 @@ Quantity: ${args.quantity || '?'} ${args.unit || ''}
 Buyer use-case (if any): "${args.application || ''}"
 ${args.buyerKind ? `Who's buying: ${args.buyerKind === 'personal' ? 'PERSONAL / individual end-user — keep it short and simple, NO firm/GST/credit/cadence questions, fewer cards, consumer language and pack sizes.' : 'BUSINESS buyer — scale (volume/cadence), credit/payment terms, and bulk/commercial signals are fair game.'}` : ''}
 Category ISQ spec fields WITH options — REFERENCE ONLY (the spec dimension a seller expects; NOT the goal): ${JSON.stringify(args.isqSpecsWithOptions)}
-${args.prior ? `\nBUYER HISTORY (from this buyer's PRIOR calls/RFQs in this or a related category — they ALREADY told us these). USE IT: pre-rank specs the buyer cared about to the top of specOrder; REUSE the seller's real questions; infer persona from it; and do NOT re-ask anything already known here.\n  persona: ${args.prior.persona || '?'}\n  specs the buyer already gave: ${JSON.stringify(args.prior.knownSpecs || {})}\n  questions the seller actually asked this buyer: ${JSON.stringify(args.prior.sellerQuestions || [])}\n  prior RFQ answers: ${JSON.stringify(args.prior.isqAnswers || {})}\n` : ''}${bpfLine ? `\nPERSISTENT BUYER PROFILE (WHO this buyer is, across all requirements — high signal): ${bpfLine}.\nUSE IT to shape the plan: an ACADEMIC / GOVERNMENT / INSTITUTIONAL Nature → research / institutional procurement (spec-precise, advisory, likely a PO / tender / grant process) — bias personaOptions to ["Research Lab","Institution / Dept","Faculty / R&D","Procurement Cell"] and NEVER ask resale / credit-trader / bulk-stockist questions; a LOCAL-ONLY buyer → a supply-radius/visit question; CATALOG/IMAGE buyer → offer to share catalog, ask for a reference photo; MULTI-SKU TRADER/WHOLESALER → cadence + credit + bulk; LOW DELAY TOLERANCE → flag urgency; SETUP-PHASE → installation/turnkey. Bias personaOptions toward this persona, and rank specs this buyer-type cares about first. Do NOT ask anything this profile already answers.\nAUTHORITY (role in the buying process, from the buyer's designation): a DECISION-MAKER (owns budget) → commercial terms / pricing / a direct close are fair game; a PROCUREMENT role → a PO / rate-contract / tender flow (MOQ, payment terms, vendor compliance) — do NOT pitch as if they are the end-user; a RESEARCHER / technical role → be SPEC-PRECISE and advisory, AVOID hard commercial / credit pressure (they may not control the budget); an INFLUENCER → lead with technical fit, commercials get escalated not closed. NEVER invent authority the title does not prove. The PERSISTENT PROCUREMENT MODEL (Project / Recurring / Capex / Maintenance / Replacement / Expansion) is a PRIOR — let it bias cadence / turnkey / spares framing, but it NEVER overrides the current order mode.\nBUT — DECISION HIERARCHY: the CURRENT ORDER MODE (in the use-case above) OUTRANKS this persona for THIS requirement. A one-off / sample / emergency order gets one-off-appropriate questions even for a habitual bulk/credit buyer; the persona is a PRIOR, never the dominant signal.\n` : ''}
-${twinBlock}Think about how THIS trade actually sells, then produce a PLAN:
+${args.prior ? `\nBUYER HISTORY (from this buyer's PRIOR calls/RFQs in this or a related category — they ALREADY told us these). USE IT: pre-rank specs the buyer cared about to the top of specOrder; REUSE the seller's real questions; infer persona from it; and do NOT re-ask anything already known here.\n  persona: ${args.prior.persona || '?'}\n  specs the buyer already gave: ${JSON.stringify(args.prior.knownSpecs || {})}\n  questions the seller actually asked this buyer: ${JSON.stringify(args.prior.sellerQuestions || [])}\n  prior RFQ answers: ${JSON.stringify(args.prior.isqAnswers || {})}\n` : ''}${bpfLine ? `\nPERSISTENT BUYER PROFILE (WHO this buyer is, across all requirements — high signal): ${bpfLine}.\nUSE IT to shape the plan: an ACADEMIC / GOVERNMENT / INSTITUTIONAL Nature → research / institutional procurement (spec-precise, advisory, likely a PO / tender / grant process) — bias personaOptions to ["Research Lab","Institution / Dept","Faculty / R&D","Procurement Cell"] and NEVER ask resale / credit-trader / bulk-stockist questions; a LOCAL-ONLY buyer → a supply-radius/visit question; CATALOG/IMAGE buyer → offer to share catalog, ask for a reference photo; MULTI-SKU TRADER/WHOLESALER → cadence + credit + bulk; LOW DELAY TOLERANCE → flag urgency; SETUP-PHASE → installation/turnkey; MANUFACTURER-PREFERRED vs TRADER-PREFERRED supplier preference → record it in serveSignals so matching can honour it, but NEVER ask the buyer to restate it; DECISION STYLE "Needs Guidance" → fewer, simpler questions with helpful option labels, "Self Driven" → finer spec choices are fine; INFO-SEEKING High → this buyer can handle more spec detail, Low → keep strictly to the few decisive questions. Bias personaOptions toward this persona, and rank specs this buyer-type cares about first. Do NOT ask anything this profile already answers.\nAUTHORITY (role in the buying process, from the buyer's designation): a DECISION-MAKER (owns budget) → commercial terms / pricing / a direct close are fair game; a PROCUREMENT role → a PO / rate-contract / tender flow (MOQ, payment terms, vendor compliance) — do NOT pitch as if they are the end-user; a RESEARCHER / technical role → be SPEC-PRECISE and advisory, AVOID hard commercial / credit pressure (they may not control the budget); an INFLUENCER → lead with technical fit, commercials get escalated not closed. NEVER invent authority the title does not prove. The PERSISTENT PROCUREMENT MODEL (Project / Recurring / Capex / Maintenance / Replacement / Expansion) is a PRIOR — let it bias cadence / turnkey / spares framing, but it NEVER overrides the current order mode.\nBUT — DECISION HIERARCHY: the CURRENT ORDER MODE (in the use-case above) OUTRANKS this persona for THIS requirement. A one-off / sample / emergency order gets one-off-appropriate questions even for a habitual bulk/credit buyer; the persona is a PRIOR, never the dominant signal.\n` : ''}${args.observedContext ? `\nOBSERVED EXTERNAL FOOTPRINT (from a mobile-keyed identity lookup — Befisc / Sign3 + composite identity; a SOFT, possibly-stale signal — NEVER a hard fact, NEVER a Verified spec): ${args.observedContext}.\nUse it to shape persona / tone / scale when first-party history is thin: an INDIVIDUAL (individual PAN, no company) active on CONSUMER marketplaces → a PERSONAL / individual buyer (consumer language, NO GST / credit / bulk-cadence questions); a clear business location / industry → bias toward that. It is OBSERVED context, weighed below the current order mode + any first-party fact.\n` : ''}${args.buyerStory ? `\nBUYER STORY (the arc inferred from this buyer's category TIMELINE — a SOFT narrative, NEVER a hard fact): ${args.buyerStory}.\nUse it to make sense of an ODD or new current product (e.g. a buyer setting up a unit who now needs a generator) and to shape persona / framing / which constraints matter (a SETUP arc → installation/turnkey/spec-precision; EXPANSION → scale + cadence; REPLENISHMENT → fast reorder). It NEVER overrides the current order mode or a first-party fact — if the story and this order disagree, this order wins.\n` : ''}${args.intelligenceDrivers ? `\nINTELLIGENCE CONSUMPTION — of everything known about this buyer, THESE traits should actually SHAPE this product's plan (lead with them, rank the specs + questions they imply): ${args.intelligenceDrivers}.${args.intelligenceQuiet ? ` Carried but QUIET — do NOT let these dominate THIS requirement: ${args.intelligenceQuiet}. (e.g. an institutional/research authority must NOT drive a generic office-chair order; a language/channel preference is seller-routing, never a buyer question.)` : ''}\n` : ''}
+${args.procurementContext ? `PROCUREMENT CONTEXT — the process this buyer is in: ${args.procurementContext}. Shape the plan to it: a RESEARCH PROTOTYPE / LAB buy is spec-precise + single-unit + a PO/grant flow (NOT bulk/credit-trader, NOT consumer framing); a PROJECT/CAPEX buy → installation/commissioning + milestone terms; RESALE → bulk slabs + best rate; PRODUCTION INPUT → cadence + credit. It NEVER overrides the current order mode.\n` : ''}${catBlock}${twinBlock}Think about how THIS trade actually sells, then produce a PLAN:
 1. "archetype" — classify by HOW THE TRADE SELLS, never by price or bulk:
    • commodity = standard catalog goods sold by spec/grade (resin, film, valves, fasteners — AND furniture, gifts, stationery, consumables, even in bulk).
    • branded_commodity = a commodity where a specific brand/make/OEM drives the buy.
@@ -510,7 +734,7 @@ ${twinBlock}Think about how THIS trade actually sells, then produce a PLAN:
 5. "leadingQuestion": if lead.source=="qualifier", repeat its text here; else "".
 6. "mustHaveSpecs": the top 1-4 DECISIVE specs (a subset of specOrder).
 7. "personaOptions": 4-6 CATEGORY-TAILORED buyer types — NOT the generic Manufacturer/Stockist/Reseller/Trader/End User. e.g. cosmetics → ["Salon","Retailer","Distributor","Private-label brand","Individual"]; fencing → ["Contractor","Farmer","Wholesaler","Builder"]; cable → ["Contractor","Electrician","Wholesaler","Distributor"].
-8. "questions": 3-6 non-spec questions a seller in THIS trade asks to qualify the lead — kind "context" or "persona" ONLY. Each: {id, label, options (3-5 chips, REQUIRED), kind: context|persona, decisive (bool), placement: page1|specpage|wizard|laststep, order (int), reason (<=12 words)}.
+8. "questions": 3-6 non-spec questions a seller in THIS trade asks to qualify the lead — kind "context" or "persona" ONLY. Each: {id, label, options (3-5 chips, REQUIRED), kind: context|persona, decisive (bool), placement: page1|specpage|wizard|laststep, order (int), reason (<=12 words), priority (0-100 — YOUR value-rank for this question: how decisive it is for a seller to quote; higher = more decisive. For DEBUG visibility only; it does NOT change which questions you ask)}.
    HARD RULES for "questions" (every one matters — a buyer abandons a typing box):
    a. CHIPS ONLY — NEVER free text. Every question MUST carry 3-5 SPECIFIC, mutually-exclusive, category-tailored option chips. NEVER return an empty options array. The form appends an "Other…" chip automatically, so you never need a text box. If you CANNOT enumerate 3-5 concrete options (open-ended things like "what material / size / application / install location?"), DROP the question entirely — do NOT emit it with empty options. Better to ask fewer, sharp chip questions than any text box.
    b. DO THE HARD WORK on options — real, decision-useful buckets, NOT lazy yes/no. Cadence GOOD = ["One-time","Monthly","Quarterly","Annual contract"]; cadence BAD = ["Yes, regular","No"]. Budget bands MUST be ₹, in Indian numbering, and SIZED TO THE ACTUAL ORDER = Quantity × this product's realistic unit price — NOT a generic lakh/crore ladder. A few pieces of a low-value commodity ≈ tens/hundreds of ₹ (e.g. cable lugs, fasteners) → bands like "Under ₹2,000","₹2,000–₹10,000","₹10,000+"; a truckload or machinery → lakh/crore. NEVER emit a lakh/crore budget band for a handful of low-value units. NEVER $.
@@ -524,6 +748,7 @@ ${twinBlock}Think about how THIS trade actually sells, then produce a PLAN:
    j. GROUNDING (STRICT, MANDATORY) — every question MUST carry "groundedIn": the CONCRETE signal that makes it relevant for THIS buyer — one of: the quantity, the product/category, the buyer's history/profile, or a stated need. If you CANNOT ground a question in a real signal (it's just a generic thing you'd ask anyone), DROP it. Examples: budget → "groundedIn":"qty 500 × commodity = ₹2–10L order, value matters"; cadence → "groundedIn":"category is a consumable, repeat likely". A question with no real grounding is FORBIDDEN.
    k. INTENT ALREADY CAPTURED — if the "Buyer use-case" above already states the purpose / end-use (the buyer answered it on page 1, e.g. "stated purpose: … = Residential building"), you MUST NOT re-ask it in ANY phrasing — no "what type of project / construction / use / application is this for". That is already done. Emitting a tier:"intent" (purpose/use) question when the use-case is known is FORBIDDEN — ask ONLY scale / constraint / spec.
 9. "serveSignals": what the seller needs to decide serve/no-serve (e.g. "city for freight", "qty vs MOQ", "repeat buyer", "install scope").
+10. "considered" — DEBUG OBSERVABILITY (does NOT change the questions above): list the question candidates you WEIGHED but did NOT put in "questions" — the ones you dropped to honour the 3-question cap, or because an ISQ spec / the page-1 intent step / a sibling question already covers them. Each: {label, score (0-100 — the value-rank you gave it, comparable to the asked questions' priority), reason (≤12 words why it LOST — e.g. "below the 3-question cap", "covered by Installation question", "captured by the Usage spec", "already asked on page 1")}. This EXPLAINS your selection; it must NOT alter "questions". If you dropped nothing, return [].
 
 RULES:
 - Category-DEFINING only. No generic chatter ("will you visit Delhi?"), no PII (don't ask phone/email/name as a question — name/company/city is the identity card), no seller tone/greeting.
@@ -532,7 +757,7 @@ RULES:
 - QUANTITY is a dedicated form field — NEVER make it a question (no "approximate quantity / order size / how much / volume").
 - EVERY question carries 3-5 real option chips. Zero free-text questions. Tight: 3-6 questions, decisive first.
 
-Return ONLY JSON: { "archetype": "...", "orderMode": "...", "specOrder": ["..."], "specReasons": { "<spec name>": "why it ranks here (≤12 words)" }, "lead": { "source": "spec", "ref": "..." }, "leadingQuestion": "", "mustHaveSpecs": ["..."], "personaOptions": ["..."], "questions": [ { "id": "", "label": "How often will you need this?", "options": ["One-time","Monthly","Quarterly","Annual contract"], "kind": "context", "tier": "scale", "decisive": true, "placement": "wizard", "order": 1, "reason": "", "groundedIn": "category is a consumable, repeat purchase likely" } ], "serveSignals": ["..."], "twinResolved": [] }`;
+Return ONLY JSON: { "archetype": "...", "orderMode": "...", "specOrder": ["..."], "specReasons": { "<spec name>": "why it ranks here (≤12 words)" }, "lead": { "source": "spec", "ref": "..." }, "leadingQuestion": "", "mustHaveSpecs": ["..."], "personaOptions": ["..."], "questions": [ { "id": "", "label": "How often will you need this?", "options": ["One-time","Monthly","Quarterly","Annual contract"], "kind": "context", "tier": "scale", "decisive": true, "placement": "wizard", "order": 1, "reason": "", "groundedIn": "category is a consumable, repeat purchase likely", "priority": 90 } ], "serveSignals": ["..."], "twinResolved": [], "considered": [{"label":"What's your budget range?","score":71,"reason":"below the 3-question cap"}] }`;
 
   try {
     // Use flash-lite, NOT flash: flash's runaway reasoning (3-4k tokens) eats the
@@ -569,6 +794,7 @@ Return ONLY JSON: { "archetype": "...", "orderMode": "...", "specOrder": ["..."]
         order: Number.isFinite(q.order) ? (q.order as number) : i,
         reason: typeof q.reason === 'string' ? q.reason.trim() : '',
         groundedIn: typeof q.groundedIn === 'string' ? q.groundedIn.trim().replace(/^<|>$/g, '') : '',
+        priority: Number.isFinite(q.priority) ? Math.max(0, Math.min(100, Number(q.priority))) : undefined, // DEBUG-only score; never used by the filter/sort/cap below
       }))
       // Backstops (belt to the prompt rules):
       //  • kind:'spec' → specs belong in specOrder/triage, not the panel
@@ -596,6 +822,21 @@ Return ONLY JSON: { "archetype": "...", "orderMode": "...", "specOrder": ["..."]
       // A8 / Intent-First HARD CAP: at most 3 cards for EVERY buyer (the buyer already told
       // us WHY on page 1). We no longer generate 6-then-truncate; the cap is a flat 3.
       .slice(0, 3);
+    // De-collide question ids on the FINAL survivors. The form keys its answer map
+    // (dynAnswers) by question id, so two cards sharing an id make one read the OTHER's
+    // answer. The planner LLM can (and did) emit the same id for the budget and cadence
+    // cards → the cadence answer "One-time purchase" bled into the budget field
+    // (registry showed budget = "One-time purchase", a cadence value). Guarantee distinct
+    // ids here; non-colliding ids keep their value so answers stay stable across re-plans.
+    {
+      const seenQId = new Set<string>();
+      for (const [k, q] of questions.entries()) {
+        let id = (q.id || '').trim() || `pq-${k}`;
+        if (seenQId.has(id)) id = `${id}__${k}`;
+        seenQId.add(id);
+        q.id = id;
+      }
+    }
     return {
       archetype: PLAN_ARCHETYPES.includes(p?.archetype) ? p.archetype : 'unknown',
       orderMode: p?.orderMode === 'qualifier_first' ? 'qualifier_first' : 'spec_first',
@@ -619,6 +860,16 @@ Return ONLY JSON: { "archetype": "...", "orderMode": "...", "specOrder": ["..."]
       personaOptions: Array.isArray(p?.personaOptions) ? p.personaOptions.map((s: unknown) => String(s).trim()).filter(Boolean) : [],
       twinResolved: Array.isArray(p?.twinResolved) ? p.twinResolved.map((s: unknown) => String(s).trim()).filter(Boolean) : [],
       twinMode,
+      // DEBUG-ONLY: candidate questions the planner weighed but dropped (suppressed), ranked by its own
+      // score with a why-not. Defensive parse; absent/garbled → undefined. NEVER affects the asked set above.
+      considered: Array.isArray(p?.considered)
+        ? (p.considered as unknown[])
+            .filter((c): c is Record<string, unknown> => !!c && typeof c === 'object')
+            .map((c) => ({ label: indiaize(String(c.label ?? '').trim()), score: Number.isFinite(c.score) ? Math.max(0, Math.min(100, Number(c.score))) : 0, reason: String(c.reason ?? '').trim() }))
+            .filter((c) => c.label)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 8)
+        : undefined,
     };
   } catch {
     return null;
@@ -641,7 +892,7 @@ export async function refineQuestions(args: {
   if (!args.upcoming.length) return {};
   const prompt = `${INDIA_CTX}
 You are tightening the REMAINING questions of an IndiaMART RFQ for "${args.productName}" using what the buyer has ALREADY told us. Make each upcoming question maximally RELEVANT and SPECIFIC to THIS buyer, in their own trade terms.
-PRIORITY OF TRUTH (when signals conflict): the buyer's EXPLICIT current values (product/qty/unit/specs) > the current order mode > the stated intent > verified business facts > the buyer Twin/persona > historical behaviour. Never re-ask what is already known; when unsure, prefer a CONFIRM over a fresh question; PREFER changing a question's options over adding a question. Question budget is scarce — every question must earn its place.
+PRIORITY OF TRUTH (when signals conflict): the buyer's EXPLICIT current values (product/qty/unit/specs) > the current order mode > the stated intent > verified business facts > the buyer Twin/persona > historical behaviour. When the underlying buyer SIGNALS disagree, trust them in this source order: ${SIGNAL_PRIORITY}. Never re-ask what is already known; when unsure, prefer a CONFIRM over a fresh question; PREFER changing a question's options over adding a question. Question budget is scarce — every question must earn its place.
 Already known — never ask these again, but USE them to specialise: ${JSON.stringify(args.known)}
 Upcoming questions to revise (keep each "id" EXACTLY): ${JSON.stringify(args.upcoming)}
 
@@ -715,6 +966,40 @@ Return ONLY JSON keyed by id: { "<id>": { "value": "...", "confidence": 0.0, "re
   }
 }
 
+// ── Buyer Story (P2.7) — the narrative ARC across a buyer's category timeline ──
+// Reads the buyer's PAST categories oldest→newest + their current enquiry, and infers what the SEQUENCE
+// suggests they're doing (setting up a unit, expanding, replenishing, diversifying, a one-off project).
+// This is the single most valuable lens for an odd current product (the "notebook factory then a diesel
+// generator" case). flash-lite, grounded ONLY in the sequence — it returns empty for <2 distinct points
+// (no story from one data point). It is a SOFT signal: a sequence SUGGESTS a story, it never PROVES one.
+export async function deriveBuyerStory(args: {
+  timeline: { mcat: string; recencyDays?: number }[];
+  currentProduct: string;
+}): Promise<{ story: string; arc: string; confidence: number; relatedness: number; relationship: string }> {
+  const tl = (args.timeline || []).filter((s) => s && s.mcat);
+  if (tl.length < 2) return { story: '', arc: '', confidence: 0, relatedness: 0, relationship: 'unclear' }; // a journey needs ≥2 points in time
+  const seq = tl.map((s) => `${s.mcat}${typeof s.recencyDays === 'number' ? ` (${s.recencyDays}d ago)` : ''}`).join(' → ');
+  const prompt = `${INDIA_CTX}
+A B2B buyer's PAST enquiry categories, oldest → newest: ${seq}.${args.currentProduct ? ` Their CURRENT enquiry: "${args.currentProduct}".` : ''}
+1) Infer the BUYER'S STORY — what this SEQUENCE OVER TIME suggests they are doing as a business. Typical arcs: setting up a new unit/line, expanding/scaling capacity, routine replenishment of the same inputs, diversifying into a new line, or a one-off project. Reason ONLY from the sequence — do NOT invent facts it does not imply. If the categories are unrelated and show NO coherent arc, say so plainly and return low confidence.
+2) BUSINESS RELATEDNESS — judge how related the CURRENT enquiry is to this buyer's existing business (NOT word similarity — BUSINESS similarity). A direct manufacturing INPUT / raw material / tooling / consumable for a line they clearly run is HIGHLY related (e.g. a notebook maker buying "paper" → ~90, "binding wire" → ~85). An adjacent-but-different need is mid (40-65). A genuinely unrelated category is low (e.g. a notebook maker buying a "diesel generator" for backup power → ~25 — it's plant overhead, not their product line). "relationship": "core_input" (direct input to their line) | "adjacent" | "new" (unrelated) | "unclear".
+Return ONLY JSON: { "arc": "<3-6 word label>", "story": "<ONE plain-English sentence a sales head reads at a glance>", "confidence": <0-100, honest — high ONLY for a clear arc>, "relatedness": <0-100, business not lexical>, "relationship": "core_input|adjacent|new|unclear" }`;
+  try {
+    const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 320, temperature: 0.3, label: 'deriveBuyerStory' });
+    const p = JSON.parse(text) as { arc?: unknown; story?: unknown; confidence?: unknown; relatedness?: unknown; relationship?: unknown };
+    const rel = String(p.relationship || '').trim().toLowerCase();
+    return {
+      arc: String(p.arc || '').trim(),
+      story: String(p.story || '').trim(),
+      confidence: Math.max(0, Math.min(100, Number(p.confidence) || 0)),
+      relatedness: Math.max(0, Math.min(100, Number(p.relatedness) || 0)),
+      relationship: ['core_input', 'adjacent', 'new', 'unclear'].includes(rel) ? rel : 'unclear',
+    };
+  } catch {
+    return { story: '', arc: '', confidence: 0, relatedness: 0, relationship: 'unclear' };
+  }
+}
+
 // ── Persistent buyer profile from transcript digest (the compounding gold) ────
 // One LLM pass over the buyer's history digest → the behavioural profile that
 // PERSISTS across every future requirement (persona, maturity, sourcing/buying
@@ -745,7 +1030,8 @@ Return ONLY JSON. For EACH field pick EXACTLY ONE value from its list — NEVER 
   "tags": ["<short>","<behaviour>","<tags>"],
   "confidence": <a number from 0 to 1>
 }
-Evidence cues: many WhatsApp messages → WhatsApp Friendly; asks for images/catalog → Image Sharing Buyer; wants factory visit / local area → Local Only; "waited, bought elsewhere" → Low Tolerance For Delay; >1 distinct category → multiSku true; machine/setup → Business Setup Phase / one_time_capex.
+Evidence cues: many WhatsApp messages → WhatsApp Friendly; asks for images/catalog → Image Sharing Buyer; wants factory visit / local area → Local Only; "waited, bought elsewhere" → Low Tolerance For Delay; >1 distinct category → multiSku true.
+MATURITY — be careful: "Business Setup Phase" is ONLY for a genuinely NEW / just-starting business. If the business description states an ESTABLISHMENT / FOUNDING year (e.g. "Established in 1995…") or shows an existing multi-product catalog, the firm is ESTABLISHED → use "Existing Buyer" or "Execution Phase", NEVER "Business Setup Phase" (exploring a NEW product category is not the same as setting up a new business). Reserve one_time_capex/setup signals for machinery/plant build-outs, not routine sourcing.
 Procurement-model cues (persistent pattern, NOT today's order): one-off build/site → Project-based; steady repeat buying of the same goods → Recurring Supply; big one-time machinery/plant → Capex; spares/consumables to keep things running → Maintenance/MRO; replacing worn/old equipment → Replacement; adding capacity/new line → Expansion. Pick "Unknown" if the history doesn't show a clear pattern — do NOT guess.`;
   try {
     const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 700, label: 'deriveBuyerProfile' });
@@ -1090,7 +1376,7 @@ export async function inferSpecsFromApplication(
   isqSpecNames: string[],
   isqSpecsWithOptions: Record<string, string[]>
 ): Promise<{
-  specs: Record<string, string>;
+  specs: Record<string, { value: string; confidence: number }>;
   rationale: string;
 }> {
   const text = await callLLM([
@@ -1112,14 +1398,27 @@ Rules:
 - Do not invent fields that aren't listed. Details that don't match any field are ignored here (kept elsewhere).
 - HONESTY: these values are DOMAIN INFERENCE (a typical configuration), NOT the buyer's stated requirement. The rationale must reflect that — frame it as what is TYPICAL/COMMON for this product. NEVER write "Buyer's requirement for X" / "Buyer needs X" for a value the buyer did not explicitly state in the use-case; that misrepresents an AI guess as a buyer-stated fact.
 
+- CONFIDENCE per field (0-100): how TYPICAL/CERTAIN this value is for THIS use-case. ≥90 = near-universal default for this product+use (e.g. Kraft paper for notebook cartons). 70-89 = the common/typical choice but variants exist. <70 = a genuine guess — DON'T fill, omit it. Only return fields you'd put at ≥70; the form auto-fills ≥90 and pre-fills 70-89 (buyer can change), and asks the rest.
+
 Return ONLY JSON:
 {
-  "specs": { "SpecName": "an exact option, or the buyer's explicit custom value" },
+  "specs": { "SpecName": { "value": "an exact option or the buyer's explicit custom value", "confidence": 0-100 } },
   "rationale": "ONE short sentence framed as typical/common domain inference (e.g. 'Typical for car-wash tyre polish: usually silicon-based, high-gloss, spray form'), NOT as the buyer's stated requirement"
 }`,
     },
   ], { label: 'inferSpecsFromApplication' });
-  return JSON.parse(text);
+  const p = JSON.parse(text);
+  // Normalize: accept both the new {value,confidence} shape and a bare string (backward-compatible).
+  const specs: Record<string, { value: string; confidence: number }> = {};
+  for (const [k, sv] of Object.entries(p?.specs || {})) {
+    if (sv && typeof sv === 'object' && 'value' in (sv as object)) {
+      const o = sv as { value?: unknown; confidence?: unknown };
+      if (o.value != null && String(o.value).trim()) specs[k] = { value: String(o.value), confidence: Number.isFinite(o.confidence) ? Math.max(0, Math.min(100, Number(o.confidence))) : 80 };
+    } else if (sv != null && String(sv).trim()) {
+      specs[k] = { value: String(sv), confidence: 80 }; // legacy bare-string → default-high
+    }
+  }
+  return { specs, rationale: typeof p?.rationale === 'string' ? p.rationale : '' };
 }
 
 // ── On-demand: bucketized, context-aware spec guidance (Tier-2 help) ───

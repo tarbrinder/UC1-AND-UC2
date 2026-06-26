@@ -8,7 +8,7 @@
 // Pure · NO LLM · NO category hardcoding — only structural reasoning (entity-name shape, generic
 // quantity ceiling, location set-difference, role disagreement). Chaos-safe: missing inputs ⇒ no nudge.
 
-export type ContradictionType = 'location' | 'persona_vs_order' | 'buyer_type' | 'supplier_radius' | 'approval' | 'installation' | 'po_process';
+export type ContradictionType = 'location' | 'persona_vs_order' | 'buyer_type' | 'supplier_radius' | 'approval' | 'installation' | 'po_process' | 'scale_vs_role' | 'new_direction';
 export interface Nudge {
   type: ContradictionType;
   severity: 'high' | 'medium';
@@ -32,10 +32,17 @@ export interface ContradictionInput {
   // R3 — the (previously idle) generation engines, now driving ACTION nudges:
   authorityRole?: string;    // decision_maker / procurement / researcher / influencer (P1 Authority)
   procurementModel?: string; // Capex / Recurring Supply / Project-based … (P2)
+  // P3.8 — cross-signal inputs (now that qty-scale + trajectory are consumed):
+  orderScale?: string;       // single / small / bulk / wholesale (from classifyOrderScale) — qty magnitude
+  offProfileNewProduct?: boolean; // the CURRENT product is unrelated to ALL of this buyer's history (a new line / one-off)
+  // P0 identity hierarchy — Nature (email-domain, evidence-gated) is authoritative; when it confidently
+  // resolves the buyer type we must NOT raise a "which buyer type?" nudge (it's not ambiguous).
+  nature?: string;           // Academic / Research Institution · Government / PSU · Corporate / Business …
+  natureConfidence?: number; // 0-100
 }
 // R2 — base priority per type (a wrong delivery location hurts most; a consumption ask least).
 const SEVERITY_SCORE: Record<ContradictionType, number> = {
-  location: 9, persona_vs_order: 8, approval: 6, installation: 6, po_process: 5, buyer_type: 5, supplier_radius: 4,
+  location: 9, persona_vs_order: 8, scale_vs_role: 7, approval: 6, installation: 6, new_direction: 6, po_process: 5, buyer_type: 5, supplier_radius: 4,
 };
 
 const slug = (s?: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -96,8 +103,12 @@ export function detectContradictions(i: ContradictionInput): Nudge[] {
     });
   }
 
-  // 3 — BUYER-TYPE ambiguity (profile role ≠ twin role) — only when the personal nudge didn't already cover it.
-  if (!out.some((n) => n.type === 'persona_vs_order') && i.profileType && i.twinType) {
+  // 3 — BUYER-TYPE ambiguity (profile role ≠ twin role) — only when the personal nudge didn't already
+  //     cover it AND Nature hasn't already RESOLVED the identity. A conf-≥80 academic/government Nature is
+  //     authoritative (the email domain answers it) — never ask "which buyer type?" then (the IIT-Kanpur
+  //     "Business Buyer vs Manufacturer" nudge, where the real answer was "Research Institution" all along).
+  const natureResolved = /academic|research|government|psu/i.test(i.nature || '') && (i.natureConfidence || 0) >= 80;
+  if (!natureResolved && !out.some((n) => n.type === 'persona_vs_order') && i.profileType && i.twinType) {
     if (slug(i.profileType) !== slug(i.twinType) && !i.profileType.includes(i.twinType) && !i.twinType.includes(i.profileType)) {
       push({
         type: 'buyer_type', severity: 'medium',
@@ -150,6 +161,32 @@ export function detectContradictions(i: ContradictionInput): Nudge[] {
       options: ['PO / tender', 'Direct buy', 'Rate contract'],
       evidence: ['authority: Procurement (from designation)'],
       field: 'po_process',
+    });
+  }
+
+  // ── P3.8: cross-signal contradictions — using the now-consumed qty-scale + trajectory ──
+  // 8 — SCALE-vs-ROLE: a known BULK/wholesale buyer placing a SINGLE / sample-size order. Don't pitch bulk
+  //     terms on a 1-piece order — clarify whether it's a sample / trial / own-use this time. (qty scale × role.)
+  const bulkRole = /trader|wholesal|distributor|stockist|reseller/i.test(`${i.profileType || ''} ${i.twinType || ''}`);
+  if (bulkRole && i.orderScale === 'single' && !personal) {
+    push({
+      type: 'scale_vs_role', severity: 'medium',
+      question: 'This is a much smaller order than usual — what is it for this time?',
+      options: ['Sample / trial', 'For own use', 'Same as usual (bulk)', 'New requirement'],
+      evidence: [`usual role: ${(i.profileType || i.twinType || '').trim()}`, 'this order: a single / sample quantity'],
+      field: 'scale_context',
+    });
+  }
+  // 9 — NEW DIRECTION: the current product is OFF-PROFILE (unrelated to everything this buyer has bought
+  //     before) — a new line, a one-off, or a project. Surface it so the plan treats intent as FRESH.
+  //     (buyer trajectory / history × the current product.)
+  if (i.offProfileNewProduct) {
+    push({
+      type: 'new_direction', severity: 'medium',
+      question: 'This is a new kind of product for you — what is driving it?',
+      options: ['A new line / expansion', 'A one-off or project', 'Just trying it out'],
+      evidence: ['current product is unrelated to your past categories'],
+      field: 'new_direction',
     });
   }
 

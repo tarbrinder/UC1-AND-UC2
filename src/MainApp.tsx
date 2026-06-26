@@ -1,9 +1,13 @@
-import { useState, useEffect } from 'react';
-import { Zap, ShieldCheck, Clock, Layers, Mic, FileText } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { Zap, ShieldCheck, Clock, Layers, Mic, FileText, Sparkles } from 'lucide-react';
 import RFQModalV3 from './components/RFQModalV3';
+import RFQModalV4 from './components/RFQModalV4';
+import BuyerLedgerView from './components/BuyerLedgerView';
+import { buildRfqLedger, rfqStateFromInspector } from './lib/rfqLedger';
 import { isDebug } from './lib/debugFlag';
+import type { InspectorState } from './lib/inspectorData';
 
-type ModalVariant = 'v1' | 'v2' | 'v3' | 'smart' | null;
+type ModalVariant = 'v1' | 'v2' | 'v3' | 'smart' | 'v4' | null;
 
 const CYCLING_PRODUCTS = [
   'Industrial Pumps',
@@ -64,6 +68,15 @@ const VARIANT_BUTTONS: {
     border: 'border border-gray-200',
     Icon: FileText,
   },
+  {
+    id: 'v4',
+    label: 'AI',
+    sublabel: 'Studio V4',
+    desc: 'V4 — AI Inspector: hover any AI decision',
+    bg: 'bg-gradient-to-br from-violet-600 to-fuchsia-600',
+    textColor: 'text-white',
+    Icon: Sparkles,
+  },
 ];
 
 const VARIANT_LABELS: Record<NonNullable<ModalVariant>, string> = {
@@ -71,6 +84,16 @@ const VARIANT_LABELS: Record<NonNullable<ModalVariant>, string> = {
   v2: 'V2',
   v3: 'V3',
   smart: 'Smart',
+  v4: 'V4',
+};
+
+// Module 2 demo — a representative RFQ state (the live RFQ passes its real inspectorState the same way).
+// Module-level constant so its identity is stable across renders (no effect churn).
+const RFQ_DEMO_STATE = {
+  intent: { value: 'Construction site power', confidence: 100, journey: 'industrial', candidates: [{ label: 'Construction site power', score: 70, reason: 'buyer picked' }, { label: 'Manufacturing unit operations', score: 60, reason: 'manufacturer profile' }, { label: 'Backup for premises', score: 40, reason: 'common but not stated' }] },
+  planner: { budgetMax: 3, questions: [{ id: 'q1', label: 'What is your budget for this generator?', priority: 90, reason: 'this category negotiates hard', groundedIn: 'category:price-blocker' }, { id: 'q2', label: 'What installation service do you need?', priority: 85, reason: 'capital equipment', groundedIn: 'product:capital' }], considered: [{ label: 'What phase is required?', score: 75, reason: "covered by 'Phase' spec" }, { label: 'Preferred engine brand?', score: 65, reason: "covered by 'Engine Brand' spec" }, { label: 'Silent or open type?', score: 70, reason: "covered by 'Genset Type' spec" }] },
+  specs: [{ name: 'Rated Power', value: '5 kVA', source: 'user', priority: 100 }, { name: 'Genset Type', value: 'Open', source: 'user', priority: 94 }, { name: 'Phase', value: 'Single Phase', source: 'cascade-inferred', priority: 85, reason: 'inferred from 5 kVA + open' }, { name: 'Cooling System', value: 'Air Cooled', source: 'cascade-inferred', priority: 95 }, { name: 'Warranty', value: '', source: 'isq', priority: 40 }],
+  logistics: { paymentTerms: { value: 'Credit (Post-Delivery)', confidence: 85, reason: 'capital equipment, manufacturer buyer leans credit' } },
 };
 
 export default function MainApp() {
@@ -85,9 +108,18 @@ export default function MainApp() {
   const [stagedIgnoreTwin, setStagedIgnoreTwin] = useState(false);
   const [autoPull, setAutoPull] = useState(false);
   const [stagingOnly, setStagingOnly] = useState(false); // B-step-2: open Smart in staging mode (debug panels first)
+  const [ledgerOpen, setLedgerOpen] = useState(false); // Module 1: standalone Buyer Ledger Observatory (GLID pull → clickable provenance)
+  const [rfqLedgerOpen, setRfqLedgerOpen] = useState(false); // Module 2: SAME ledger over Intent/Planner/Spec/Logistics
+  // P6 · the live RFQ ledger — set from a real V4 run (on form close). Until a run exists, fall back to the demo.
+  const [liveRfqState, setLiveRfqState] = useState<InspectorState | null>(null);
+  const rfqDemoLedger = useMemo(() => buildRfqLedger(RFQ_DEMO_STATE), []); // stable identity → no effect churn
+  const rfqLiveLedger = useMemo(() => (liveRfqState ? buildRfqLedger(rfqStateFromInspector(liveRfqState)) : null), [liveRfqState]);
+  const rfqLedger = rfqLiveLedger ?? rfqDemoLedger;
   // "Pull" → open Smart in STAGING mode (pulls + shows the pulled-data debug panels at step 0).
   // "Start RFQ →" inside the staging view flips stagingOnly off (same instance, data persists).
-  const openStaged = () => { if (!stagedGlid.trim()) return; setAutoPull(true); setStagingOnly(true); setActiveModal('smart'); };
+  const openStaged = (target: 'smart' | 'v4' = 'smart') => { if (!stagedGlid.trim()) return; setAutoPull(true); setStagingOnly(true); setActiveModal(target); };
+  // UC3 · launch the live RFQ form for the buyer in the Ledger (mobile=V3/voice, desktop=V4/inspector), debug staging.
+  const openFormForBuyer = (variant: 'v3' | 'v4', g: string) => { if (!g.trim()) return; setLedgerOpen(false); setRfqLedgerOpen(false); setStagedGlid(g); setAutoPull(true); setStagingOnly(true); setActiveModal(variant === 'v4' ? 'v4' : 'smart'); };
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -166,10 +198,36 @@ export default function MainApp() {
               <button
                 type="button"
                 disabled={!stagedGlid.trim()}
-                onClick={openStaged}
-                className="px-4 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-900 disabled:opacity-50"
+                onClick={() => openStaged('smart')}
+                className="px-3 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-900 disabled:opacity-50"
               >
-                Pull
+                Pull → V3
+              </button>
+              <button
+                type="button"
+                disabled={!stagedGlid.trim()}
+                onClick={() => openStaged('v4')}
+                title="Pull buyer history, then Start RFQ into the V4 AI Inspector"
+                className="px-3 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+              >
+                Pull → V4
+              </button>
+              <button
+                type="button"
+                disabled={!stagedGlid.trim()}
+                onClick={() => setLedgerOpen(true)}
+                title="Standalone Buyer Ledger — click any attribute to see its full Fact→Belief→Decision→Consumption→Outcome chain"
+                className="px-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+              >
+                🔬 Ledger
+              </button>
+              <button
+                type="button"
+                onClick={() => setRfqLedgerOpen(true)}
+                title="Module 2 — the SAME Decision Ledger over the RFQ surfaces (intent, planner questions, specs, logistics)"
+                className="px-3 rounded-xl bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700"
+              >
+                🔬 RFQ Ledger
               </button>
             </div>
             <label className="flex items-center gap-1.5 mt-2 text-[11px] text-purple-700 cursor-pointer select-none">
@@ -211,7 +269,7 @@ export default function MainApp() {
       </div>
 
       {/* Modal */}
-      {activeModal && (
+      {activeModal && activeModal !== 'v4' && (
         <RFQModalV3
           onClose={() => { setActiveModal(null); setAutoPull(false); setStagingOnly(false); }}
           variantLabel={VARIANT_LABELS[activeModal]}
@@ -221,6 +279,28 @@ export default function MainApp() {
           stagingOnly={stagingOnly && activeModal === 'smart'}
           onStart={() => setStagingOnly(false)}
         />
+      )}
+      {/* V4 — AI Inspector (experimental, replica of V3 + 50/50 split inspector). V3 untouched. */}
+      {activeModal === 'v4' && (
+        <RFQModalV4
+          onClose={() => { setActiveModal(null); setAutoPull(false); setStagingOnly(false); }}
+          variantLabel="V4"
+          initialGlid={stagedGlid}
+          autoPull={autoPull && activeModal === 'v4'}
+          initialIgnoreTwin={stagedIgnoreTwin}
+          stagingOnly={stagingOnly && activeModal === 'v4'}
+          onStart={() => setStagingOnly(false)}
+          onInspectorState={setLiveRfqState}
+        />
+      )}
+      {/* Module 1 — standalone Buyer Ledger Observatory (GLID pull → clickable provenance). Reads the same ledger. */}
+      {ledgerOpen && (
+        <BuyerLedgerView glid={stagedGlid} onClose={() => setLedgerOpen(false)} onOpenForm={openFormForBuyer} />
+      )}
+      {/* Module 2 — the SAME ledger view over the RFQ state (intent/planner/spec/logistics). P6: now the LIVE
+          run when a V4 session has completed (rfqLiveLedger), else the representative demo. */}
+      {rfqLedgerOpen && (
+        <BuyerLedgerView glid={stagedGlid} title={`🔬 RFQ Ledger · Intent · Planner · Spec · Logistics${rfqLiveLedger ? ' · LIVE run' : ' · demo'}`} onClose={() => setRfqLedgerOpen(false)} presetLedger={rfqLedger} onOpenForm={openFormForBuyer} />
       )}
     </div>
   );

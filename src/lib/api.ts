@@ -11,6 +11,13 @@ export const API_BASE = ((import.meta.env.VITE_API_BASE as string | undefined) ?
 /** Prefix a relative `/api/*` path with the configured base. */
 export const api = (path: string): string => `${API_BASE}${path}`;
 
+// ─── n8n webhook (single source of truth) ─────────────────────────────────────
+// One dedicated, collision-proof hook for the live v10.2 workflow (imported from
+// ~/Downloads/bi-user-insights-v10x.json — uncapped ISQ + offer_id join + requirement_brain,
+// 2026-06-25). EVERY n8n reference (buyer pull · requirement_brain · category modes) hits
+// this one path; change it in this one place to re-point them all.
+export const N8N_HOOK = 'bi-user-insights-v10x';
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -20,18 +27,27 @@ export class ApiError extends Error {
   }
 }
 
-/** GET JSON with a hard failure on non-2xx so callers can show real errors. */
-export async function getJSON<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(api(path), init);
-  if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`);
-  return res.json() as Promise<T>;
+/** GET JSON with a hard failure on non-2xx so callers can show real errors.
+ *  A default timeout (via AbortController) means a slow/hung IndiaMART API FAILS FAST instead of
+ *  leaving the form stuck forever ("specs not coming") — callers already catch and degrade gracefully.
+ *  The GLID webhook uses a raw fetch (enrichment.ts), so it is unaffected by this. */
+export async function getJSON<T = unknown>(path: string, init?: RequestInit, timeoutMs = 15000): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = timeoutMs > 0 ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(api(path), { ...init, signal: init?.signal ?? ctrl.signal });
+    if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`);
+    return (await res.json()) as T;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** POST JSON with a hard failure on non-2xx. */
-export async function postJSON<T = unknown>(path: string, body: unknown): Promise<T> {
+export async function postJSON<T = unknown>(path: string, body: unknown, timeoutMs = 15000): Promise<T> {
   return getJSON<T>(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, timeoutMs);
 }

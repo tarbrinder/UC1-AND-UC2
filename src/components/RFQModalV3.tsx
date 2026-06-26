@@ -4,22 +4,48 @@ import type { RFQFormData, ISQSpec, FormStep } from '../types';
 import { filterProducts, fetchProductSuggestions, stripQuantityPrefix, parseQuantityFromName } from '../utils/productNames';
 import { calcScore, getScoreColor, getScoreLabel } from '../utils/score';
 import { localDB } from '../lib/supabase';
-import { voiceToSpecs, analyzeImage, getSpecHints, inferSpecsFromApplication, explainSpec, summarizeRequirement, generateEnrichmentQuestions, planRequirement, refineQuestions, deduceLogistics, deriveBuyerProfile, deriveBuyerTwin, classifyFieldTypes, deriveIntent, hasGeminiKey, getLLMHealth } from '../lib/gemini';
+import { voiceToSpecs, analyzeImage, getSpecHints, inferSpecsFromApplication, explainSpec, summarizeRequirement, generateEnrichmentQuestions, planRequirement, refineQuestions, deduceLogistics, deriveBuyerProfile, deriveBuyerTwin, classifyFieldTypes, deriveIntent, deriveBuyerStory, hasGeminiKey, getLLMHealth, onLLMActivity } from '../lib/gemini';
+import { resolveExtractTwin, lastSignalAt, EXTRACT_TWIN_ON } from '../lib/twinCutover';
 import { createCoverageRegistry, type FactSource } from '../lib/coverage';
 import type { SpecGuide } from '../lib/gemini';
 import { stripPII } from '../utils/pii';
 import { classifySegment } from '../lib/questions/segment';
 import { DEPTH_BY_SEGMENT } from '../lib/questions/types';
 import type { DynQuestion, RequirementPlan, RequirementIntent } from '../lib/questions/types';
-import { fetchEnrichment, matchCategory, debugFallbackMobile, coreTokens, distillSessionBehavior, mergeObservedBehavior } from '../lib/enrichment';
+import { fetchEnrichment, fetchCategoryIntel, fetchCategoryBuild, matchCategory, debugFallbackMobile, coreTokens, distillSessionBehavior, mergeObservedBehavior } from '../lib/enrichment';
 import type { EnrichmentProfile, BuyerProfile, BuyerTwin, ObservedSessionBehavior, ObservedExternal } from '../lib/enrichment';
-import { runExternal, osintDemoProvider } from '../lib/externalRun';
+import { runExternal, firecrawlOsint } from '../lib/externalRun';
 import { isDebug } from '../lib/debugFlag';
-import { classifyEmailDomain, natureDrives } from '../lib/nature';
+import { classifyEmailDomain, natureDrives, institutionalRole } from '../lib/nature';
 import { classifyDesignation, authorityDrives, authorityPlannerHint } from '../lib/authority';
 import { resolveIdentity, identityLine } from '../lib/identity';
 import type { IdentityResolution } from '../lib/identity';
 import { distillSourceThemes } from '../lib/distill';
+import { classifyOrderScale } from '../lib/quantity';
+import { orderTrajectory, trajectoryShape, hasStory } from '../lib/trajectory';
+import { tierBuyerIntelligence, decideTransfer, categoryRelatedness } from '../lib/transfer';
+import { consume, formatDrivers } from '../lib/consumption';
+import { checkConsistency } from '../lib/consistency';
+import { scoreCompleteness } from '../lib/completeness';
+import { classifyProcurement } from '../lib/procurement';
+import { parseRequirementBrain, resolveRequirement } from '../lib/requirementBrain';
+import type { RequirementBrainInput } from '../lib/requirementBrain';
+import { extractConversationalSignals, formatConvSignals } from '../lib/conversationalSignals';
+import { scoreRFQ, tallyUtilization } from '../lib/rfqScorecard';
+import { plannerGate, gateHeadline, plannerInputsReady } from '../lib/plannerGate';
+import type { GateSources } from '../lib/plannerGate';
+import { renderMode } from '../lib/confidenceRender';
+import { buildQuestionGraph } from '../lib/questionGraph';
+import { buildCEOSummary } from '../lib/ceoSummary';
+import { dealBlockerChecks, intentPatternHints, categoryBudgetBands, formatCategoryConsumption } from '../lib/categoryConsumption';
+import type { DealBlocker, IntentPattern, PriceDistribution } from '../lib/categoryConsumption';
+import { categoryConfidence, categoryConfidenceLine } from '../lib/categoryConfidence';
+import type { CategoryPayload } from '../lib/categoryConfidence';
+import { categoryLeaderboard, dispositionSummary } from '../lib/categoryDisposition';
+import { intentLeaderboard, intentSummary, type IntentInput } from '../lib/intentDisposition';
+import { questionQualityEval, intentQualityEval, categoryQualityEval, fusionQualityEval, plannerQualityEval, rfqQualityEval, leadQualityEval, outcomeEval, evaluateRFQ } from '../lib/rfqEvals';
+import { pushEvalRun, getEvalRuns, evalTrend } from '../lib/evalLog';
+import { PROMPTS_VERSION } from '../lib/gemini';
 import { govern, STATE_ICON, cleanEvidence } from '../lib/governance';
 import type { AttrState } from '../lib/governance';
 import { detectContradictions } from '../lib/contradiction';
@@ -77,10 +103,27 @@ function twinPromptContext(t: BuyerTwin | null | undefined): string {
 // shares no token with the buyer's history/active-intent → circuit-breaker, so we
 // don't fast-track the usual intent (the "pump-maker buys a karaoke mic" case).
 // Brand / PII are NEVER included (the VEKA rule).
+// P1.4 — the buyer's EXPLICIT "no X / avoid X / without X" constraints, parsed into banned phrases so a
+// spec VALUE naming a rejected thing is never auto-suggested. (Inclusion constraints like "OEM only" are
+// left to the planner prompt — they don't map to one banned spec value.) Pure → unit-tested.
+function parseNegativeBans(signals: string[]): string[] {
+  const bans: string[] = [];
+  for (const s of signals || []) {
+    const m = String(s).toLowerCase().match(/\b(?:no|not|never|avoid|without|don'?t|dont|except)\s+([a-z][a-z0-9 -]{2,40})/);
+    if (m) { const phrase = m[1].replace(/\b(please|thanks?|suppliers?|sellers?|vendors?|me|us)\b/g, ' ').replace(/\s+/g, ' ').trim(); if (phrase.length >= 3) bans.push(phrase); }
+  }
+  return bans;
+}
+function violatesNegativeBan(text: string, bans: string[]): boolean {
+  const t = (text || '').toLowerCase();
+  return bans.some((b) => { const tok = b.split(/\s+/).find((w) => w.length >= 4) || (b.length >= 4 ? b : ''); return !!tok && t.includes(tok); });
+}
+
 function buildTwinPlanInput(
   t: BuyerTwin,
-  productName: string
-): { known: string; whyKnown: string[]; unknowns: string[]; confidence: number; offProfile: boolean } {
+  productName: string,
+  isCovered?: (concept: string) => boolean
+): { known: string; whyKnown: string[]; unknowns: string[]; negativeSignals: string[]; confidence: number; offProfile: boolean } {
   const lc = t.layer_c_commercial_intelligence;
   const lb = t.layer_b_behavioral;
   const id = t.layer_a_identity;
@@ -112,7 +155,10 @@ function buildTwinPlanInput(
   return {
     known,
     whyKnown,
-    unknowns: t.explicit_unknowns || [],
+    // P1.3 — drop unknowns we've ALREADY learned this session (covered in the registry) so the planner
+    // spends its scarce question slots only on the genuinely-open unknowns (prioritised first by the prompt).
+    unknowns: (t.explicit_unknowns || []).filter((u) => !(isCovered && isCovered(u))),
+    negativeSignals: t.explicit_negative_signals || [],
     confidence: t.twin_confidence?.overall_score ?? 0,
     offProfile,
   };
@@ -305,12 +351,21 @@ function resolveMobile(bp: unknown, glidHint?: string): { mobile: string; debugI
 // DynQuestion shape, ordered as the planner intends (leading qualifier first).
 // spec/identity/logistics questions are handled by spec-triage / existing fields.
 function planToDynQuestions(plan: RequirementPlan): DynQuestion[] {
+  // dynAnswers is keyed by id → a collision makes one card read another's answer (the
+  // budget = "One-time purchase" bleed). The planner de-collides at the source, but this
+  // is the boundary into the form's answer map, so we re-assert the invariant defensively:
+  // any duplicate id (from a cache, refine merge, or LLM reuse) gets a unique suffix here.
+  const seenId = new Set<string>();
   return (plan.questions || [])
     .filter((q) => q.kind === 'context' || q.kind === 'persona')
     .slice()
     .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
-    .map((q, i) => ({
-      id: q.id || `plan-${i}`,
+    .map((q, i) => {
+      let id = (q.id || '').trim() || `plan-${i}`;
+      if (seenId.has(id)) id = `${id}__${i}`;
+      seenId.add(id);
+      return {
+      id,
       label: q.label,
       options: q.options || [],
       multi: false,
@@ -321,7 +376,8 @@ function planToDynQuestions(plan: RequirementPlan): DynQuestion[] {
       groundedIn: q.groundedIn || (q.reason ? `(reason) ${q.reason}` : ''), // A1: registry grounding for debug audit
       source: 'llm' as const,
       tier: q.tier, // P6: a wizard INTENT-tier answer is a valid spec re-rank trigger
-    }));
+      };
+    });
 }
 // One LLM pass that shaped the form — captured for debug provenance so HOD can
 // see WHICH prompt ran and WHAT was passed to it (not just the question's meaning).
@@ -381,7 +437,7 @@ const EMPTY_FORM: RFQFormData = {
   buyerType: '',
   industry: '',
   companySize: '',
-  gstRegistered: false,
+  gstRegistered: null, // UNKNOWN until the buyer answers — we never assume "No" because we couldn't fetch it
   gstNumber: '',
   requirementFrequency: '',
   contactName: '',
@@ -506,6 +562,33 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   const [dynQuestions, setDynQuestions] = useState<DynQuestion[]>([]);
   const [dynAnswers, setDynAnswers] = useState<Record<string, string>>({});
   const [dynLoading, setDynLoading] = useState(false);
+  // Global LLM-activity loader: true whenever ANY model call is in flight (intent / planner / refine /
+  // deduce / profile / twin) so EVERY processing gap — especially the after-Continue / after-Next
+  // transitions — shows a moving "working…" bar instead of looking frozen ("specs not coming").
+  const [llmBusy, setLlmBusy] = useState(false);
+  const [llmBusyLabel, setLlmBusyLabel] = useState('');
+  // Non-LLM async work that also deserves a loader: fetching the spec schema from the IndiaMART ISQ
+  // APIs (mcat-resolve → GetIsq → getISQs). These are network round-trips, NOT model calls, so the
+  // LLM signal above doesn't see them — without this the spec page can sit blank ("specs not coming")
+  // while the API is in flight. true = a spec/category fetch is running.
+  const [specsLoading, setSpecsLoading] = useState(false);
+  useEffect(() => onLLMActivity((n, label) => { setLlmBusy(n > 0); if (n > 0 && label) setLlmBusyLabel(label); }), []);
+  // Map the in-flight call's technical label → buyer-friendly copy for the loader pill.
+  const llmBusyText = (label: string): string => (({
+    deriveIntent: 'Understanding your need…',
+    planRequirement: 'Prioritising your specs…',
+    refineQuestions: 'Refining the questions…',
+    deduceLogistics: 'Working out delivery & terms…',
+    deriveBuyerProfile: 'Reading your profile…',
+    deriveBuyerTwin: 'Building your buyer profile…',
+    inferSpecsFromApplication: 'Filling in your specs…',
+    getSpecHints: 'Fetching spec help…',
+    explainSpec: 'Looking that up…',
+    summarizeRequirement: 'Summarising…',
+    classifyFieldTypes: 'Organising fields…',
+    analyzeImage: 'Reading your image…',
+    voiceToSpecs: 'Transcribing your voice…',
+  } as Record<string, string>)[label] || 'Working…');
   const dynGenSig = useRef(''); // de-dupes generation per product/qty/role signature
   // Intent Planner — SHADOW MODE: computed at commit, surfaced under ?debug=1 to
   // compare against the case studies. Does NOT drive the UI yet.
@@ -525,6 +608,12 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   const coverage = useRef(createCoverageRegistry());
   // A6: Intent-First — the journey-adapted purpose question + the buyer's answer.
   const [requirementIntent, setRequirementIntent] = useState<RequirementIntent | null>(null);
+  // Page-1 intent DECISION provenance (debug): the registry/Twin/LLM candidates + the winner, captured
+  // at decision time so the first-page debug panel can show the precedence race (it used to show nothing).
+  const intentDecisionRef = useRef<IntentInput | null>(null);
+  const intentCandidatesRef = useRef<Array<{ label: string; score: number; reason: string }> | null>(null); // LLM's own scored end-use ranking (deriveIntent intent_candidates) — observability
+  const [intentDecisionTick, setIntentDecisionTick] = useState(0); // bump to re-render the panel when the decision lands
+  const [execOpen, setExecOpen] = useState(true); // per-page Executive Summary toggle (debug) — on EVERY page
   const intentSig = useRef(''); // fire deriveIntent once per product+kind
   const intentResolved = useRef(false); // deriveIntent finished (success OR fail) → Continue may pass
   // A1 safety (G): time-box waiting for the Twin so a missing/slow Twin never blocks the intent.
@@ -551,8 +640,43 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   const [enrichment, setEnrichment] = useState<EnrichmentProfile | null>(null);
   const [buyerProfile, setBuyerProfile] = useState<BuyerProfile | null>(null); // LLM-derived persistent profile
   const [buyerTwin, setBuyerTwin] = useState<BuyerTwin | null>(null); // BTE-v1.1 heavy-pass Twin (Phase 1; rendered Phase 2)
+  const [buyerStory, setBuyerStory] = useState<{ story: string; arc: string; confidence: number; relatedness: number; relationship: string } | null>(null); // P2.7 — narrative arc from the category timeline
+  const buyerStoryRef = useRef<{ story: string; arc: string; confidence: number; relatedness: number; relationship: string } | null>(null); // fresh value for planner closures
+  const buyerStorySig = useRef(''); // derive the story once per (buyer × current product), no loop
   const [enrichmentRaw, setEnrichmentRaw] = useState<unknown>(null);
   const [enrichLoading, setEnrichLoading] = useState(false);
+  // Category Brain (mcat-keyed, fetched separately once the product resolves). Status drives the
+  // "learning this category" loader. catBuildKicked guards ONE build per mcat → can't restart the
+  // 3-min build clock (the race). catPollTimer is the read-poll handle.
+  const [categoryIntel, setCategoryIntel] = useState<unknown | null>(null);
+  const [categoryStatus, setCategoryStatus] = useState<'idle' | 'building' | 'hit' | 'error'>('idle');
+  const catBuildKicked = useRef<Set<string>>(new Set());
+  const catPollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Phase A/P0 — READY-gate time-box. categoryWaitElapsed releases the gate so a slow/cold category
+  // never stalls the buyer (prod ~2.5s; fresh/debug waits for the live build, with a Start-anyway escape).
+  const [categoryWaitElapsed, setCategoryWaitElapsed] = useState(false);
+  // Default to READING the cached category (instant when pre-warmed; ~2.5s soft-timeout when cold, then
+  // proceed + re-rank). Fresh-build (force a live 3-5 min rebuild) is now an explicit debug toggle — it
+  // was defaulting ON in debug, which trapped the buyer behind a 5-min build (the 326s wait in the trace).
+  const [freshCategory, setFreshCategory] = useState(false);
+  // P1.5 — DEPENDENCY/TIMING TRACE. Each module marks start/done (ms since modal open) + status +
+  // what it waited for. Makes "who ran too early / timed out / wasn't consumed" VISIBLE (the dry run
+  // that showed the planner firing before category). Ref-based (no re-render churn); the debug panel
+  // reads it on each render. window.__moduleTrace mirrors it for the console.
+  const traceT0 = useRef(0);
+  const moduleTrace = useRef<Record<string, { start?: number; done?: number; status?: string; waited?: string }>>({});
+  const traceMark = (key: string, patch: { start?: boolean; done?: boolean; status?: string; waited?: string }) => {
+    if (!traceT0.current) traceT0.current = Date.now();
+    const now = Date.now() - traceT0.current;
+    const e = moduleTrace.current[key] || (moduleTrace.current[key] = {});
+    if (patch.start && e.start == null) e.start = now;
+    if (patch.done) e.done = now;
+    if (patch.status) e.status = patch.status;
+    if (patch.waited) e.waited = patch.waited;
+    (window as unknown as { __moduleTrace?: unknown }).__moduleTrace = moduleTrace.current;
+  };
+  const specsRevealed = useRef(false); // one-way latch: once the gate opens, never flip back to the loader (re-ranks happen in place)
+  const [locPrefAnswer, setLocPrefAnswer] = useState<string | null>(null); // Phase B: buyer's answer to the supplier-location consume (chip undo / confirm)
   // P0 Pipeline Health: a point-in-time snapshot of the GLID pull (webhook timing /
   // record count / profile-auth) so an HOD can see "did the data even arrive?".
   // Twin/planner are read LIVE from state at render (they resolve after the pull).
@@ -574,6 +698,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   const [cascadeSpecs, setCascadeSpecs] = useState<Set<string>>(new Set());
   const [cascadeFrom, setCascadeFrom] = useState(''); // the lead answer that drove the cascade
   const [cascadeRationale, setCascadeRationale] = useState(''); // the LLM's one-line "why" for the cascade fills (the "gold" sentence)
+  const cascadeConf = useRef<Record<string, number>>({}); // #71a: per-spec cascade confidence (Kraft 95 vs Ply 82) — drives the Truth-Table conf, not a flat 82
   const cascadeSig = useRef('');
   // Refinement 2 (sequencing): when the funnel has an INTENT-tier wizard question,
   // hold the (cold-ranked) specs behind a placeholder until the buyer answers it and
@@ -610,6 +735,15 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // T1: the qty is "committed" only on blur / Enter / Continue — NOT on every keystroke — so the
   // intent + requirement-mode compute on the FINAL qty, never on a partial "1" of "100".
   const [qtyCommitted, setQtyCommitted] = useState(false);
+  // DEBOUNCED quantity — the intent + planner effects key on THIS, not raw form.quantity, so typing
+  // "10000" no longer fires deriveIntent/planRequirement on 1→10→100→1000 (wasted LLM calls + wrong
+  // intermediate bucket decisions). Settles 700ms after typing stops, or immediately on commit (Continue).
+  const [qtyDebounced, setQtyDebounced] = useState('');
+  useEffect(() => {
+    if (qtyCommitted) { setQtyDebounced(form.quantity); return; } // explicit commit → no wait
+    const t = setTimeout(() => setQtyDebounced(form.quantity), 700);
+    return () => clearTimeout(t);
+  }, [form.quantity, qtyCommitted]);
   const [productSuggestions, setProductSuggestions] = useState<string[]>([]);
   const [isqHints, setIsqHints] = useState<Record<string, string>>({});
   const [knownFromProductName, setKnownFromProductName] = useState<Record<string, string>>({});
@@ -650,6 +784,8 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   const [specHelp, setSpecHelp] = useState<Record<string, { loading?: boolean; guide?: SpecGuide }>>({});
   // "Details for sellers" bottom-sheet wizard — one card at a time.
   const [intentSheetOpen, setIntentSheetOpen] = useState(false);
+  const [reasonOpen, setReasonOpen] = useState<Set<string>>(new Set()); // clickable Reason-Chain: which questions are expanded
+  const evalLogSig = useRef(''); // dedupe eval-over-time persistence (push once per distinct eval state)
   const [panelIndex, setPanelIndex] = useState(0);
   // Snapshot of the panel's cards taken when it opens — keeps the list stable
   // for the whole session so cards never reshuffle/grow under the buyer (jitter).
@@ -775,6 +911,11 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     if (d.action === 'blocked_autofill') track('rfq_gate_blocked', { field: d.field, reason: d.reason, at: d.at });
   }, []);
 
+  // P1.4 — banned phrases parsed from the Twin's EXPLICIT negative constraints (e.g. "no plastic" →
+  // never auto-suggest Material=Plastic). A stated buyer aversion must never be re-proposed. Questions /
+  // personaOptions are gated separately in the planner prompt.
+  const negativeBans = useMemo(() => parseNegativeBans(buyerTwin?.explicit_negative_signals || []), [buyerTwin]);
+
   // Apply an AI-inferred value only if the user hasn't set that field by hand —
   // and NEVER a brand/preference field (Confidence-&-Bias Gate / VEKA Killer).
   // PREFERENCE_RE is a belt to preferenceSpecs in case classifyFieldTypes hasn't
@@ -793,11 +934,15 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       logGate({ field: key, classification: 'preference', action: 'blocked_autofill', reason: prefReason(key), at });
       return false;
     }
+    if (negativeBans.length && violatesNegativeBan(`${key} ${value}`, negativeBans)) {
+      logGate({ field: key, classification: 'objective', action: 'blocked_autofill', reason: 'buyer explicitly rejected this', at }); // P1.4
+      return false;
+    }
     setSpec(key, value);
     setAutoFilledSpecs((prev) => new Set(prev).add(key));
     logGate({ field: key, classification: 'objective', action: 'filled', reason: 'inferred', at });
     return true;
-  }, [removedSpecs, manualSpecs, setSpec, preferenceSpecs, logGate]);
+  }, [removedSpecs, manualSpecs, setSpec, preferenceSpecs, logGate, negativeBans]);
 
   // × on the final-requirement chip — the buyer drops a spec they don't want. Clears the value AND
   // marks it removed so the cascade/auto-fill never silently re-adds it (applyAiSpec blocks it above).
@@ -969,17 +1114,27 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // 2 — Use case / active intent (CURRENT requirement wins; else the Twin's history-derived intent)
     const curIntent = requirementIntent?.value || '';
     const ai = lc?.current_active_intent;
+    // Evidence must match the VALUE shown. When the current requirement intent is the value (User
+    // picked / journey-derived), the evidence is that selection — NOT the Twin's stale history quote
+    // (the bug: "Primary power source · User" showed evidence "Seeking raw material for notebook…").
+    const intentEvidence = curIntent
+      ? `${requirementIntent?.locked ? 'buyer selected' : 'journey-derived'}: “${curIntent}”${requirementIntent?.journey ? ` · ${requirementIntent.journey} journey` : ''}${requirementIntent?.question ? ` (Q: ${requirementIntent.question.replace(/\s*\?$/, '')})` : ''}`
+      : ev1(ai);
     add('Use case / intent', curIntent || String(ai?.value || ''), curIntent ? (requirementIntent?.locked ? 100 : requirementIntent?.confidence || 0) : ai?.confidence || 0,
-      curIntent ? (requirementIntent?.locked ? 'User' : 'Derived') : 'Twin', ev1(ai), 'intent question · spec re-rank · planner',
+      curIntent ? (requirementIntent?.locked ? 'User' : 'Derived') : 'Twin', intentEvidence, 'intent question · spec re-rank · planner',
       { hasEv: !!(curIntent || ai?.value), userOrVerified: !!(curIntent && requirementIntent?.locked) });
     // 3 — Buyer maturity (history; persists across requirements — distinct from the current-order stage)
     add('Buyer maturity', bp?.maturity || '', bp?.maturity ? 80 : 0, 'Profile', 'new / existing / repeat from history', 'question depth · education level', { hasEv: !!bp?.maturity });
     // 4 — Requirement stage (CURRENT journey: exploring → evaluating → finalizing) — SPLIT from maturity (E2)
     const reqStage = step >= 2 ? 'Finalizing' : (curIntent || dynQuestions.some((q) => dynAnswers[q.id])) ? 'Evaluating options' : 'Exploring';
     add('Requirement stage', reqStage, 65, 'Current journey', `step ${step} · intent ${curIntent ? 'set' : 'open'}`, 'requirement mode · question depth', { hasEv: true });
-    // 5 — Purchase urgency — ONLY when the CURRENT order proves it (emergency mode). No guessing from persona.
-    const urg = rm.mode === 'emergency' ? 'Immediate' : '';
-    add('Purchase urgency', urg, urg ? 75 : 0, 'Current order (mode)', rm.descriptor.slice(0, 50), 'delivery deduction · seller SLA', { hasEv: rm.mode === 'emergency' });
+    // 5 — Purchase urgency — the CURRENT order (emergency mode) proves it strongest; otherwise a
+    // genuinely delay-averse buyer profile (responseSensitivity = "Low Tolerance For Delay") is a softer,
+    // honest signal. P1.5 — this finally CONSUMES responseSensitivity, which the "seller SLA" label had
+    // been promising but never actually read. "Patient"/Unknown gives NO urgency (no guessing).
+    const delayAverse = /low tolerance|delay/i.test(bp?.responseSensitivity || '');
+    const urg = rm.mode === 'emergency' ? 'Immediate' : delayAverse ? 'Time-sensitive' : '';
+    add('Purchase urgency', urg, rm.mode === 'emergency' ? 75 : delayAverse ? 60 : 0, rm.mode === 'emergency' ? 'Current order (mode)' : 'Profile', rm.mode === 'emergency' ? rm.descriptor.slice(0, 50) : delayAverse ? `responseSensitivity: ${bp?.responseSensitivity}` : '', 'delivery deduction · seller SLA', { hasEv: rm.mode === 'emergency' || delayAverse });
     // 6 — Income band (OBSERVED) — Befisc income, shown as observed income NOT inferred "purchasing power"
     // (ChatGPT: income ≠ buying power for a business; GST turnover/employees are stronger — wait for them).
     const income = String(tw?.observed_external?.befisc?.income || '').trim();
@@ -998,7 +1153,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     add('Preferred communication', comm, comm ? 70 : 0, 'Twin/Profile', waReal ? `WA affinity ${waAff || lb?.whatsapp_affinity?.value || 'present'} · ${waMsgs} msgs` : 'no WhatsApp signal', 'seller routing', { hasEv: waReal });
     // 10 — Support required — ONLY a genuine "needs guidance" signal; "self-driven" is NOT evidence of a support need. Kills the "Self-sufficient 60%" guess.
     const sup = bp?.decisionStyle === 'Needs Guidance' ? RU_SUPPORT['Needs Guidance'] || 'Needs consultation' : '';
-    add('Support required', sup, sup ? 60 : 0, 'Profile', `decision: ${bp?.decisionStyle || '?'}`, 'quote enrichment', { hasEv: bp?.decisionStyle === 'Needs Guidance' });
+    add('Support required', sup, sup ? 60 : 0, 'Profile', `decision: ${bp?.decisionStyle || '?'}`, 'question depth (Needs Guidance → simpler) · seller heads-up', { hasEv: bp?.decisionStyle === 'Needs Guidance' });
     return out;
   };
 
@@ -1007,6 +1162,13 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   const isBusinessRole = !!form.buyerType && !/individual|personal|end[\s-]?user|consumer|home/i.test(form.buyerType);
   const showProfile = !isRetailQty;
   const fullProfile = ['b2b_bulk', 'reseller', 'capital'].includes(buyerSegment);
+  // P3 GST relevance by PROCUREMENT CONTEXT: an INSTITUTION (academic/gov) or a CAPITAL/PROJECT buy needs a
+  // GST invoice even at qty 1 — the old qty-only gate (b2b_bulk/reseller/capital) wrongly SKIPPED GST for
+  // IIT-Kanpur's single-unit lab buy. This adds GST for those contexts without asking every small B2B buyer.
+  // NB: read reqPlan.archetype directly (NOT requirementMode(), which references offProfileNow declared
+  // far below — calling it this early in the component body is a TDZ crash). archetype 'capital'/'project'
+  // is what requirementMode() keys 'capital' off, so this is equivalent and safe here.
+  const gstRelevantByContext = /academic|research|government|psu/i.test(buyerProfile?.nature || '') || /capital|project/i.test(reqPlan?.archetype || '');
 
   // ── Unified "details for sellers" wizard model ─────────────────────────────
   // Every non-spec question (context → persona) plus the soft buyer-profile
@@ -1235,7 +1397,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // T4: form.quantity/unit/qtyCommitted included so a committed qty/unit change re-runs the
     // planner (planSig now carries the requirement-mode bucket + unit).
-  }, [isqSpecs, unitOptions, buyerProfile, requirementIntent?.value, intentGateSkipped, step, pull, buyerTwin, ignoreTwin, form.quantity, form.unit, qtyCommitted]);
+  }, [isqSpecs, unitOptions, buyerProfile, requirementIntent?.value, intentGateSkipped, step, pull, buyerTwin, ignoreTwin, qtyDebounced, form.unit, qtyCommitted, categoryStatus, categoryWaitElapsed]);
 
   // ── Funnel key (bl_id) ──────────────────────────────────────────────────────
   // IndiaMART mints a BuyLead ID the moment a quantity is captured. We mirror that:
@@ -1256,14 +1418,196 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   }, [enrichment, glidInput, blId]);
   // Top-of-funnel impression (once, on open).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { track('rfq_modal_open', { variant: variantLabel ?? 'V3' }); }, []);
+  useEffect(() => { traceT0.current = Date.now(); track('rfq_modal_open', { variant: variantLabel ?? 'V3' }); }, []);
+
+  // ── Requirement-Brain resolver (Phase 1 · "RFQ = Reflexes") ──────────────────
+  // The n8n webhook (v12+) appends a `requirement_brain` item: BUYER BRAIN (known specs/intent +
+  // facts) and CATEGORY BRAIN (critical_specs ranked by seller-frequency + common_followups). This
+  // memo parses it (→ null until v12 is deployed, so everything below degrades to today's behaviour)
+  // and runs the PURE resolver: reprioritise the ISQ schema by seller-frequency, surface criticals
+  // the schema is missing, and compute  ask = (critical + followups) − known.  `knownDropped` proves
+  // the "never ask what's already known" guardrail fired. The view is ephemeral — never cached.
+  const parsedBrain = useMemo(() => parseRequirementBrain(enrichmentRaw), [enrichmentRaw]);
+  // The buyer pull's brain has the BUYER half; the CATEGORY half arrives from the separate mcat
+  // fetch (categoryIntel). Merge them so the resolver's subtraction (critical − known) can fire.
+  const requirementBrain = useMemo(() => {
+    if (!parsedBrain && !categoryIntel) return null;
+    // GATE AT THE SOURCE: only merge category intel when confidence says it's trustworthy (consume).
+    // An EMPTY/contaminated category — 0 PNS calls, or critical_specs with no evidence base (a stale
+    // VALVE cache surfaced on a roof-rails mcat with 0 calls + 29 specs) — is NOT merged. The resolver
+    // then yields buyer-memory only and ZERO category criticals, so the planner, the trace, and every
+    // debug panel agree instead of one reading "29 consumed" while another says "empty/ignore".
+    if (!categoryIntel || !categoryConfidence(categoryIntel as CategoryPayload).consume) return parsedBrain;
+    return { ...(parsedBrain || {}), category_intelligence: categoryIntel as RequirementBrainInput['category_intelligence'] };
+  }, [parsedBrain, categoryIntel]);
+  const resolvedRequirement = useMemo(() => resolveRequirement(requirementBrain, {
+    isqSpecNames: isqSpecs.filter((s) => !redundantISQSpecs.includes(s.IM_SPEC_MASTER_DESC)).map((s) => s.IM_SPEC_MASTER_DESC),
+    answeredSpecNames: Object.entries(form.dynamicSpecs).filter(([, v]) => (v || '').trim()).map(([k]) => k),
+    intentKnown: !!requirementIntent?.value,
+  }), [requirementBrain, isqSpecs, redundantISQSpecs, form.dynamicSpecs, requirementIntent?.value]);
+
+  // ── Conversational signals (P2) ──────────────────────────────────────────────
+  // Mine the buyer's OWN words from WhatsApp/PNS — category-independent, buyer-specific intent the
+  // fact layer was throwing away: location want/reject ("lucknow me chahe" vs "dilli wale phone kar
+  // rahe"), supply complaints, stated qty/spec, engagement. Client-side interim of n8n v13's
+  // conversational_signals; the resolver prefers server signals when they arrive. Null-safe → [].
+  const convSignals = useMemo(() => {
+    const arr = Array.isArray(enrichmentRaw) ? (enrichmentRaw as Array<Record<string, unknown>>) : [];
+    let wa: unknown = arr.find((x) => x && x.whatsapp_data !== undefined)?.whatsapp_data;
+    if (typeof wa === 'string') { try { wa = JSON.parse(wa); } catch { wa = []; } }
+    return extractConversationalSignals(wa);
+  }, [enrichmentRaw]);
+
+  // ── Question Graph (Phase C) — link the intent to the specs it IMPLIES (option token-overlap), so a
+  // spec already answered by the intent ("Notebook Manufacturing" ⟹ Usage = Notebooks) is prefilled,
+  // not asked twice. Pure, no category literals. ──
+  const questionGraph = useMemo(() => buildQuestionGraph([
+    ...(requirementIntent?.value ? [{ id: '__intent', kind: 'intent' as const, name: 'Use case', answered: requirementIntent.value }] : []),
+    ...isqSpecs.map((s) => ({
+      id: s.IM_SPEC_MASTER_DESC, kind: 'spec' as const, name: s.IM_SPEC_MASTER_DESC,
+      options: s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [],
+      answered: form.dynamicSpecs[s.IM_SPEC_MASTER_DESC] || '',
+    })),
+  ]), [requirementIntent?.value, isqSpecs, form.dynamicSpecs]);
+  // CONSUME (conservative): record a high-confidence implied spec into the registry (Derived) so the
+  // existing concept-coverage layer prefills/dedups it — the buyer never answers what the intent already said.
+  useEffect(() => {
+    for (const imp of questionGraph.implied) {
+      if (imp.confidence >= 70 && !coverage.current.isCovered(imp.specName) && !(form.dynamicSpecs[imp.specName] || '').trim()) {
+        coverage.current.record(imp.specName, imp.impliedValue, 'Deduced', imp.confidence);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questionGraph]);
+
+  // ── Category Brain fetch: build ONCE, then poll the cheap read (Task 22) ──────
+  // The buyer pull can't carry category intel (it runs before the product is known). Once the mcat
+  // resolves, READ mode=category. Cold cache → kick ONE build (3-min Redash→LLM distill) and POLL the
+  // read every 25s up to ~5 min until it caches. Reads never build → polling can't restart the clock
+  // (the race the user kept hitting). Prod note: a pre-warm job should build; the form would then only read.
+  useEffect(() => {
+    const mcat = (form.mcatId || '').trim();
+    if (catPollTimer.current) { clearTimeout(catPollTimer.current); catPollTimer.current = null; }
+    if (!mcat) { setCategoryIntel(null); setCategoryStatus('idle'); return; }
+    let cancelled = false;
+    setCategoryIntel(null); setCategoryStatus('idle');
+    traceMark('category', { start: true, status: 'fetching' });
+    const poll = async (attempt: number) => {
+      if (cancelled) return;
+      const res = await fetchCategoryIntel(mcat, { fresh: freshCategory });
+      if (cancelled) return;
+      // DIAGNOSTIC (ChatGPT ask): mirror the raw fetch on window so a dry run can tell
+      // build-FAILED (always status:'building'/'error', insights null across all polls) apart
+      // from built-NOT-consumed (status:'hit' with insights but catCriticals 0 downstream).
+      (window as unknown as { __category?: unknown }).__category = { mcat, attempt, status: res.status, hasInsights: !!res.insights, insights: res.insights ?? null };
+      if (res.status === 'hit') { setCategoryIntel(res.insights); setCategoryStatus('hit'); traceMark('category', { done: true, status: 'hit' }); return; }
+      if (res.status === 'error') { setCategoryStatus('error'); traceMark('category', { done: true, status: 'error' }); return; }
+      setCategoryStatus('building');
+      // Don't let a late building poll un-terminate the trace: if the wait-timer already
+      // marked the category done (timed-out), keep that terminal status — overwriting it
+      // back to 'building' is what produced the impossible "done · building" reading.
+      if (!moduleTrace.current.category?.done) traceMark('category', { status: 'building' });
+      if (!catBuildKicked.current.has(mcat)) { catBuildKicked.current.add(mcat); fetchCategoryBuild(mcat, { fresh: freshCategory }); } // build ONCE
+      if (attempt < 12) catPollTimer.current = setTimeout(() => poll(attempt + 1), 25000); // ~5 min ceiling
+    };
+    poll(0);
+    return () => { cancelled = true; if (catPollTimer.current) { clearTimeout(catPollTimer.current); catPollTimer.current = null; } };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.mcatId, freshCategory]);
+
+  // ── Category wait time-box (P0, single source of truth). Once a product is committed on the spec
+  // step, give category a budget: prod ~2.5s then proceed (re-rank later); fresh/debug waits for the
+  // live build (Start-anyway also releases). Guarantees the gate + planner NEVER wait forever — even
+  // if the mcat never resolves. Re-armed when product / mcat / fresh changes.
+  useEffect(() => {
+    if (step !== 1 || !form.productName.trim()) return;
+    setCategoryWaitElapsed(false);
+    const t = setTimeout(() => { setCategoryWaitElapsed(true); if (!moduleTrace.current.category?.done) traceMark('category', { done: true, status: 'timed-out' }); }, freshCategory ? 300000 : 2500);
+    return () => clearTimeout(t);
+  }, [step, form.mcatId, form.productName, freshCategory]);
+
+  // Planner-gate sources — ONE builder, used by both the execution gate (defers planRequirement until
+  // category is ready) and the render gate (holds the question page). plannerDone = plan ready OR not running.
+  const gateSourcesNow = (): GateSources => ({
+    hasGlid: !!pull || enrichLoading,
+    buyerReady: !enrichLoading,
+    // Step-0 pre-plan micro-fix: category is relevant the moment a product is committed (mcat resolved),
+    // not only on the spec page — so the planner DEFERS instead of firing a category-less pre-plan on
+    // step 0 (the transient ⚠ the trace exposed). The wait-timer still provides the timeout → no deadlock.
+    needsCategory: !!(form.mcatId || '').trim() || (step === 1 && !!form.productName.trim()),
+    mcatResolved: !!(form.mcatId || '').trim(),
+    categoryStatus,
+    categoryWaitElapsed,
+    plannerDone: !!(reqPlan && ((reqPlan.specOrder?.length ?? 0) || (reqPlan.mustHaveSpecs?.length ?? 0))) || !dynLoading,
+  });
+
+  // CATEGORY CONFIDENCE — the gate (defined FIRST; BOTH the criticals path and the richer-layers path
+  // gate on it). rich → consume + fuse · thin → consume only · empty → IGNORE (buyer-only). Derived
+  // from structural facts (calls/criticals/blockers/price), NOT the distill's miscalibrated self-score.
+  const categoryConf = useMemo(() => categoryConfidence(categoryIntel as CategoryPayload | null), [categoryIntel]);
+
+  // P0 — category criticals (ranked by seller-frequency) + common followups, fed to the planner as
+  // sellerQuestions so intent / spec-order / panel questions actually CONSUME category intel. GATED on
+  // categoryConf.consume: an EMPTY/untrustworthy category (0 calls, or a stale/contaminated cache that
+  // has critical_specs but no evidence base) feeds ZERO criticals — otherwise its specs leak to the
+  // planner and the trace falsely reads "consumed" (a 0-call VALVE cache did exactly this on a
+  // roof-rails RFQ). Empty until the category brain lands; the planner re-fires then (sig carries |catH).
+  const categorySellerQs = (): string[] => (requirementBrain && categoryConf.consume
+    ? [...resolvedRequirement.criticalRanked.map((c) => c.maps_to_isq || c.name), ...resolvedRequirement.ask].filter(Boolean)
+    : []);
+
+  // The RICHER category layers v13 now emits — consumed into planner shaping (deal_blockers → a
+  // proactive check, intent_patterns → applications + load-sizing, price → category-grounded budget
+  // bands). Defensive: empty until category lands; also gated on categoryConf.consume below.
+  const categoryConsumed = useMemo(() => {
+    const ci = (categoryIntel || {}) as Record<string, unknown>;
+    // GATE: an empty/untrustworthy category contributes NOTHING — the form falls back to buyer-only.
+    if (!categoryConfidence(ci as CategoryPayload).consume) return { checks: [], applications: [] as string[], loadSizingRelevant: false, bands: null as string[] | null };
+    const checks = dealBlockerChecks(ci.deal_blockers as DealBlocker[] | undefined, { max: 2 });
+    const hints = intentPatternHints(ci.intent_patterns as IntentPattern[] | undefined);
+    const bands = categoryBudgetBands(ci.price_distribution_inr as PriceDistribution | undefined);
+    return { checks, applications: hints.applications, loadSizingRelevant: hints.loadSizingRelevant, bands };
+  }, [categoryIntel]);
+
+  // DIAGNOSTIC (pairs with window.__category): the CONSUMED view — what category actually
+  // contributed downstream. If window.__category shows a hit WITH insights but criticals is 0
+  // here, that's a consumption bug (not a build one); if it's always building, it's the build.
+  useEffect(() => {
+    (window as unknown as { __categoryConsumed?: unknown }).__categoryConsumed = {
+      status: categoryStatus,
+      confidence: categoryConf.score,
+      band: categoryConf.band,
+      consume: categoryConf.consume,
+      fuse: categoryConf.fuse,
+      criticals: categorySellerQs().length,
+      checks: categoryConsumed.checks.map((c) => c.kind),
+      applications: categoryConsumed.applications,
+      bands: categoryConsumed.bands,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryStatus, categoryConf, categoryConsumed, requirementBrain, resolvedRequirement]);
+
+  // CONSUME the conversational location preference (Change #4): record it as a known fact ONCE, so
+  // the registry treats "supplier location" as answered (suppresses re-asking) and the scorecard
+  // counts it as used. The buyer-facing banner below confirms it. From history → source 'History'.
+  const locPrefSig = useRef('');
+  useEffect(() => {
+    const lp = convSignals.locationPreference;
+    if (!lp || locPrefSig.current === lp.toLowerCase()) return;
+    locPrefSig.current = lp.toLowerCase();
+    coverage.current.record('supplier location preference', lp.charAt(0).toUpperCase() + lp.slice(1), 'History', 80);
+  }, [convSignals.locationPreference]);
 
   // Eligible spec names ordered by the plan's intent ranking (when applyPlan).
   const computeSpecOrder = (applyPlan: boolean): string[] => {
     const eligible = isqSpecs
       .filter((s) => !redundantISQSpecs.includes(s.IM_SPEC_MASTER_DESC))
       .map((s) => s.IM_SPEC_MASTER_DESC);
-    const base = (reqPlan?.specOrder?.length ? reqPlan.specOrder : reqPlan?.mustHaveSpecs) || [];
+    const planBase = (reqPlan?.specOrder?.length ? reqPlan.specOrder : reqPlan?.mustHaveSpecs) || [];
+    // Requirement-Brain (Phase 1, defensive): if the planner hasn't ordered yet but the category
+    // brain HAS (deterministic seller-frequency), fall back to its reprioritised order. The planner
+    // order still wins whenever present → ZERO change to today's behaviour (brain is null pre-v12).
+    const base = planBase.length ? planBase : (requirementBrain ? resolvedRequirement.specOrder : []);
     // If the plan's LEAD is a spec, it must be #1 — float it ahead of specOrder so
     // "Usage leads" actually shows Usage first (not just inside the top-3).
     const leadSpec = reqPlan?.lead?.source === 'spec' ? reqPlan.lead.ref : '';
@@ -1293,22 +1637,22 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // chips. Re-runs once per distinct signal; only fills empty, non-manual specs
   // (never clobbers a pick or a shown suggestion → no jitter, no loop).
   useEffect(() => {
-    if (!QUESTION_ENGINE || !hasGeminiKey() || isqSpecs.length === 0) return;
-    // 1) Build the buyer's signal: lead value + every manually-set spec.
-    const lead = reqPlan?.lead;
-    let leadStr = '';
-    if (lead?.source === 'spec' && (form.dynamicSpecs[lead.ref] || '').trim()) {
-      leadStr = `${lead.ref}=${form.dynamicSpecs[lead.ref]}`;
-    } else if (lead?.source === 'qualifier') {
-      const q = dynQuestions.find((d) => d.label.trim() === lead.ref.trim());
-      if (q && dynAnswers[q.id]) leadStr = `${lead.ref}=${dynAnswers[q.id]}`;
-    }
+    // RE-POST: NO spec cascade — anywhere. A re-post is a tight "review & post" of a known order; we
+    // never auto-infer dependent specs from a lead, even after the buyer edits/adds a spec.
+    if (!QUESTION_ENGINE || !hasGeminiKey() || isqSpecs.length === 0 || repostSource) return;
+    // SPEC-AUTOFILL POLICY — buyer-driven, NEVER intent/planner-driven. We only assist AFTER the buyer has
+    // invested (filled ≥2 specs themselves), and then fill at most 2 of the closest-matching still-empty
+    // specs. The planner lead / name-detected spec is NOT a trigger: it used to fire this cascade on a
+    // fresh page, pre-filling 4-5 "Suggested" chips before the buyer had touched anything. Re-post stays
+    // fully exempt (repostSource gate above). Explicit "Tell us your use-case" fill is a separate path.
+    const CASCADE_MIN_MANUAL = 2; // hold back until the buyer has set at least this many specs themselves
+    const CASCADE_MAX_FILL = 8;   // #71a: upper safety bound only — real gating is the ≥75 confidence band (not a count cap)
     const manualEntries = [...manualSpecs]
       .filter((n) => (form.dynamicSpecs[n] || '').trim())
       .sort()
       .map((n) => `${n}=${form.dynamicSpecs[n]}`);
-    const signalEntries = [...new Set([leadStr, ...manualEntries].filter(Boolean))];
-    if (!signalEntries.length) return; // no buyer signal yet → nothing to infer from
+    if (manualEntries.length < CASCADE_MIN_MANUAL) return; // not enough buyer signal → no auto-fill at all
+    const signalEntries = manualEntries; // signal = the buyer's OWN picks only (never the lead / intent)
     const sig = signalEntries.join('|');
     if (cascadeSig.current === sig) return;
     cascadeSig.current = sig; // claim synchronously so async re-runs no-op (no loop)
@@ -1345,9 +1689,14 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     inferSpecsFromApplication(form.productName, application, names, withOpts)
       .then(({ specs, rationale }) => {
         const applied: string[] = [];
-        for (const [k, v] of Object.entries(specs || {})) {
+        // #71a CONFIDENCE BANDS (replaces the arbitrary ≤2 cap): fill EVERY inference the cascade is
+        // confident about (≥75; it omits <70 itself), so a strong category-typical value like "3 Ply"
+        // lands instead of being dropped by a counter. Per-spec confidence is stored so the Truth Table
+        // shows the real number (Kraft 95 vs Ply 82), not a flat 82. Upper bound 8 guards runaway only.
+        for (const [k, sv] of Object.entries(specs || {})) {
+          if (applied.length >= CASCADE_MAX_FILL) break;
           const m = names.find((n) => n.toLowerCase() === k.toLowerCase());
-          if (m && v && applyAiSpec(m, String(v))) applied.push(m);
+          if (m && sv.value && sv.confidence >= 75 && applyAiSpec(m, String(sv.value))) { applied.push(m); cascadeConf.current[m] = sv.confidence; }
         }
         if (applied.length) {
           setCascadeSpecs((p) => new Set([...p, ...applied]));
@@ -1358,7 +1707,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reqPlan, form.dynamicSpecs, dynAnswers, dynQuestions, isqSpecs, manualSpecs, applyAiSpec, logPrompt, buyerProfile, preferenceSpecs]);
+  }, [reqPlan, form.dynamicSpecs, dynAnswers, dynQuestions, isqSpecs, manualSpecs, applyAiSpec, logPrompt, buyerProfile, preferenceSpecs, repostSource]);
 
   // ── P6: Intent-driven spec RE-RANKING (the one behaviour change) ─────────────
   // North Star made visible: the moment the buyer reveals INTENT (the lead spec/
@@ -1408,7 +1757,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     }, {});
     const matched = matchCategory(enrichment, form.productName);
     const tw = liveTwin();
-    const twinBase = tw ? buildTwinPlanInput(tw, form.productName) : undefined;
+    const twinBase = tw ? buildTwinPlanInput(tw, form.productName, coverage.current.isCovered) : undefined;
     const twinForPlan = twinBase ? { ...twinBase, offProfile: twinBase.offProfile || twinMuted.current } : undefined;
     const application = `${requirementContext()}${form.requirementNotes ? form.requirementNotes + '. ' : ''}Buyer just revealed intent → ${answer}. Now that this buyer's end-use is known, re-rank specOrder with the BUYER ANSWERABILITY rule weighing heavily: lead with the attributes THIS buyer can decide on confidently from that intent, and push DOWN fine-grained fabrication/material metrics they would more likely ask a supplier to recommend (unless their profile shows they are a technical/repeat buyer). Importance to the seller still matters, but a high-impact spec the buyer can't answer should NOT lead.`;
     logPrompt({
@@ -1424,12 +1773,20 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       unit: form.unit,
       application,
       isqSpecsWithOptions,
-      prior: matched
-        ? { persona: enrichment?.persona?.type || enrichment?.buyer?.customerType, knownSpecs: matched.knownSpecs, sellerQuestions: matched.sellerQuestions, isqAnswers: matched.isqAnswers }
+      prior: (matched || categorySellerQs().length)
+        ? { persona: enrichment?.persona?.type || enrichment?.buyer?.customerType, knownSpecs: matched?.knownSpecs, sellerQuestions: [...new Set([...(matched?.sellerQuestions || []), ...categorySellerQs()])], isqAnswers: matched?.isqAnswers }
         : undefined,
       buyerProfile: buyerProfile || undefined,
       twin: twinForPlan,
       buyerKind: page1Choice === 'business' || page1Choice === 'personal' ? page1Choice : undefined,
+      observedContext: observedExternalContext() || undefined, // Befisc/Sign3/identity as a SOFT signal
+      buyerStory: buyerStoryRef.current ? `${buyerStoryRef.current.arc}${buyerStoryRef.current.story ? ' — ' + buyerStoryRef.current.story : ''}` : undefined, // P2.7 narrative arc (SOFT, never a hard fact)
+      categoryDealBlockers: categoryConsumed.checks.map((c) => c.label), // v13 deal_blockers → proactively cover the top seller stall-point
+      categoryApplications: categoryConsumed.applications,               // v13 intent_patterns → frame the intent question
+      categoryBudgetBands: categoryConsumed.bands || undefined,          // v13 price → category-grounded budget options (no generic ₹ guesses)
+      // Intelligence Consumption: of the transferable intelligence, which traits should DRIVE this product's
+      // plan vs stay carried-but-quiet (a research-authority must not dominate a generic commodity).
+      ...(() => { const c = consume(transferDecision().transfer, { archetype: reqPlan?.archetype, orderScale: classifyOrderScale(form.quantity, form.unit).band }); const pc = classifyProcurement({ nature: buyerProfile?.nature, authorityRole: buyerProfile?.authorityRole, journey: requirementIntent?.journey || undefined, intentText: requirementIntent?.value || undefined, orderScaleBand: classifyOrderScale(form.quantity, form.unit).band, requirementMode: requirementMode().mode }); return { intelligenceDrivers: formatDrivers(c.drivers) || undefined, intelligenceQuiet: c.quiet.map((q) => q.value).join(' · ') || undefined, procurementContext: pc.context !== 'unknown' ? `${pc.label} · GST ${pc.implications.gstLikely ? 'needed' : 'not needed'} · approval: ${pc.implications.approvalFlow}` : undefined }; })(),
     })
       .then((newPlan) => {
         if (!newPlan) return;
@@ -1514,7 +1871,8 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     for (const [k, v] of Object.entries(form.dynamicSpecs)) {
       if (!v || !v.trim()) continue;
       const src: FactSource = manualSpecs.has(k) ? 'User' : enrichedSpecs.has(k) ? 'Enrichment' : cascadeSpecs.has(k) || autoFilledSpecs.has(k) ? 'Cascade' : 'User';
-      const conf = src === 'User' ? 100 : src === 'Enrichment' ? 90 : 82;
+      const conf = src === 'User' ? 100 : src === 'Enrichment' ? 90 : (cascadeConf.current[k] ?? 82); // #71a: real per-spec cascade confidence
+
       cov.record(k, v, src, conf);
     }
     // Deduced logistics (timeline/payment beliefs). #3: ONLY record once confident enough
@@ -1546,8 +1904,38 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       const val = String(f?.value || '').trim();
       if (val && /^(company|city)$/.test(key)) cov.record(`cross:${key}`, val, 'Verified', typeof f?.confidence === 'number' ? (f.confidence as number) : 92);
     }
+    // P1.2 — record the Twin's confidently-compiled buyer role as an INFERRED fact (source 'Twin', which
+    // NEVER suppresses a question — Golden Rule: a guess prefills/shapes, it never silently hides a card).
+    // It shows as "Likely" in the system-of-record, and when the buyer's OWN buyer-type pick (User) or a
+    // Verified business fact later states the SAME value, the record() lifecycle graduates it Observed/
+    // Likely → Confirmed (corroboration). A DIFFERENT buyer answer OVERRIDES it (the buyer corrects the
+    // guess). This closes the verification feedback loop with NO profile re-derivation and NO new suppression.
+    const twinRole = String(buyerTwin?.layer_a_identity?.business_type || '').trim();
+    if (twinRole && !/^(unknown|n\/?a)$/i.test(twinRole)) cov.record('Buyer type', twinRole, 'Twin', 50);
+    // P3.9 — trial_first: a buyer who samples/trials before committing to bulk. Soft 'Twin' fact (never
+    // suppresses) so the plan can frame a trial/sample option and it corroborates if the buyer confirms.
+    const trialFirst = buyerTwin?.layer_c_commercial_intelligence?.trial_first;
+    if (trialFirst && (trialFirst.value === true || String(trialFirst.value) === 'true') && typeof trialFirst.confidence === 'number' && trialFirst.confidence >= 60) cov.record('buying approach', 'Samples / trials before bulk', 'Twin', 50);
+    // P2.6 — the ORDER-SCALE signal (1 piece vs 1000 pieces) → a SOFT 'Deduced' fact so the planner's
+    // business-model / stage / commercial reasoning sees the magnitude explicitly (it flows through
+    // requirementContext → planRequirement). Deduced = lowest authority, so it fills the "how big is
+    // this order" Unknown but NEVER overturns a Confirmed buyer truth (a User/Verified fact always wins).
+    const scale = classifyOrderScale(form.quantity, form.unit);
+    if (scale.band !== 'unknown') {
+      // CONSISTENCY (P1) — fix at the SOURCE: do NOT assert "personal use / sample / skip-credit" for a
+      // BUSINESS or CAPITAL buyer. A single unit is then a normal procurement, not a consumer sample —
+      // which is what made IIT-Kanpur's 1-piece capital buy read "personal" while ALSO deducing credit +
+      // installation. Keep the qty band; neutralise the framing so the engines can't contradict.
+      const businessCtx = page1Choice === 'business'
+        || /capital|project|made_to_spec/i.test(reqPlan?.archetype || '')
+        || /academic|research|government|psu/i.test(buyerProfile?.nature || '');
+      const impl = (businessCtx && (scale.band === 'single' || scale.band === 'small'))
+        ? `${scale.band} order — a single / low-volume BUSINESS purchase (not bulk); commercial terms still apply`
+        : scale.implication;
+      cov.record('order scale', `${scale.band} — ${impl}`, 'Deduced', 70);
+    }
     (window as unknown as { __coverage?: unknown }).__coverage = cov; // debug introspection (window.__coverage.facts())
-  }, [dynQuestions, dynAnswers, form.dynamicSpecs, manualSpecs, cascadeSpecs, enrichedSpecs, autoFilledSpecs, deducedLogistics, buyerTwin, external]);
+  }, [dynQuestions, dynAnswers, form.dynamicSpecs, form.quantity, form.unit, page1Choice, reqPlan, buyerProfile, manualSpecs, cascadeSpecs, enrichedSpecs, autoFilledSpecs, deducedLogistics, buyerTwin, external]);
 
   // #8: pre-record the buyer's STANDING cadence (and, only on a same-category repeat, budget)
   // from the persistent profile / prior order — so the planner doesn't re-ask "how often?" /
@@ -1606,7 +1994,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // A2 (G): include the Twin's high-conf active-intent in the signature so a Twin that lands AFTER
     // a (timed-out) twin-blind derivation RE-DERIVES rather than freezing the stale generic guess.
     const twAiSig = String((ignoreTwin ? null : liveTwin())?.layer_c_commercial_intelligence?.current_active_intent?.value || '');
-    const sig = `${form.productName.trim().toLowerCase()}|${kind || ''}|${requirementMode().mode}|${(form.unit || '').toLowerCase()}|${twAiSig}`;
+    const sig = `${form.productName.trim().toLowerCase()}|${kind || ''}|${requirementMode().mode}|${(form.unit || '').toLowerCase()}|${twAiSig}|${buyerStoryRef.current?.arc || ''}`;
     if (intentSig.current === sig) return;
     intentSig.current = sig;
     intentResolved.current = false; // a fresh intent derivation is now in-flight (gates Continue)
@@ -1617,11 +2005,40 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // e.g. an electronics buyer asking for "potatoes"), pass NOTHING so the LLM derives PURELY from the
     // current product — never anchoring the new requirement on the unrelated historical domain.
     // ("Weight what they're asking now; stitch history only if related; else persist with current.")
-    const twinTruths = tb && tb.confidence >= 40 && !tb.offProfile ? tb.known : '';
+    // INTELLIGENCE TRANSFER (replaces the old binary off-profile mute): tier the buyer's intelligence and
+    // carry A (who they are) + B (how they buy) ALWAYS; C (their categories) only when the new product is
+    // RELATED. Even off-profile, "manufacturer · large · regional · credit" still informs intent — only
+    // category intel is gated. This is the Jaiveer fix at its root: paper no longer mutes his manufacturer
+    // identity. Relatedness = wider of full-history lexical overlap and the Buyer Story's semantic score.
+    const histCats = [...new Set([
+      ...((enrichment?.categories || []).map((c) => c.mcat).filter(Boolean) as string[]),
+      ...(((tw?.layer_c_commercial_intelligence?.historical_categories) || []) as string[]),
+    ])];
+    const tItems = tierBuyerIntelligence({
+      profile: buyerProfile,
+      twinBusinessType: tw?.layer_a_identity?.business_type,
+      region: tw?.layer_a_identity?.city || enrichment?.buyer?.city,
+      language: tw?.layer_a_identity?.language,
+      verified: !!tw?.layer_a_identity?.verified,
+      historicalCategories: histCats,
+      themes: twinThemes(),
+    });
+    const tDec = decideTransfer(tItems, Math.max(categoryRelatedness(form.productName, histCats, coreTokens), buyerStoryRef.current?.relatedness ?? 0));
+    // CONSUMPTION: of everything that transferred, weight what should ACTUALLY shape this product's intent —
+    // drop routing-only facts (language/channel), and down-weight authority/procurement for a plain commodity
+    // (the office-chair fix). Only the drivers seed deriveIntent; the rest stay carried-but-quiet.
+    const tCons = consume(tDec.transfer, { orderScale: classifyOrderScale(form.quantity, form.unit).band, archetype: reqPlan?.archetype });
+    const twinTruths = tb && tb.confidence >= 40 ? formatDrivers(tCons.drivers) : formatDrivers(tCons.drivers.filter((i) => i.tier === 'A')); // low-confidence twin → carry only hard buyer facts
+    (window as unknown as { __transfer?: unknown; __consumption?: unknown }).__transfer = tDec;
+    (window as unknown as { __consumption?: unknown }).__consumption = tCons; // debug introspection
     logPrompt({ prompt: 'deriveIntent (A6)', model: 'gemini-2.5-flash-lite', purpose: 'journey-adapted purpose question, asked before the planner', inputs: `product="${form.productName}" · qty=${form.quantity || 'unspecified'} · kind=${kind || '?'} · twin=[${twinTruths || 'none'}]` });
     // #7: pass the REAL quantity (or empty → "not specified"); never fabricate a "1" that the
     // buyer didn't type — the journey/derivation must not reason on a phantom order size.
-    deriveIntent({ productName: form.productName, quantity: form.quantity, unit: form.unit, buyerKind: kind, twinTruths })
+    deriveIntent({ productName: form.productName, quantity: form.quantity, unit: form.unit, buyerKind: kind, twinTruths, observedContext: observedExternalContext() || undefined, orderScale: classifyOrderScale(form.quantity, form.unit).band, buyerStory: buyerStoryRef.current ? `${buyerStoryRef.current.arc}${buyerStoryRef.current.story ? ' — ' + buyerStoryRef.current.story : ''}` : undefined,
+      // BUYER×CATEGORY FUSION (gated): only when the category is RICH (categoryConf.fuse) do we pass
+      // its real use-cases to frame the intent question around the buyer's operation. Thin/empty/cold
+      // category → undefined → buyer-only framing (the safe default). It stays a CONFIRM question.
+      categoryFusion: categoryConf.fuse && categoryConsumed.applications.length ? { applications: categoryConsumed.applications } : undefined })
       .then((res) => {
         intentResolved.current = true; // derivation done (even if it produced nothing) → Continue unblocks
         if (!res) return;
@@ -1658,6 +2075,18 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         // A confident LLM derivation records as Intent; an on-profile Twin-preferred value records as History (prior).
         if (derivedKnown && !regKnown && !preferTwin) coverage.current.record('primary use', res.derivedIntent, 'Intent', res.confidence);
         else if (preferTwin && !regKnown) coverage.current.record('primary use', String(twAI!.value), 'History', twAI!.confidence as number);
+        // DEBUG provenance: snapshot the precedence race so the first-page panel can explain WHY this
+        // value won — which candidates existed, their confidence, and who was overridden/off-profile.
+        intentDecisionRef.current = {
+          registry: reg ? { value: reg.value, confidence: reg.confidence } : null,
+          twin: twAI && twAI.value ? { value: String(twAI.value), confidence: typeof twAI.confidence === 'number' ? twAI.confidence : 0, offProfile } : null,
+          llm: res.derivedIntent ? { value: res.derivedIntent, confidence: res.confidence } : null,
+          chips: res.chips || [],
+          chosenValue: value,
+          threshold: 80,
+        };
+        intentCandidatesRef.current = res.intentCandidates && res.intentCandidates.length ? res.intentCandidates : null;
+        setIntentDecisionTick((t) => t + 1);
         setRequirementIntent((prev) => (prev && prev.locked ? prev : {
           value, journey, question: res.question, chips: res.chips,
           confidence: conf, source: 'derived', locked: false,
@@ -1665,7 +2094,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       })
       .catch(() => { intentResolved.current = true; });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, isqSpecs, form.productName, form.quantity, form.unit, qtyCommitted, unitOptions, page1Choice, ignoreTwin, pull, buyerTwin, twinWaitTimedOut]);
+  }, [step, isqSpecs, form.productName, qtyDebounced, form.unit, qtyCommitted, unitOptions, page1Choice, ignoreTwin, pull, buyerTwin, twinWaitTimedOut]);
 
   // A1 safety (G): time-box the wait for the Twin. If a pull succeeded but the Twin hasn't landed in
   // 2.5s (slow/failed derivation), let the intent derive twin-blind rather than hang Continue. Resets
@@ -1782,14 +2211,17 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   useEffect(() => {
     if (form.buyerType || buyerTypeManual.current || personaSpecMatch || ignoreTwin) return;
     if (!showProfile || page1Choice === 'personal') return; // retail/personal → no business role to derive
-    const twinType = (liveTwin()?.layer_a_identity?.business_type || '').trim();
-    if (twinType && !/unknown|individual|end[\s-]?user|consumer|home/i.test(twinType)) {
-      setField('buyerType', twinType);
-      setBuyerTypeDeducedFrom('your business profile');
-      track('rfq_buyertype_deduced', { buyerType: twinType, from: 'twin' });
+    // Use the Nature-aware canonical resolver — an ACADEMIC/GOVERNMENT buyer is seeded as an
+    // institution, never the Twin's LLM "Manufacturer" guess. Corporate falls back to the raw Twin type.
+    const role = canonicalBuyerType();
+    if (role && !/unknown|individual|end[\s-]?user|consumer|home/i.test(role)) {
+      const institutional = !!(buyerProfile?.nature && /academic|research|government|psu/i.test(buyerProfile.nature));
+      setField('buyerType', role);
+      setBuyerTypeDeducedFrom(institutional ? 'your institution profile' : 'your business profile');
+      track('rfq_buyertype_deduced', { buyerType: role, from: institutional ? 'nature' : 'twin' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.buyerType, personaSpecMatch?.buyerType, showProfile, page1Choice, buyerTwin]);
+  }, [form.buyerType, personaSpecMatch?.buyerType, showProfile, page1Choice, buyerTwin, buyerProfile]);
 
   // ── Analytics (pilot diagnostics) ────────────────────────────────────────────
   // rfq_off_profile: fires once when the current product diverges from the buyer's history
@@ -1939,6 +2371,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       setQtyCommitted(false); // T1: a new product → qty must be re-entered/committed before intent fires
       addRecentSearch(name);
       let fetchedSpecs: ISQSpec[] = [];
+      setSpecsLoading(true); // show the global loader while the IndiaMART ISQ/mcat APIs are in flight
 
       // Validate it's a real B2B product. The mcatid-suggestion API fuzzy-matches
       // any string, so use the autocomplete suggest API: a genuine product returns
@@ -1982,6 +2415,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         setPreferenceSpecs(new Set());
         committedMcatId.current = '';
         committedProduct.current = name;
+        setSpecsLoading(false);
         return { valid: false, specs: [] };
       }
 
@@ -2061,143 +2495,121 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
           setRedundantISQSpecs([]);
           setPreferenceSpecs(new Set());
 
-          // 1) Quantity UNIT options only — from the GetIsq (first) API.
+          // ── Shared spec helpers (used by BOTH ISQ APIs so they produce identical display specs) ──
+          // map raw rows from EITHER API → display specs (non-qty, ≤10, options cleaned; GetIsq uses
+          // '##' separators, getISQs comma/OPTIONS_DATA — handle both).
+          const mapDisplaySpecs = (rows: Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }>): ISQSpec[] =>
+            (rows || [])
+              .filter((r) => r && r.IM_SPEC_MASTER_DESC && !/quantity|qty|unit/i.test(r.IM_SPEC_MASTER_DESC))
+              .slice(0, 10)
+              .map((r) => {
+                const opts = (
+                  Array.isArray(r.OPTIONS_DATA) && r.OPTIONS_DATA.length
+                    ? r.OPTIONS_DATA.map((o) => (o.IM_SPEC_OPTIONS_DESC || '').trim()).filter(Boolean)
+                    : (r.IM_SPEC_OPTIONS_DESC || '').split(/##|,/).map((o) => o.trim()).filter(Boolean)
+                ).filter((o) => !/^others?$/i.test(o));
+                return { ...r, IM_SPEC_OPTIONS_DESC: opts.join('##') };
+              });
+          const runSpecHints = (displaySpecs: ISQSpec[]): void => {
+            if (!hasGeminiKey() || displaySpecs.length === 0) return;
+            const specsWithOptions = displaySpecs.reduce<Record<string, string[]>>((acc, s) => {
+              if (s.IM_SPEC_OPTIONS_DESC) acc[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean);
+              return acc;
+            }, {});
+            classifyFieldTypes(name, displaySpecs.map((s) => s.IM_SPEC_MASTER_DESC))
+              .then((cls) => { setPreferenceSpecs(new Set(cls.preference)); logPrompt({ prompt: 'classifyFieldTypes (bias gate)', model: 'gemini-2.5-flash-lite', purpose: 'mark brand/preference fields → never auto-filled', inputs: `preference=[${cls.preference.join(', ')}]` }); })
+              .catch(() => {});
+            getSpecHints(name, displaySpecs.map((s) => s.IM_SPEC_MASTER_DESC), specsWithOptions, twinPromptContext(liveTwin()))
+              .then((hints) => {
+                setIsqHints(hints.isqHints ?? {});
+                setKnownFromProductName(hints.knownFromProductName ?? {});
+                setRedundantISQSpecs(hints.redundantISQSpecs ?? []);
+                logPrompt({ prompt: 'getSpecHints', model: 'gemini-2.5-flash-lite', purpose: `name-detect specs (${Object.keys(hints.knownFromProductName ?? {}).length}) + hints + ${(hints.redundantISQSpecs ?? []).length} not-applicable`, inputs: `product="${name}" · ISQ(${displaySpecs.length})=[${displaySpecs.map((s) => s.IM_SPEC_MASTER_DESC).join(', ')}] · twin=[${twinPromptContext(liveTwin()) || 'none'}]` });
+                const known = hints.knownFromProductName ?? {};
+                Object.keys(known).filter((k) => known[k] && PREFERENCE_RE.test(k)).forEach((k) => logGate({ field: k, classification: 'preference', action: 'blocked_autofill', reason: prefReason(k), at: 'product-name' }));
+                // RE-POST (trusted): do NOT auto-fill specs from the product name — a re-post only carries
+                // the buyer's OWN prior specs; no AI fills anything. (Other flows keep name-detect.)
+                if (!opts?.trusted) setForm((prev) => { const merged = { ...prev.dynamicSpecs }; for (const [k, v] of Object.entries(known)) { if (v && !merged[k] && !PREFERENCE_RE.test(k)) merged[k] = v; } return { ...prev, dynamicSpecs: merged }; });
+              })
+              .catch(() => {});
+          };
+          // Apply a display-spec set to the UI (+ AI hints). `fetchedSpecs` (the function's return) tracks
+          // the latest applied set so ensureReqPlan seeds off real specs.
+          const applySpecs = (displaySpecs: ISQSpec[]): void => {
+            setIsqSpecs(displaySpecs);
+            isqSpecsRef.current = displaySpecs;
+            fetchedSpecs = displaySpecs;
+            runSpecHints(displaySpecs);
+          };
+
+          // 1) GetIsq (FAST, ~30ms) — qty/unit options AND the display specs. We render the specs
+          //    IMMEDIATELY so the spec page never waits on the slow API. (Previously we discarded
+          //    GetIsq's display specs and blocked on the 15-30s getISQs below.)
           try {
             const isqJson = await getJSON<{ DATA?: (ISQSpec | ISQSpec[])[] }>(
               `/api/imimg/index.php?r=Newreqform/GetIsq&modid=MY&mcatid=${mcatId}&cat_type=3&flag=1&isq_format=1&generic_flag=1&country_iso=IN`
             );
-            // DATA[0] is itself an array of qty/unit specs; flatten one level
+            // DATA[0] is itself an array of specs; flatten one level
             const raw: (ISQSpec | ISQSpec[])[] = isqJson?.DATA ?? [];
-            const qtySpecs = raw
-              .flatMap((s) => (Array.isArray(s) ? s : [s]))
-              .filter((s) => s && s.IM_SPEC_MASTER_DESC)
-              .filter((s) => /quantity|qty|unit/i.test(s.IM_SPEC_MASTER_DESC));
-
+            const flat = raw.flatMap((s) => (Array.isArray(s) ? s : [s])).filter((s) => s && s.IM_SPEC_MASTER_DESC);
+            const qtySpecs = flat.filter((s) => /quantity|qty|unit/i.test(s.IM_SPEC_MASTER_DESC));
             const unitOpts: string[] = [];
             for (const qs of qtySpecs) {
               if (qs.IM_SPEC_OPTIONS_DESC) {
-                qs.IM_SPEC_OPTIONS_DESC.split('##')
-                  .map((o) => o.trim())
-                  .filter((o) => Boolean(o) && o.toLowerCase() !== 'none')
-                  .forEach((o) => {
-                    if (!unitOpts.includes(o)) unitOpts.push(o);
-                  });
+                qs.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter((o) => Boolean(o) && o.toLowerCase() !== 'none').forEach((o) => { if (!unitOpts.includes(o)) unitOpts.push(o); });
               }
             }
             setUnitOptions(unitOpts);
             if (unitOpts.length > 0) {
-              // If the buyer typed a unit inline ("100 meter…"), pick the matching
-              // option; otherwise default to the first.
               const typedUnit = parsedQty?.unit;
-              const matched =
-                typedUnit &&
-                unitOpts.find(
-                  (o) =>
-                    o.toLowerCase() === typedUnit ||
-                    o.toLowerCase().startsWith(typedUnit) ||
-                    typedUnit.startsWith(o.toLowerCase())
-                );
+              const matched = typedUnit && unitOpts.find((o) => o.toLowerCase() === typedUnit || o.toLowerCase().startsWith(typedUnit) || typedUnit.startsWith(o.toLowerCase()));
               setField('unit', matched || unitOpts[0]);
             }
+            // The INSTANT display specs — GetIsq already carries them (e.g. Power / Phase / Enclosure).
+            const fast = mapDisplaySpecs(flat as Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }>);
+            if (fast.length) applySpecs(fast);
           } catch {}
 
-          // 2) All other specs — from the getISQs (second) API.
-          try {
-            const isq2Json = await postJSON<{
-              RESPONSE?: { DATA?: Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }> };
-            }>('/api/mimart/api/bmcajax/addressbook/getISQs', { mcatId });
-            const rows = isq2Json?.RESPONSE?.DATA ?? [];
-            const displaySpecs: ISQSpec[] = rows
-              .filter((r) => r && r.IM_SPEC_MASTER_DESC && !/quantity|qty/i.test(r.IM_SPEC_MASTER_DESC))
-              .slice(0, 10)
-              .map((r) => {
-                // Prefer the structured OPTIONS_DATA array (robust against option
-                // values that themselves contain commas); fall back to splitting
-                // the comma-separated IM_SPEC_OPTIONS_DESC string.
-                const opts = (
-                  Array.isArray(r.OPTIONS_DATA) && r.OPTIONS_DATA.length
-                    ? r.OPTIONS_DATA.map((o) => (o.IM_SPEC_OPTIONS_DESC || '').trim()).filter(Boolean)
-                    : (r.IM_SPEC_OPTIONS_DESC || '')
-                        .split(',')
-                        .map((o) => o.trim())
-                        .filter(Boolean)
-                  // Drop the API's own "Other" option — we render our own
-                  // "Other…" free-text chip, so it was showing up twice.
-                ).filter((o) => !/^others?$/i.test(o));
-                return { ...r, IM_SPEC_OPTIONS_DESC: opts.join('##') };
-              });
+          // 2) getISQs (the bmcajax ISQ API — m.indiamart.com/api/bmcajax/addressbook/getISQs, {mcatId})
+          //    is the AUTHORITATIVE source for the ISQ spec list (NOT for QT — qty/unit come from GetIsq
+          //    above). It's slow (15-30s, sometimes hangs through our dev proxy), so we run it in the
+          //    BACKGROUND and NEVER block on it: GetIsq SEEDS the page instantly, then whenever getISQs
+          //    returns its specs we ADOPT them (it's the canonical/richer ISQ set the form is built on).
+          //    If it hangs/empties, the GetIsq seed stands — so the page is never blank, never frozen.
+          postJSON<{ RESPONSE?: { DATA?: Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }> } }>(
+            '/api/mimart/api/bmcajax/addressbook/getISQs',
+            { mcatId },
+            30000
+          )
+            .then((isq2Json) => {
+              const isqSpecs = mapDisplaySpecs(isq2Json?.RESPONSE?.DATA ?? []);
+              // getISQs is authoritative for ISQ → adopt its specs whenever it returns any (replacing the
+              // GetIsq seed). User-entered values persist (form.dynamicSpecs is keyed by spec name).
+              if (isqSpecs.length > 0) applySpecs(isqSpecs);
+            })
+            .catch(() => {});
 
-            setIsqSpecs(displaySpecs);
-            isqSpecsRef.current = displaySpecs;
-            fetchedSpecs = displaySpecs;
-
-            // AI hints
-            if (hasGeminiKey() && displaySpecs.length > 0) {
-              const specsWithOptions = displaySpecs.reduce<Record<string, string[]>>((acc, s) => {
-                if (s.IM_SPEC_OPTIONS_DESC)
-                  acc[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC.split('##')
-                    .map((o) => o.trim())
-                    .filter(Boolean);
-                return acc;
-              }, {});
-              const specNamesForClass = displaySpecs.map((s) => s.IM_SPEC_MASTER_DESC);
-              // Confidence-&-Bias Gate: classify fields so brand/preference can never be auto-filled.
-              classifyFieldTypes(name, specNamesForClass)
-                .then((cls) => {
-                  setPreferenceSpecs(new Set(cls.preference));
-                  logPrompt({ prompt: 'classifyFieldTypes (bias gate)', model: 'gemini-2.5-flash-lite', purpose: 'mark brand/preference fields → never auto-filled', inputs: `preference=[${cls.preference.join(', ')}]` });
-                })
-                .catch(() => {});
-              getSpecHints(name, displaySpecs.map((s) => s.IM_SPEC_MASTER_DESC), specsWithOptions, twinPromptContext(liveTwin()))
-                .then((hints) => {
-                  setIsqHints(hints.isqHints ?? {});
-                  setKnownFromProductName(hints.knownFromProductName ?? {});
-                  setRedundantISQSpecs(hints.redundantISQSpecs ?? []);
-                  logPrompt({
-                    prompt: 'getSpecHints',
-                    model: 'gemini-2.5-flash-lite',
-                    purpose: `name-detect specs (${Object.keys(hints.knownFromProductName ?? {}).length}) + hints + ${(hints.redundantISQSpecs ?? []).length} not-applicable`,
-                    inputs: `product="${name}" · ISQ(${displaySpecs.length})=[${displaySpecs.map((s) => s.IM_SPEC_MASTER_DESC).join(', ')}] · twin=[${twinPromptContext(liveTwin()) || 'none'}]`,
-                  });
-                  // Auto-fill specs the AI could infer from the product name, without
-                  // overwriting a pick — and NEVER a brand/preference field (bias gate).
-                  const known = hints.knownFromProductName ?? {};
-                  // gate_decisions: a brand/preference that leaked into name-detect is
-                  // logged as blocked (never silently filled) — the VEKA paper trail.
-                  Object.keys(known)
-                    .filter((k) => known[k] && PREFERENCE_RE.test(k))
-                    .forEach((k) => logGate({ field: k, classification: 'preference', action: 'blocked_autofill', reason: prefReason(k), at: 'product-name' }));
-                  setForm((prev) => {
-                    const merged = { ...prev.dynamicSpecs };
-                    for (const [k, v] of Object.entries(known)) {
-                      if (v && !merged[k] && !PREFERENCE_RE.test(k)) merged[k] = v;
-                    }
-                    return { ...prev, dynamicSpecs: merged };
-                  });
-                })
-                .catch(() => {});
-            }
-          } catch {}
-
-          // 3) Product image
-          try {
-            const imgJson = await getJSON<Record<string, unknown> & { Response?: { Data?: unknown }; data?: unknown }>(
-              `/api/imimg/index.php?r=postblenq/McatDtl&modid=MY&mcatid=${mcatId}`
-            );
-            const data = (imgJson?.Response?.Data ?? imgJson?.data ?? imgJson) as Record<string, unknown>;
-            if (data && typeof data === 'object') {
-              for (const key of Object.keys(data)) {
-                const val = data[key];
-                if (/img|image/i.test(key) && typeof val === 'string' && val.startsWith('http')) {
-                  setProductImageUrl(val);
-                  break;
+          // 3) Product image (cosmetic) — non-blocking so a slow image API never delays the form.
+          getJSON<Record<string, unknown> & { Response?: { Data?: unknown }; data?: unknown }>(
+            `/api/imimg/index.php?r=postblenq/McatDtl&modid=MY&mcatid=${mcatId}`
+          )
+            .then((imgJson) => {
+              const data = (imgJson?.Response?.Data ?? imgJson?.data ?? imgJson) as Record<string, unknown>;
+              if (data && typeof data === 'object') {
+                for (const key of Object.keys(data)) {
+                  const val = data[key];
+                  if (/img|image/i.test(key) && typeof val === 'string' && val.startsWith('http')) {
+                    setProductImageUrl(val);
+                    break;
+                  }
                 }
               }
-            }
-          } catch {}
+            })
+            .catch(() => {});
 
           committedMcatId.current = mcatId;
           setField('mcatId', mcatId);
+          traceMark('mcat', { start: true, done: true, status: `resolved ${mcatId}` });
         } else if (mcatId && mcatId === committedMcatId.current) {
           // Same product re-committed — keep specs already loaded.
           fetchedSpecs = isqSpecsRef.current;
@@ -2209,6 +2621,8 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         // The product-details lookup failed (network/gateway). Let the user
         // continue — specs just won't pre-load — but tell them why.
         toast.show('Couldn’t load product details. You can still continue.', 'warning');
+      } finally {
+        setSpecsLoading(false);
       }
       return { valid: true, specs: fetchedSpecs };
     },
@@ -2453,10 +2867,10 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         );
         if (token === analysisToken.current) {
           const specNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC);
-          for (const [k, v] of Object.entries(specs || {})) {
-            if (!v) continue;
+          for (const [k, sv] of Object.entries(specs || {})) {
+            if (!sv?.value || sv.confidence < 75) continue; // #71a: confidence band (per-spec)
             const match = specNames.find((n) => n.toLowerCase() === k.toLowerCase());
-            if (match && applyAiSpec(match, v as string)) filled++;
+            if (match && applyAiSpec(match, sv.value)) { filled++; cascadeConf.current[match] = sv.confidence; }
           }
           if (filled > 0) setAssistNudge((n) => n + filled);
         }
@@ -2618,13 +3032,23 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       return;
     }
     const currentNames = result.specs.map((s) => s.IM_SPEC_MASTER_DESC);
-    // 2) Drift-map prior specs → current schema. matched → applyAiSpec (editable, won't override
-    //    a brand/preference field — VEKA gate still applies); unmatched → custom spec key.
+    // 1a) Carry the prior QTY + UNIT into the form (they live in pr.specs as "Quantity"/"Quantity Unit").
+    //     A re-post must NOT re-derive or nudge them — it's a deliberate re-order quantity → freeze it
+    //     (qtyCommitted=true so the T4 re-derive + T3 "just 1?" nudge never fire for a re-post).
+    const qKey = Object.keys(pr.specs).find((k) => /^\s*quantity\s*$/i.test(k));
+    const uKey = Object.keys(pr.specs).find((k) => /^\s*(?:quantity\s*unit|unit)\s*$/i.test(k));
+    const priorQty = qKey ? String(pr.specs[qKey]).replace(/[^0-9.]/g, '') : '';
+    const priorUnit = uKey ? String(pr.specs[uKey]).trim() : '';
+    if (priorQty) { setField('quantity', priorQty); setQtyCommitted(true); }
+    if (priorUnit) setField('unit', priorUnit);
+    // 2) Drift-map prior specs → current schema (SKIPPING the qty/unit keys carried above). matched →
+    //    applyAiSpec (editable, won't override a brand/preference field — VEKA gate still applies);
+    //    unmatched → custom spec key.
     const used = new Set<string>();
     const enriched = new Set<string>();
     const meta: Record<string, { recencyDays?: number; custom: boolean }> = {};
     for (const [name, value] of Object.entries(pr.specs)) {
-      if (!value || !value.trim()) continue;
+      if (!value || !value.trim() || name === qKey || name === uKey) continue;
       const m = matchPriorSpec(name, currentNames.filter((c) => !used.has(c)));
       if (m) {
         if (applyAiSpec(m, value, 'repost')) { used.add(m); enriched.add(m); meta[m] = { recencyDays: pr.recencyDays, custom: false }; }
@@ -2638,6 +3062,9 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     setEnrichedSpecs((prev) => new Set([...prev, ...enriched]));
     setRepostMeta(meta);
     setRepostSource({ title: pr.title, recencyDays: pr.recencyDays });
+    // 3) LOCK the spec order to the ISQ schema order so the planner can NEVER re-rank the re-posted
+    //    specs — they stay exactly as the buyer left them last time ("specs as-is", no churn).
+    setLockedSpecOrder(currentNames);
     // 3) Registry: a re-post IS a recurring/replenishment signal — record it with History provenance
     //    (beats AI guesses, below the current-session answer). Feeds requirementContext + Truth Table.
     coverage.current.record('cadence', 'Recurring — re-order (buy again)', 'History', 85);
@@ -2726,6 +3153,14 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // back to the flat generator (ensureDynQuestions).
   const ensureReqPlan = (specs: ISQSpec[]) => {
     if (!QUESTION_ENGINE || !hasGeminiKey() || !form.productName) return;
+    // P0 TIMING GATE — the planner must CONSUME category intel, so defer planRequirement until its
+    // inputs are ready (buyer hydrated · mcat resolved · category hit/error/time-boxed). Fresh/debug
+    // waits for the live build; prod releases at the ~2.5s box and re-plans when category lands (sig
+    // carries category below). This is the fix for "planner ran before category." Never deadlocks.
+    const gNow = gateSourcesNow();
+    if (!plannerInputsReady(gNow)) return;
+    moduleTrace.current.planner = {}; // reflect the LATEST plan run (re-plans when category lands → start moves after category.done)
+    traceMark('planner', { start: true, waited: `buyer ${gNow.buyerReady ? '✓' : '…'} · mcat ${gNow.mcatResolved ? '✓' : '…'} · category ${gNow.categoryStatus}` });
     // Key the plan on the PRODUCT only. The plan describes the category's SELLING
     // SHAPE (archetype / lead / specOrder / personas), which is stable per product;
     // qty & unit are passed to the planner as soft context but populate a beat
@@ -2739,7 +3174,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // breaker). Re-key the plan when a high-confidence (or off-profile) Twin arrives
     // so it re-plans ONCE with the buyer's known facts — that's the question cut.
     const tw = liveTwin();
-    const twinBase = tw ? buildTwinPlanInput(tw, form.productName) : undefined;
+    const twinBase = tw ? buildTwinPlanInput(tw, form.productName, coverage.current.isCovered) : undefined;
     // P5c: "Something changed" mutes the Twin for THIS session → reuse the
     // off-profile path (discovery: no fast-track, lead intent/scale, no cap).
     // A3 / G1: only treat as off-profile if the enrichment categories ALSO miss (the Twin's
@@ -2765,6 +3200,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       (page1Choice ? `|${page1Choice}` : '') + // re-plan when who's-buying changes (A4)
       (ri?.value ? `|i${ri.value.slice(0, 16).toLowerCase()}` : '') + // re-plan once when the intent lands
       `|rm${rmPlan.mode}|u${(form.unit || '').toLowerCase()}` + // T4: re-plan when the requirement-mode bucket or unit changes (qty 1→500, Piece→Tonne)
+      (categoryStatus === 'hit' ? '|catH' : '') + // P0: re-plan ONCE when category intel lands → planner consumes criticals/seller-frequency
       (twinForPlan && (twinForPlan.confidence >= 60 || twinForPlan.offProfile) ? `|twin${Math.round(twinForPlan.confidence)}${twinForPlan.offProfile ? 'x' : ''}` : '');
     if (planSig.current === sig) return;
     planSig.current = sig;
@@ -2803,9 +3239,12 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // Build a compact signature of EVERYTHING fed to the planner — debug shows
     // this verbatim so HOD can see what shaped the plan (and every question).
     const specNamesAll = Object.keys(isqSpecsWithOptions);
+    // catCriticals(N) = category criticals + common-followups fed to the planner as sellerQuestions.
+    // The proof of consumption ChatGPT asked for: N>0 ⇒ category reached the planner (was sellerQs(0)).
+    const catN = categorySellerQs().length;
     const priorBlk = matched
-      ? `prior{persona=${enrichment?.persona?.type || enrichment?.buyer?.customerType || '?'}, knownSpecs(${Object.keys(matched.knownSpecs || {}).length}), sellerQs(${(matched.sellerQuestions || []).length}), isqAns(${Object.keys(matched.isqAnswers || {}).length})}`
-      : 'no-history';
+      ? `prior{persona=${enrichment?.persona?.type || enrichment?.buyer?.customerType || '?'}, knownSpecs(${Object.keys(matched.knownSpecs || {}).length}), sellerQs(${(matched.sellerQuestions || []).length}), catCriticals(${catN}), isqAns(${Object.keys(matched.isqAnswers || {}).length})}`
+      : `no-history · catCriticals(${catN})`;
     const bpfBlk = buyerProfile
       ? `buyerProfile{${[buyerProfile.persona, buyerProfile.localityPreference, buyerProfile.engagement, buyerProfile.multiSku ? 'multi-SKU' : '', buyerProfile.sourcingStyle].filter(Boolean).join(', ')}}`
       : 'no-buyer-profile';
@@ -2829,19 +3268,28 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       // intent + qty + mode lead, then the full active/confirmed registry block (do-not-re-ask).
       application: [intentApp, qtyNote, rmNote, form.requirementNotes || '', requirementContext()].filter(Boolean).join(' '),
       isqSpecsWithOptions,
-      prior: matched
+      prior: (matched || categorySellerQs().length)
         ? {
             persona: enrichment?.persona?.type || enrichment?.buyer?.customerType,
-            knownSpecs: matched.knownSpecs,
-            sellerQuestions: matched.sellerQuestions,
-            isqAnswers: matched.isqAnswers,
+            knownSpecs: matched?.knownSpecs,
+            sellerQuestions: [...new Set([...(matched?.sellerQuestions || []), ...categorySellerQs()])],
+            isqAnswers: matched?.isqAnswers,
           }
         : undefined,
       buyerProfile: buyerProfile || undefined,
       twin: twinForPlan,
       buyerKind: page1Choice === 'business' || page1Choice === 'personal' ? page1Choice : undefined,
+      observedContext: observedExternalContext() || undefined, // Befisc/Sign3/identity as a SOFT signal
+      buyerStory: buyerStoryRef.current ? `${buyerStoryRef.current.arc}${buyerStoryRef.current.story ? ' — ' + buyerStoryRef.current.story : ''}` : undefined, // P2.7 narrative arc (SOFT, never a hard fact)
+      categoryDealBlockers: categoryConsumed.checks.map((c) => c.label), // v13 deal_blockers → proactively cover the top seller stall-point
+      categoryApplications: categoryConsumed.applications,               // v13 intent_patterns → frame the intent question
+      categoryBudgetBands: categoryConsumed.bands || undefined,          // v13 price → category-grounded budget options (no generic ₹ guesses)
+      // Intelligence Consumption: of the transferable intelligence, which traits should DRIVE this product's
+      // plan vs stay carried-but-quiet (a research-authority must not dominate a generic commodity).
+      ...(() => { const c = consume(transferDecision().transfer, { archetype: reqPlan?.archetype, orderScale: classifyOrderScale(form.quantity, form.unit).band }); const pc = classifyProcurement({ nature: buyerProfile?.nature, authorityRole: buyerProfile?.authorityRole, journey: requirementIntent?.journey || undefined, intentText: requirementIntent?.value || undefined, orderScaleBand: classifyOrderScale(form.quantity, form.unit).band, requirementMode: requirementMode().mode }); return { intelligenceDrivers: formatDrivers(c.drivers) || undefined, intelligenceQuiet: c.quiet.map((q) => q.value).join(' · ') || undefined, procurementContext: pc.context !== 'unknown' ? `${pc.label} · GST ${pc.implications.gstLikely ? 'needed' : 'not needed'} · approval: ${pc.implications.approvalFlow}` : undefined }; })(),
     })
       .then((plan) => {
+        traceMark('planner', { done: true, status: plan ? `planned (${categorySellerQs().length} category criticals)` : 'failed' });
         if (!plan) {
           // Planner failed → fall back to the flat generator.
           planSig.current = '';
@@ -2931,12 +3379,14 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // When the landing auto-pulls, ignoreTwin state may not have flushed yet — honour the override.
     const skipTwin = ignoreTwinOverride ?? ignoreTwin;
     setEnrichLoading(true);
+    traceMark('buyer', { start: true, status: 'pulling' });
     const t0 = performance.now();
     const { profile, raw } = await fetchEnrichment(g);
     const pullMs = Math.round(performance.now() - t0);
     setEnrichment(profile);
     setEnrichmentRaw(raw);
     setEnrichLoading(false);
+    traceMark('buyer', { done: true, status: profile ? 'pulled' : 'empty' });
     // P0: snapshot webhook health + detect the buyer_profile sub-fetch auth-failure
     // (it can fail alone while the other 6 sources are fine).
     const arr = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
@@ -2966,14 +3416,18 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         const seed: ExternalSeed = {
           mobile: profile.buyer?.mobile,
           companyName: profile.buyer?.companyName,
+          gstin: profile.buyer?.gst,       // strong unique anchors from the profile, when present
+          udyam: profile.buyer?.udyam,
           website: profile.buyer?.website,
           name: profile.buyer?.fullName || profile.buyer?.firstName,
           city: profile.buyer?.city || profile.cslCity,
+          industry: (form.productName || '').trim() || undefined, // product = a disambiguating anchor (empty at cold pull)
           glid: g,
         };
         const osintFn = async (sd: ExternalSeed): Promise<WorldOsint> => {
           const p = (window as unknown as { __osintProvider?: (s: ExternalSeed) => Promise<WorldOsint> }).__osintProvider;
-          return typeof p === 'function' ? await p(sd) : ({} as WorldOsint);
+          // Default = REAL Firecrawl web search (proxied; key server-side). A wired window.__osintProvider overrides.
+          return typeof p === 'function' ? await p(sd) : await firecrawlOsint(sd);
         };
         runExternal(seed, { nowIso: new Date().toISOString(), osintFn })
           .then((res) => {
@@ -2984,8 +3438,30 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
           })
           .catch(() => {});
       }
+      // ── P1 CUTOVER (flag VITE_EXTRACT_PROFILE) — consume the LLM-native extract twin (no regex/digest). On a
+      //    settled twin, set profile+twin from the P0-verified adapter and SKIP the two legacy derive blocks below.
+      //    On miss/timeout, resolveExtractTwin → null and the legacy path stands. Default OFF ⇒ byte-for-byte legacy. ──
+      if (EXTRACT_TWIN_ON && hasGeminiKey() && !skipTwin) {
+        const tw0e = performance.now();
+        resolveExtractTwin(g, {
+          glid: g, nowIso: new Date().toISOString(),
+          identity: { city: profile.buyer?.city || '', state: profile.buyer?.state || '', language: profile.buyer?.primaryLanguage || '', verified: !!profile.buyer?.verifiedBusiness, companyDesc: profile.companyDesc || null },
+          counts: profile.evidenceBase || { pns_calls: 0, whatsapp_events: 0, bls_created: 0, csl_events: 0 },
+          historicalCategories: [...new Set((profile.categories || []).map((cat) => cat.mcat).filter(Boolean))],
+          intentHistory: profile.intentHistory || {},
+          lastSignalAt: lastSignalAt(profile.signals),
+          email: profile.buyer?.email, designation: profile.buyer?.designation, companyName: profile.buyer?.companyName,
+        }).then((ex) => {
+          if (!ex) return; // miss/timeout → legacy below already ran (gated only by flag, see note) — twin stays from eager merged
+          setBuyerProfile(ex.profile); (window as unknown as { __buyerProfile?: unknown }).__buyerProfile = ex.profile;
+          setBuyerTwin(ex.twin); (window as unknown as { __buyerTwin?: unknown }).__buyerTwin = ex.twin;
+          try { const raw = localStorage.getItem(`rfq_obs_${g}`); setPriorObserved(raw ? (JSON.parse(raw) as ObservedSessionBehavior) : null); } catch { setPriorObserved(null); }
+          setPull((p) => (p ? { ...p, twinMs: Math.round(performance.now() - tw0e) } : p));
+          track('rfq_buyer_twin', { glid: g, score: ex.twin.twin_confidence.overall_score, via: 'extract' });
+        }).catch(() => {});
+      }
       // Derive the PERSISTENT behavioural profile (compounds across requirements).
-      if (profile.digest && hasGeminiKey() && !skipTwin) {
+      if (!EXTRACT_TWIN_ON && profile.digest && hasGeminiKey() && !skipTwin) {
         // P0 Nature engine (Tier-2 structural inference): classify the email domain — a first-party
         // signal we already hold — and FEED it to the profile LLM so it stops mislabeling (an
         // iitk.ac.in academic was tagged "Manufacturer"). Anti-hallucination: institution-type only.
@@ -3021,7 +3497,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       }
       // ── BTE-v1.1 Heavy pass: compile the Buyer Twin (Phase 1, additive). ──
       // Evidence-grounded; stored on window for the Phase-2 debug view + verification.
-      if (profile.signals?.length && hasGeminiKey() && !skipTwin) {
+      if (!EXTRACT_TWIN_ON && profile.signals?.length && hasGeminiKey() && !skipTwin) {
         logPrompt({
           prompt: 'deriveBuyerTwin',
           model: 'gemini-2.5-flash-lite',
@@ -3045,6 +3521,14 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
           intentHistory: profile.intentHistory || {},
         })
           .then((twin) => {
+            // P0 IDENTITY HIERARCHY (Nature > Identity > Business Type > Behaviour): a high-confidence,
+            // evidence-gated Academic/Government Nature OUTRANKS the LLM-guessed business_type. An
+            // iitk.ac.in buyer is a Research Institution, NOT a "Manufacturer" — overriding it HERE, at the
+            // single Twin source, propagates the correct identity to EVERY consumer at once: the planner's
+            // `known`, the transfer + consumption engines, canonicalBuyerType, the buyer-type nudge, and the
+            // seller-facing context. (Corporate/generic Nature returns '' → a real manufacturer is untouched.)
+            const instRole = institutionalRole(classifyEmailDomain(profile.buyer?.email, profile.buyer?.companyName), classifyDesignation(profile.buyer?.designation).authorityRole);
+            if (instRole && twin.layer_a_identity) twin.layer_a_identity.business_type = instRole;
             setBuyerTwin(twin);
             (window as unknown as { __buyerTwin?: unknown }).__buyerTwin = twin;
             // BTE-v1.3: load behaviour OBSERVED in this GLID's past RFQ sessions so the read
@@ -3108,7 +3592,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       clientLocation: prev.clientLocation || b.city || enrichment?.cslCity || '',
       deliveryLocation: prev.deliveryLocation || [b.city, b.state].filter(Boolean).join(', ') || enrichment?.cslCity || '',
       // Verified business buyer ⇒ almost certainly GST-registered → pre-fill (editable).
-      gstRegistered: prev.gstRegistered || !!b.verifiedBusiness,
+      gstRegistered: b.verifiedBusiness ? true : prev.gstRegistered, // verified→Yes; else keep UNKNOWN (never force false)
     }));
     setLoggedIn(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3264,6 +3748,10 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       buyer_identity: identity ? JSON.stringify(identity) : '',
       // P4 — the cross-source agreement ladder (which facts corroborated → graduated to Verified).
       buyer_external_crossval: external?.crossValidation ? JSON.stringify(external.crossValidation) : '',
+      // P1.1 — the coverage system-of-record (every confirmed fact, incl. resolved contradiction nudges:
+      // supplier radius / approval / installation / PO) travels with the lead so sellers + the next
+      // session inherit the buyer's own answers, not just our guesses.
+      buyer_coverage_facts: JSON.stringify(coverage.current.facts()),
     });
     // BTE-v1.3 — persist the observed behaviour per-GLID (client-side pilot store) so the NEXT
     // RFQ from this buyer starts already knowing how they behave. session_count grows each time.
@@ -3489,6 +3977,15 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // never originates or overrides the current requirement. PII-free; safe to share with sellers.
   const observedBehavior = useMemo<ObservedSessionBehavior>(() => {
     const answered = dynQuestions.filter((q) => dynAnswers[q.id]).length;
+    // P0.2 SOURCE-AWARE PERSONA — behaviour reshapes ONLY from the buyer's own actions, never from
+    // auto-filled values (the RFQ must not learn from itself: deduced Credit → "seeks credit terms"
+    // was circular). A logistics field shapes commercial/urgency posture ONLY when it's a MANUAL pick
+    // (or the buyer changed the deduced value); an auto-deduced value (≥0.8 and unchanged) is suppressed.
+    const manualLogistics = (id: string, val: string): string => {
+      const d = deducedLogistics[id];
+      const autoFilled = !!d && (d.confidence ?? 0) >= 0.8 && val.trim() === String(d.value || '').trim();
+      return autoFilled ? '' : val;
+    };
     const current = distillSessionBehavior({
       specsFilledByUser: manualSpecs.size,
       specsAvailable: isqSpecs.length,
@@ -3496,12 +3993,12 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       specsRemoved: removedSpecs.size,
       personaQsAnswered: answered,
       personaQsSkipped: intentGateSkipped ? 1 : 0,
-      deliveryTimeline: form.deliveryTimeline,
-      paymentTerms: form.paymentTerms,
+      deliveryTimeline: manualLogistics('deliveryTimeline', form.deliveryTimeline),
+      paymentTerms: manualLogistics('paymentTerms', form.paymentTerms),
       observedAt: new Date().toISOString(),
     });
     return mergeObservedBehavior(priorObserved, current);
-  }, [manualSpecs, isqSpecs.length, overriddenSpecs, removedSpecs, dynQuestions, dynAnswers, intentGateSkipped, form.deliveryTimeline, form.paymentTerms, priorObserved]);
+  }, [manualSpecs, isqSpecs.length, overriddenSpecs, removedSpecs, dynQuestions, dynAnswers, intentGateSkipped, form.deliveryTimeline, form.paymentTerms, deducedLogistics, priorObserved]);
   // P3 Identity Resolution (the "Dinesh mechanism") — stitch first-party anchors (name/mobile/company/
   // email/city/state) with any observed-external PAN into one composite identity + confidence score.
   // OBSERVED-only (it can fold in external PAN/GST): a confidence + dossier signal, NEVER a planner
@@ -3523,6 +4020,81 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     (window as unknown as { __identity?: unknown }).__identity = res;
     return res;
   }, [enrichment, buyerTwin?.observed_external]);
+  // Distil the OBSERVED external footprint (Befisc identity + Sign3 digital + composite identity) into
+  // a SOFT planner signal — PII-light: entity / demographics / location / consumer-marketplace presence.
+  // Per the user's directive we now FEED external into the planner CONTEXT (labelled observed, may be
+  // stale, NEVER a hard/Verified fact). Highest value for a COLD buyer (no history) — it's the only
+  // signal we have. Returns '' when nothing observed.
+  const befiscState = (addr?: string): string => {
+    const m = (addr || '').match(/\b(Andhra Pradesh|Arunachal Pradesh|Assam|Bihar|Chhattisgarh|Goa|Gujarat|Haryana|Himachal Pradesh|Jharkhand|Karnataka|Kerala|Madhya Pradesh|Maharashtra|Manipur|Meghalaya|Mizoram|Nagaland|Odisha|Punjab|Rajasthan|Sikkim|Tamil Nadu|Telangana|Tripura|Uttar Pradesh|Uttarakhand|West Bengal|Delhi|Jammu|Ladakh|Puducherry|Chandigarh|Goa)\b/i);
+    const pin = (addr || '').match(/\b\d{6}\b/);
+    return [m ? m[1] : '', pin ? pin[0] : ''].filter(Boolean).join(' ');
+  };
+  // P2.7 — BUYER STORY: order the buyer's past categories into a timeline and infer the narrative arc
+  // (setting up / expanding / replenishing / diversifying) via ONE flash-lite pass. A SOFT signal fed to
+  // the planner — it explains an odd current product; it is never a hard fact. Derived once per
+  // (buyer × current product); the ref keeps the value fresh for the planner closures.
+  const trajectory = useMemo(() => orderTrajectory(enrichment?.categories || []), [enrichment]);
+  useEffect(() => {
+    if (!hasGeminiKey() || !hasStory(enrichment?.categories || []) || !form.productName.trim()) return;
+    const sig = `${enrichment?.glid || ''}|${trajectory.map((t) => t.mcat).join('>')}|${form.productName.trim().toLowerCase()}`;
+    if (buyerStorySig.current === sig) return;
+    buyerStorySig.current = sig;
+    logPrompt({ prompt: 'deriveBuyerStory', model: 'gemini-2.5-flash-lite', purpose: 'narrative arc from the category timeline', inputs: `timeline=[${trajectory.map((t) => t.mcat).join(' → ')}] · current="${form.productName}"` });
+    deriveBuyerStory({ timeline: trajectory, currentProduct: form.productName })
+      .then((s) => { if (s.arc || s.story) { setBuyerStory(s); buyerStoryRef.current = s; (window as unknown as { __buyerStory?: unknown }).__buyerStory = s; } })
+      .catch(() => {});
+  }, [enrichment, trajectory, form.productName, logPrompt]);
+
+  // ─── Intelligence Transfer (the Buyer Memory decision) — replaces the BINARY off-profile mute ───
+  // Tiers the buyer's compiled intelligence (A always · B usually · C if related · D never) and decides
+  // what may carry to THIS requirement. Relatedness = the WIDER of the deterministic full-history lexical
+  // overlap and the Buyer Story's SEMANTIC business-relatedness — and it gates ONLY Tier C, so an unrelated
+  // product (Jaiveer → "Diesel Generator") still carries who-they-are + how-they-buy without leaking
+  // "notebook inputs". For Jaiveer → "Paper" the story scores it a core input, so category intel carries too.
+  const transferDecision = useCallback(() => {
+    const tw = ignoreTwin ? null : liveTwin();
+    const id = tw?.layer_a_identity;
+    const histCats = [...new Set([
+      ...((enrichment?.categories || []).map((c) => c.mcat).filter(Boolean) as string[]),
+      ...(((tw?.layer_c_commercial_intelligence?.historical_categories) || []) as string[]),
+    ])];
+    const items = tierBuyerIntelligence({
+      profile: buyerProfile,
+      twinBusinessType: id?.business_type,
+      region: id?.city || enrichment?.buyer?.city,
+      language: id?.language,
+      verified: !!id?.verified,
+      entityType: identity?.entityType,
+      historicalCategories: histCats,
+      themes: twinThemes(),
+      knownSpecs: matchCategory(enrichment, form.productName)?.knownSpecs,
+    });
+    const lexical = categoryRelatedness(form.productName, histCats, coreTokens);
+    const semantic = buyerStoryRef.current?.relatedness ?? 0;
+    return decideTransfer(items, Math.max(lexical, semantic));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buyerProfile, enrichment, identity, ignoreTwin, form.productName]);
+
+  const observedExternalContext = (): string => {
+    const bef = buyerTwin?.observed_external?.befisc;
+    const s3 = buyerTwin?.observed_external?.sign3;
+    const id = identity;
+    const bits: string[] = [];
+    if (id?.entityType) bits.push(`entity: ${id.entityType}`);
+    if (bef?.gender) bits.push(String(bef.gender).toLowerCase());
+    if (bef?.age) bits.push(`age ~${bef.age}`);
+    if (bef?.income) bits.push(`income ${bef.income}`);
+    const loc = befiscState(bef?.address) || id?.gstState || '';
+    if (loc) bits.push(`location ${loc}`);
+    const platforms = s3?.platforms || [];
+    if (platforms.length) bits.push(`active on ${platforms.slice(0, 4).join('/')} (consumer-marketplace presence)`);
+    // synthesized read — an individual PAN / consumer-marketplace presence with no company ⇒ personal
+    const consumerSig = platforms.some((p) => /flipkart|snapdeal|amazon|meesho|myntra|ajio|facebook|instagram/i.test(p));
+    const indiv = /individual|proprietor/i.test(id?.entityType || '');
+    if ((indiv || consumerSig) && !enrichment?.buyer?.companyName) bits.push('→ reads as a PERSONAL / individual buyer');
+    return bits.join(' · ');
+  };
   // L2 Contradiction Engine — turn detected clashes (location / persona-vs-order / buyer-type) + the
   // local-preference CONSUMPTION (supplier radius) into polite NUDGES. Recomputes as the buyer types.
   const contradictions = useMemo<Nudge[]>(() => {
@@ -3556,10 +4128,17 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       // R3 — feed the (previously idle) engines so they drive action nudges.
       authorityRole: buyerProfile?.authorityRole,
       procurementModel: buyerProfile?.procurementModel,
+      // P3.8 — cross-signal: the qty order-scale × role, and the current product vs the buyer's whole history.
+      orderScale: classifyOrderScale(qtyNum, form.unit).band,
+      offProfileNewProduct: !!buyerTwin && !!form.productName.trim() && buildTwinPlanInput(buyerTwin, form.productName).offProfile && !matchCategory(enrichment, form.productName),
+      // P0 identity hierarchy — a confident institutional Nature resolves the buyer type → suppress the
+      // "which buyer type?" nudge (don't ask IIT-Kanpur to choose between Business Buyer and Manufacturer).
+      nature: buyerProfile?.nature,
+      natureConfidence: buyerProfile?.natureConfidence,
     });
     (window as unknown as { __contradictions?: unknown }).__contradictions = res;
     return res;
-  }, [enrichment, buyerTwin, buyerProfile, requirementIntent, page1Choice, qtyNum, form.unit]);
+  }, [enrichment, buyerTwin, buyerProfile, requirementIntent, page1Choice, qtyNum, form.unit, form.productName]);
   const [nudgeAnswers, setNudgeAnswers] = useState<Record<string, string>>({});
   const [ceoView, setCeoView] = useState(false); // L4 — plain-language Executive view toggle
   const answerNudge = (n: Nudge, opt: string) => {
@@ -3570,6 +4149,15 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       else if (/business|resale|workshop|fleet/i.test(opt)) setPage1Choice('business');
     }
     if (n.field === 'deliveryCity' && opt && opt !== 'Other') setForm((p) => ({ ...p, deliveryLocation: opt }));
+    if (n.field === 'buyerType' && opt && opt !== 'Other') setField('buyerType', opt); // the buyer's own type pick → canonicalBuyerType + planner consume it
+    // P1.1 — EVERY resolved nudge becomes a CONFIRMED fact in the system-of-record (coverage registry,
+    // User authority = 100). That makes it flow into requirementContext → planner / cascade / help ("do
+    // NOT re-ask or contradict"), show in the Truth Table, and travel with the lead. Previously the
+    // supplier-radius / approval / installation / PO answers died inert in nudgeAnswers state.
+    if (opt && opt !== 'Other') {
+      const concept = ({ supplier_radius: 'supplier radius', approval: 'approval needed', installation: 'installation support', po_process: 'procurement process', scale_vs_role: 'order context', new_direction: 'new direction' } as Record<string, string>)[n.type];
+      if (concept) coverage.current.record(concept, opt, 'User', 100);
+    }
     track('rfq_nudge_answered', { type: n.type, answer: opt });
   };
   const observedTraits = (o: ObservedSessionBehavior) =>
@@ -3590,13 +4178,25 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     return parts.slice(0, 4).join(' · ');
   };
 
-  // Precedence: the buyer's own/concierge pick > the Twin's compiled role > the profile persona.
+  // IDENTITY HIERARCHY (P0): Nature > Identity > Business Type > Buying Behaviour.
   const canonicalBuyerType = (t?: BuyerTwin | null): string => {
     const tw = t ?? liveTwin();
-    return (form.buyerType || '').trim()
-      || (tw?.layer_a_identity?.business_type || '').trim()
-      || (buyerProfile?.persona || '').trim()
-      || '';
+    const nat = (buyerProfile?.nature || '').toLowerCase();
+    const natConf = buyerProfile?.natureConfidence ?? 0;
+    const pick = (form.buyerType || '').trim();
+    // A high-confidence, evidence-gated ACADEMIC / GOVERNMENT Nature is the TOP of the hierarchy. It
+    // outranks an LLM-guessed business_type AND a buyer-type pick that CONTRADICTS it ("Manufacturer" for
+    // an iitk.ac.in buyer — which only got picked because the nudge wrongly offered it). A DELIBERATE
+    // institutional pick still stands. Corporate / generic Nature falls through (a real manufacturer is
+    // untouched), where a user pick > the Twin's business_type > the profile persona.
+    const institutional = /academic|research/.test(nat) ? (buyerProfile?.authorityRole === 'procurement' ? 'Institution — Procurement' : 'Research / Academic Institution')
+      : /government|psu/.test(nat) ? 'Government / PSU' : '';
+    if (institutional && natConf >= 80) {
+      if (pick && /institut|research|academ|government|psu|college|univers|\blab\b|\bdept\b|department|faculty/i.test(pick)) return pick; // respect a deliberate institutional pick
+      return institutional; // Nature wins over a non-institutional pick / business_type guess
+    }
+    if (pick) return pick; // a user pick wins for non-institutional buyers
+    return (tw?.layer_a_identity?.business_type || '').trim() || (buyerProfile?.persona || '').trim() || '';
   };
   const twinContextLine = (t: BuyerTwin): string => {
     const lc = t.layer_c_commercial_intelligence;
@@ -3884,6 +4484,13 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // still need · what the AI saved. Reads the governed RU dims + the contradiction engine + spec list.
   const renderExecutiveView = () => {
     const dims = requirementUnderstanding();
+    // Phase C — formalised bucketing (tested in ceosummarytest) + a readiness% headline.
+    const ceo = buildCEOSummary({
+      dims: dims.map((d) => ({ label: d.dim, value: d.value, state: d.state, confidence: d.confidence, source: d.source })),
+      missingRequired: isqSpecs.filter((s) => !(form.dynamicSpecs[s.IM_SPEC_MASTER_DESC] || '').trim() && !coverage.current.isCovered(s.IM_SPEC_MASTER_DESC)).map((s) => s.IM_SPEC_MASTER_DESC),
+      conflicts: contradictions.filter((n) => !nudgeAnswers[n.type]).map((n) => n.evidence?.join(' · ') || n.question),
+      offProfile: !!buyerTwin && !!form.productName.trim() && buildTwinPlanInput(buyerTwin, form.productName).offProfile && !matchCategory(enrichment, form.productName),
+    });
     const know = dims.filter((d) => d.state === 'Confirmed');
     const think = dims.filter((d) => d.state === 'Likely');
     const weak = dims.filter((d) => d.state === 'Weak');
@@ -3905,6 +4512,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       <div className="border-2 border-slate-300 bg-white rounded-xl p-3 text-[12.5px] text-slate-800 space-y-2 shadow-sm">
         <p className="font-bold text-slate-900 text-[13px]">👔 Buyer snapshot</p>
         <div className="flex flex-wrap gap-2 -mt-0.5">
+          <span className="rounded-full bg-indigo-600 text-white font-bold px-2.5 py-0.5 text-[11px]">{ceo.readiness}% understood</span>
           <span className="rounded-full bg-emerald-600 text-white font-bold px-2.5 py-0.5 text-[11px]">Buyer effort reduced ~{effortPct}%</span>
           <span className="rounded-full bg-slate-700 text-white font-semibold px-2.5 py-0.5 text-[11px]">≈{followupsAvoided} seller follow-ups avoided</span>
         </div>
@@ -4009,6 +4617,333 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     );
   };
 
+  // ⏱ P1.5 DEPENDENCY TRACE — module timing & ordering. The acid test: planner.start must be AFTER
+  // category.done (hit or timed-out). If the planner started before category finished, category was
+  // too late to shape intent / spec-order / panel questions (the dry-run bug). Reads the ref live.
+  const renderDependencyTrace = () => {
+    const order = ['buyer', 'mcat', 'category', 'planner'] as const;
+    const rows = order.map((k) => ({ k, ...(moduleTrace.current[k] || {}) })).filter((r) => r.start != null || r.done != null || r.status);
+    if (!rows.length) return null;
+    const label: Record<string, string> = { buyer: 'Buyer Brain (pull)', mcat: 'MCAT resolve', category: 'Category Brain', planner: 'Planner' };
+    const fmt = (n?: number) => (n == null ? '…' : `${(n / 1000).toFixed(1)}s`);
+    const cat = moduleTrace.current.category; const plan = moduleTrace.current.planner;
+    // HONEST verdict: "consumed" requires the category to have actually HIT (data arrived) AND
+    // the planner to have run after that hit. A timed-out / still-building category sets cat.done
+    // (we gave up waiting) but delivered NOTHING — catCriticals(0) — so it must NOT read as a ✓.
+    // This is the dry-run finding: trace said "✓ planner ran after category" while the category
+    // was still building and zero criticals reached the planner.
+    const catDone = cat?.done; const planStart = plan?.start;
+    const plannerRan = planStart != null && cat?.start != null;
+    const catArrived = cat?.status === 'hit';
+    const ranAfter = catDone != null && planStart != null && planStart >= catDone;
+    const ranBefore = catDone != null && planStart != null && planStart < catDone;
+    // ChatGPT: "planner waited ≠ planner consumed." The planner stamps its criticals count into its
+    // own status ("planned (N category criticals)"). Read it LIVE so the verdict reflects ACTUAL
+    // consumption — a category can HIT and still contribute 0 criticals (a consumption bug, distinct
+    // from a timing/build one). catN: null = planner not run / unknown, 0 = hit-but-nothing-consumed.
+    const catN = (() => { const m = /\((\d+)\s+category critical/.exec(plan?.status || ''); return m ? Number(m[1]) : null; })();
+    let vTone = 'text-amber-600'; let vText = '… planner has not run yet';
+    if (plannerRan) {
+      if (catArrived && ranAfter) {
+        if (catN === 0) { vTone = 'text-amber-600'; vText = '⚠ category HIT but 0 criticals consumed — shape unchanged (see window.__categoryConsumed)'; }
+        else { vTone = 'text-emerald-700'; vText = `✓ category consumed — ${catN ?? 'N'} criticals shaped the questions`; }
+      }
+      else if (ranBefore) { vTone = 'text-red-600'; vText = '⚠ planner ran BEFORE category resolved'; }
+      else { vTone = 'text-amber-600'; vText = `⚠ category NOT consumed (${cat?.status || '—'}) — questions are buyer + ISQ only`; }
+    }
+    // The explicit YES/NO signal ChatGPT asked for — separate from "did the planner WAIT?".
+    const consumed = catArrived && ranAfter && (catN == null || catN > 0);
+    return (
+      <div className="border border-cyan-300 bg-cyan-50 rounded-xl p-3 text-[11px] text-cyan-900 space-y-0.5">
+        <p className="font-bold">⏱ Dependency Trace — module timing &amp; ordering <span className={vTone}>{vText}</span></p>
+        {rows.map((r) => (
+          <p key={r.k}><b>{label[r.k] || r.k}</b> · start {fmt(r.start)} → done {fmt(r.done)}{r.status ? ` · ${r.status}` : ''}{r.waited ? ` · waited: ${r.waited}` : ''}</p>
+        ))}
+        {plannerRan && <p className="font-semibold">Planner consumed category: <span className={consumed ? 'text-emerald-700' : 'text-red-600'}>{consumed ? `YES (${catN ?? 'N'} criticals)` : 'NO'}</span> · waited ≠ consumed</p>}
+        <p className="text-cyan-500">Rule: category must HIT (data arrived) AND planner.start ≥ that hit AND criticals &gt; 0 → it shaped the questions. Waiting or a timed-out/building category contributes nothing. window.__moduleTrace · window.__categoryConsumed</p>
+      </div>
+    );
+  };
+
+  // 🕸 QUESTION GRAPH (Phase C) — which specs the intent already answers (asked once, not twice).
+  const renderQuestionGraph = () => {
+    const g = questionGraph;
+    if (!g.implied.length) return null;
+    return (
+      <div className="border border-violet-300 bg-violet-50 rounded-xl p-3 text-[11px] text-violet-900 space-y-0.5">
+        <p className="font-bold">🕸 Question Graph — intent ⟹ implied specs (dedup: asked once, not twice)</p>
+        {g.implied.map((i) => (
+          <p key={i.specId}><b>{i.specName}</b> = <span className="text-emerald-700 font-semibold">{i.impliedValue}</span> · implied by intent “{i.viaValue}” · {i.confidence}% → prefilled, not re-asked</p>
+        ))}
+      </div>
+    );
+  };
+
+  // 🏭 CATEGORY CONSUMPTION — the richer v13 layers actually shaping this RFQ (proactive checks from
+  // deal_blockers, applications from intent_patterns, category-grounded budget bands). Debug-visible proof.
+  const renderCategoryConsumption = () => {
+    const cc = categoryConsumed;
+    const conf = categoryConf;
+    // Show whenever a category verdict exists (hit) — even an EMPTY one — so the gate decision and
+    // buyer-only fallback are visible, not silently absent.
+    if (categoryStatus !== 'hit' && !cc.checks.length && !cc.applications.length && !cc.bands) return null;
+    const bandColor = conf.band === 'rich' ? 'text-emerald-700' : conf.band === 'thin' ? 'text-amber-700' : 'text-red-600';
+    return (
+      <div className="border border-amber-300 bg-amber-50 rounded-xl p-3 text-[11px] text-amber-900 space-y-0.5">
+        <p className="font-bold">🏭 Category consumption (v13 layers) <span className={bandColor}>· {conf.score}/100 {conf.band.toUpperCase()} → {conf.fuse ? 'consume + fuse' : conf.consume ? 'consume only' : 'IGNORE (buyer-only)'}</span></p>
+        <p className="text-amber-600">{categoryConfidenceLine(conf)}</p>
+        {conf.consume ? (
+          <>
+            {cc.checks.length || cc.applications.length || cc.bands ? <p className="text-amber-700">{formatCategoryConsumption(cc.checks, cc.applications, cc.bands)}</p> : null}
+            {cc.checks.map((c) => <p key={c.kind}>• proactive [{c.kind} · {c.frequency}%] → planner: {c.label}</p>)}
+            {cc.bands ? <p>• budget bands → planner (verbatim): {cc.bands.join(' · ')}</p> : null}
+            {cc.applications.length ? <p>• applications → intent: {cc.applications.slice(0, 4).join(' · ')}{cc.loadSizingRelevant ? ' · (load-sizing relevant)' : ''}</p> : null}
+          </>
+        ) : <p className="text-red-600 font-semibold">category empty/untrustworthy → NOT shaping this RFQ (buyer intelligence only)</p>}
+      </div>
+    );
+  };
+
+  // 🏅 CANDIDATE LEADERBOARD — EVERY category insight, ranked by seller-frequency, with its
+  // DISPOSITION (asked / spec / intent / last-page / known / deprioritised + why). Answers
+  // "why wasn't Site-Ready asked?" deterministically — it shows where each insight actually went.
+  const renderCategoryDisposition = () => {
+    if (categoryStatus !== 'hit' || !categoryConf.consume) return null;
+    const known = coverage.current.facts().filter((f) => f.status === 'active' || f.status === 'confirmed').map((f) => (f.concept || '').replace(/_/g, ' '));
+    const board = categoryLeaderboard({
+      criticals: resolvedRequirement.criticalRanked,
+      blockers: categoryConsumed.checks.map((c) => ({ label: c.label, kind: c.kind, frequency: c.frequency })),
+      applications: categoryConsumed.applications,
+      askedLabels: dynQuestions.filter((q) => q.source === 'llm').map((q) => q.label),
+      specNames: isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC).filter(Boolean),
+      intentValue: requirementIntent?.value || '',
+      knownConcepts: known,
+    });
+    if (!board.length) return null;
+    (window as unknown as { __leaderboard?: unknown }).__leaderboard = board;
+    const dc: Record<string, string> = { ASKED: 'text-emerald-700', SPEC: 'text-teal-700', INTENT: 'text-blue-700', LAST_PAGE: 'text-indigo-700', KNOWN: 'text-slate-500', DEPRIORITIZED: 'text-rose-600' };
+    return (
+      <div className="border border-amber-300 bg-amber-50 rounded-xl p-3 text-[11px] text-amber-900 space-y-0.5">
+        <p className="font-bold">🏅 Category Candidate Leaderboard — ranked + disposition <span className="font-normal text-amber-600">({dispositionSummary(board)})</span></p>
+        {board.map((r, i) => (
+          <p key={i}>{String(i + 1).padStart(2)}. <b>{r.name}</b> <span className="text-amber-500">[{r.kind} · freq {r.priority}]</span> → <span className={dc[r.disposition] || ''}>{r.disposition}</span> · {r.reason}{r.coveredBy && r.disposition !== 'DEPRIORITIZED' ? ` (${r.coveredBy})` : r.coveredBy ? ` → ${r.coveredBy}` : ''}</p>
+        ))}
+        <p className="text-amber-400">Every category insight traces to a disposition. Panel cap is 3 → high-freq non-spec blockers compete; lower ones DEPRIORITIZED. window.__leaderboard</p>
+      </div>
+    );
+  };
+
+  // 🔗 REASON-CHAIN — decision provenance per question (the "why this, why not that" view that
+  // takes this past a LangSmith trace). Pure UNIFICATION of signals that already exist (planner
+  // reasons + resolver subtraction + question-graph implications + coverage registry + category) —
+  // NO new intelligence. Answers, for THIS RFQ: what was asked & because-of-what, and what was
+  // suppressed & because-of-what.
+  const renderReasonChain = () => {
+    const asked = dynQuestions.filter((q) => q.source === 'llm');
+    const cov = coverage.current;
+    const known = cov.facts().filter((f) => f.status === 'active' || f.status === 'confirmed');
+    const implied = questionGraph.implied || [];
+    const rr = resolvedRequirement;
+    const catRich = categoryConf.fuse;
+    if (!asked.length && !known.length && !implied.length && !rr.knownDropped.length) return null;
+    // for an asked question, assemble its "because" reasons from every contributing signal.
+    const becauseFor = (label: string, reason?: string, groundedIn?: string, genBy?: string): string[] => {
+      const why: string[] = [];
+      const crit = rr.criticalRanked.find((c) => (c.maps_to_isq || c.name || '').toLowerCase() === label.toLowerCase() || (c.name || '').toLowerCase() === label.toLowerCase());
+      if (crit && categoryConf.consume) why.push(`category-critical (seller freq ${crit.seller_frequency ?? '—'}${catRich ? ', rich' : ''})`);
+      const blk = categoryConsumed.checks.find((c) => reason && reason.toLowerCase().includes(c.kind));
+      if (blk) why.push(`category deal-blocker [${blk.kind} ${blk.frequency}%]`);
+      if (genBy === 'planner') why.push('planner');
+      else if (genBy === 'refine') why.push('refined from prior answers');
+      else if (genBy === 'generator') why.push('seller-question generator');
+      if (groundedIn) why.push(`grounded: ${groundedIn.replace(/^\(reason\)\s*/, '')}`);
+      else if (reason) why.push(reason);
+      return why.length ? why : ['(no recorded grounding)'];
+    };
+    return (
+      <div className="border border-fuchsia-300 bg-fuchsia-50 rounded-xl p-3 text-[11px] text-fuchsia-900 space-y-1">
+        <p className="font-bold">🔗 Reason-Chain — why each question (decision provenance · unifies planner · resolver · graph · registry · category)</p>
+        <p className="font-semibold text-emerald-800">ASKED ({asked.length}) <span className="font-normal text-fuchsia-400">— click a question to expand its reasons</span></p>
+        {asked.map((q) => {
+          const open = reasonOpen.has(q.id);
+          const reasons = becauseFor(q.label, q.reason, q.groundedIn, q.genBy);
+          return (
+            <div key={q.id} className="pl-2">
+              <button type="button" onClick={() => setReasonOpen((s) => { const n = new Set(s); if (n.has(q.id)) n.delete(q.id); else n.add(q.id); return n; })} className="text-left font-semibold text-fuchsia-800 hover:underline">
+                {open ? '▼' : '▶'} {q.label.replace(/\s*\?$/, '')}
+              </button>
+              {open ? <div className="pl-4 pb-1"><p className="text-emerald-700">Asked because:</p>{reasons.map((r, i) => <p key={i} className="pl-2">✓ {r}</p>)}</div>
+                : <span className="text-fuchsia-400"> — {reasons.length} reason{reasons.length === 1 ? '' : 's'}</span>}
+            </div>
+          );
+        })}
+        {asked.length === 0 && <p className="pl-2 text-fuchsia-400">— no planner questions (buyer fully known, or off-profile lead)</p>}
+        <p className="font-semibold text-rose-700">SUPPRESSED — asked of others, not you</p>
+        {implied.map((i) => (
+          <p key={`imp-${i.specId}`} className="pl-2"><b>{i.specName}</b> — not asked: implied by intent “{i.viaValue}” → {i.impliedValue} ({i.confidence}%)</p>
+        ))}
+        {rr.knownDropped.map((d) => {
+          const f = known.find((k) => (k.concept || '').replace(/_/g, ' ').toLowerCase() === d.toLowerCase());
+          return <p key={`kd-${d}`} className="pl-2"><b>{d}</b> — not asked: already known{f ? ` (${f.value} · ${f.source})` : ''}</p>;
+        })}
+        {rr.knownInSchema.map((k) => (
+          <p key={`kis-${k}`} className="pl-2"><b>{k}</b> — not asked: buyer memory (answered before, no category needed)</p>
+        ))}
+        {!implied.length && !rr.knownDropped.length && !rr.knownInSchema.length && <p className="pl-2 text-fuchsia-400">— nothing suppressed yet (no known facts to subtract)</p>}
+        <p className="text-fuchsia-400">Every question traces to a signal; every suppression traces to a known fact or an intent implication.</p>
+      </div>
+    );
+  };
+
+  // 🧾 RFQ DECISION AUDIT — the measure half: did the intelligence actually reduce questions /
+  // reuse what we knew? Computed from live state (no new LLM). ChatGPT: "mandatory."
+  const renderScorecard = () => {
+    const facts = resolvedRequirement.registryFacts.length;
+    const conv = convSignals.signals.length;
+    const repostMatched = repostSource ? Object.values(repostMeta).filter((m) => !m.custom).length : 0;
+    // P1 RECONCILE — count the SAME work the AI-Impact panel does (was 0/34 vs AI-Impact's 7). Every
+    // avoided question is the engine USING a known fact instead of asking: engine-filled specs
+    // (twin/cascade/autofill) ∪ planner twin-skips ∪ deduced logistics ∪ resolver subtraction
+    // (knownDropped + knownInSchema) ∪ repost ∪ a consumed location pref — deduped where they overlap.
+    const engineSpecs = new Set<string>([...enrichedSpecs, ...cascadeSpecs, ...autoFilledSpecs]);
+    const twinSkipped = reqPlan?.twinResolved?.length || 0;
+    const deducedCount = Object.values(deducedLogistics).filter((d) => d && d.value && (d.confidence || 0) >= 0.8).length;
+    const resolverAvoided = new Set<string>([...resolvedRequirement.knownDropped, ...resolvedRequirement.knownInSchema].map((s) => s.toLowerCase())).size;
+    const questionsAvoided = engineSpecs.size + twinSkipped + deducedCount + resolverAvoided + repostMatched + (convSignals.locationPreference ? 1 : 0);
+    const autoFilled = engineSpecs.size + deducedCount;
+    // A2 HONESTY: factsUsed counts EVERY kind of consumption, not just avoided questions (the old
+    // "2/44 used" lie). Category criticals that shaped specs, conversational signals, the locked intent
+    // and the buyer persona ALL count. tallyUtilization grows the knowable base by the same category
+    // contribution so the ratio stays meaningful. Mirrors the AI-Impact panel's accounting.
+    const categoryConsumedNow = categoryStatus === 'hit' && categorySellerQs().length > 0;
+    const { factsUsed, factsAvailable } = tallyUtilization({
+      questionsAvoided,
+      conversationalSignalsUsed: conv,
+      categoryCriticalsUsed: categoryConsumedNow ? Math.min(categorySellerQs().length, 15) : 0,
+      categoryEnhancers: categoryConsumedNow ? ((categoryConsumed.bands ? 1 : 0) + Math.min(categoryConsumed.checks.length, 3)) : 0,
+      intentUsed: requirementIntent?.value ? 1 : 0,
+      personaUsed: buyerProfile && reqPlan ? 1 : 0,
+      registryFacts: facts,
+      conversationalAvailable: conv,
+      isqSpecs: isqSpecs.length,
+    });
+    // A3 RECONCILE: count only UNRESOLVED cross-signal conflicts (a nudge the buyer answered is no
+    // longer "open"). These are the contradiction NUDGES — distinct from the requirement-dim
+    // "Contradicted" state in the verification dashboard; the scorecard line is relabelled to say so.
+    const openConflicts = contradictions.filter((n) => !nudgeAnswers[n.type]).length;
+    const sc = scoreRFQ({
+      factsAvailable, factsUsed,
+      questionsAsked: (lockedSpecOrder ?? computeSpecOrder(false)).length,
+      questionsAvoided, autoFilled,
+      contradictions: openConflicts,
+      locationPreferenceReused: !!convSignals.locationPreference,
+      prevRequirementReused: !!repostSource || facts > 0,
+      // "Used" = category HIT *and* it actually produced criticals (parsed → non-empty). A hit with
+      // empty/malformed critical_specs honestly reads "No" — so this matches the trace's "consumed"
+      // line instead of the weaker "did it merely arrive?". (waited ≠ consumed.)
+      categoryIntelUsed: categoryConsumedNow,
+      buyerIntelUsed: !!requirementBrain,
+      conversationalSignalsUsed: conv,
+    });
+    const gradeColor = sc.grade === 'A' ? 'text-emerald-700' : sc.grade === 'B' ? 'text-teal-700' : sc.grade === 'C' ? 'text-amber-700' : 'text-red-600';
+    return (
+      <div className="border border-slate-300 bg-slate-50 rounded-xl p-3 text-[11px] text-slate-800 space-y-0.5">
+        <p className="font-bold">🧾 RFQ Decision Audit — is the intelligence helping? <span className={gradeColor}>{sc.grade} · {sc.confidence}%</span></p>
+        {sc.lines.map((l, i) => <p key={i} className="text-slate-600">• {l}</p>)}
+        <p className="text-slate-400">utilization = facts used ÷ known · category intel is an enhancer (last 20–30%), NOT a gate — note this scores even while category is “{categoryStatus}”.</p>
+      </div>
+    );
+  };
+
+  // 🎓 RFQ EVALS — the quality layer (was this GOOD?), distinct from the harnesses (is it CORRECT?)
+  // and the scorecard (did intelligence get USED?). Scores Question / Category / Fusion / Planner
+  // quality so a "valid but mediocre" RFQ can't hide. Live + window.__rfqEval for over-time tracking.
+  const renderEvals = () => {
+    const llmQs = dynQuestions.filter((q) => q.source === 'llm');
+    if (!reqPlan && !llmQs.length && categoryStatus !== 'hit') return null;
+    const specNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC).filter(Boolean);
+    const qq = questionQualityEval({ questions: llmQs.map((q) => ({ label: q.label, grounded: !!(q.groundedIn || q.reason), optionCount: (q.options || []).length, tier: q.tier })), specNames, maxCards: 3 });
+    // INTENT QUALITY — scores the first-page decision off deriveIntent's self-ranked candidates (specificity + margin + alignment).
+    const iq = intentQualityEval({ chosen: requirementIntent?.value || null, candidates: intentCandidatesRef.current || [] });
+    const cq = categoryQualityEval(categoryConf.score, categoryConf.band);
+    const fusionFired = categoryConf.fuse && categoryConsumed.applications.length > 0;
+    const buyerHasOperation = !!(buyerProfile?.persona || buyerTwin?.layer_a_identity?.business_type || requirementBrain);
+    const fq = fusionQualityEval({ band: categoryConf.band, fusionFired, buyerHasOperation });
+    const groundedQ = llmQs.filter((q) => !!(q.groundedIn || q.reason)).length;
+    const pq = plannerQualityEval({ archetype: reqPlan?.archetype, hasLead: !!reqPlan?.lead, mustHaveCount: reqPlan?.mustHaveSpecs?.length || 0, questionCount: llmQs.length, groundedQuestions: groundedQ });
+    const ev = evaluateRFQ([qq, iq, cq, fq, pq]);
+    // BUSINESS EVALS (proxy / leading indicators) — "is this a good RFQ / lead?", from the RFQ shape.
+    const mustHaves = reqPlan?.mustHaveSpecs || [];
+    const mustFilled = mustHaves.filter((s) => (form.dynamicSpecs[s] || '').trim() || coverage.current.isCovered(s)).length;
+    const openConf = contradictions.filter((n) => !nudgeAnswers[n.type]).length;
+    const verified = !!buyerTwin?.layer_a_identity?.verified;
+    const isBiz = /business|manufactur|trader|retail|resell|distributor|wholesal/i.test(`${buyerProfile?.persona || ''} ${form.buyerType || ''}`);
+    const engagement = Math.round((buyerTwin?.twin_confidence?.overall_score ?? 0) / 10);
+    const rq = rfqQualityEval({ mustHaveTotal: mustHaves.length, mustHaveFilled: mustFilled, hasQuantity: !!String(form.quantity || '').trim(), hasIntent: !!requirementIntent?.value, hasLocation: !!(form.deliveryLocation || '').trim(), identityVerified: verified, openContradictions: openConf });
+    const lq = leadQualityEval({ identityVerified: verified, hasCompany: isBiz, hasGST: form.gstRegistered === true, maturity: buyerProfile?.maturity || '', intentLocked: !!requirementIntent?.locked, engagementSignals: engagement });
+    // OUTCOME (predicted, leading) — grounded in the buyer's real deal_readiness (a PNS 'behavior' fact).
+    const dealReadiness = resolvedRequirement.registryFacts.find((f) => /deal.?readiness/i.test(f.key || ''))?.value;
+    const rfqComplete = mustHaves.length > 0 && mustFilled >= mustHaves.length;
+    const oc = outcomeEval({ dealReadiness, rfqComplete, openBlockers: openConf, buyerEngagement: engagement, intentLocked: !!requirementIntent?.locked });
+    const bizEv = evaluateRFQ([rq, lq, oc]);
+    (window as unknown as { __rfqEval?: unknown }).__rfqEval = { system: ev, business: bizEv };
+    // EVAL-OVER-TIME: persist this run once per distinct eval state (drift visible across versions).
+    const logSig = `${ev.pct}:${bizEv.pct}:${step}:${form.productName}`;
+    if (step >= 1 && evalLogSig.current !== logSig) {
+      evalLogSig.current = logSig;
+      pushEvalRun({ ts: Date.now(), product: form.productName, promptsVersion: PROMPTS_VERSION, systemPct: ev.pct, businessPct: bizEv.pct, outcomeScore: oc.score, categoryBand: categoryConf.band });
+    }
+    const trend = evalTrend(getEvalRuns());
+    const gradeC = (g: string) => g === 'A' ? 'text-emerald-700' : g === 'B' ? 'text-teal-700' : g === 'C' ? 'text-amber-700' : 'text-red-600';
+    const dimRow = (d: { name: string; score: number; max: number; note: string }) => { const dc = d.score >= d.max * 0.8 ? 'text-emerald-700' : d.score >= d.max * 0.5 ? 'text-amber-700' : 'text-red-600'; return <p key={d.name}>• <b>{d.name}</b> <span className={dc}>{d.score}/{d.max}</span> — {d.note}</p>; };
+    return (
+      <div className="border border-indigo-300 bg-indigo-50 rounded-xl p-3 text-[11px] text-indigo-900 space-y-0.5">
+        <p className="font-bold">🎓 RFQ Evals — SYSTEM quality (was it GOOD?), not regression <span className={gradeC(ev.grade)}>{ev.grade} · {ev.pct}%</span></p>
+        {ev.dimensions.map(dimRow)}
+        {ev.issues.length ? <p className="text-red-600">⚠ {ev.issues.length} dimension(s) below bar — the eval catches “valid but mediocre” that the harness passes</p> : <p className="text-emerald-700">✓ all dimensions above bar</p>}
+        <p className="font-bold pt-1">📈 BUSINESS evals — leading indicators + grounded outcome <span className={gradeC(bizEv.grade)}>{bizEv.grade} · {bizEv.pct}%</span></p>
+        {bizEv.dimensions.map(dimRow)}
+        {trend.runs > 1 ? <p className="font-semibold pt-1">📉 Eval-over-time: {trend.runs} runs @ {PROMPTS_VERSION} · avg system {trend.avgSystem}% · business {trend.avgBusiness}% · drift {trend.systemDelta >= 0 ? '+' : ''}{trend.systemDelta} · <span className={trend.regression ? 'text-red-600' : 'text-emerald-700'}>{trend.regression ? '⚠ version regression' : 'stable'}</span></p> : null}
+        <p className="text-indigo-400">RFQ/Lead Quality = leading indicators (RFQ shape) · Outcome = predicted from real deal_readiness (PNS) — NOT a measured post-RFQ outcome (needs seller-response/conversion pipeline). window.__rfqEval · window.__evalLog</p>
+      </div>
+    );
+  };
+
+  // 📋 NODE LOGS — per-module input · output · latency · confidence (the LangSmith-grade log layer
+  // that was missing). Unifies moduleTrace (latency) + the live state (in/out/confidence) + the LLM
+  // call health (model · ms · bytes · ok). Answers "what did each node receive, return, and how long".
+  const renderNodeLogs = () => {
+    const mt = moduleTrace.current;
+    const llm = getLLMHealth();
+    const lat = (e?: { start?: number; done?: number }) => (e?.start != null && e?.done != null ? `${((e.done - e.start) / 1000).toFixed(1)}s` : e?.start != null ? '…running' : '—');
+    const facts = resolvedRequirement.registryFacts.length;
+    const llmQs = dynQuestions.filter((q) => q.source === 'llm').length;
+    const nodes = [
+      { name: 'Buyer Brain', input: 'glid pull', output: `${buyerProfile?.persona || enrichment?.persona?.type || '?'} · ${facts} facts`, conf: buyerTwin?.twin_confidence?.overall_score, lat: lat(mt.buyer) },
+      { name: 'MCAT resolve', input: form.productName || '—', output: form.mcatId || '(unresolved)', conf: undefined as number | undefined, lat: lat(mt.mcat) },
+      { name: 'Category Brain', input: `mcat ${form.mcatId || '—'}`, output: `${categorySellerQs().length} criticals · ${categoryConf.band} · ${categoryIntel ? ((categoryIntel as Record<string, unknown>).category_confidence ? 'distill-v15+' : 'distill-pre-v15') : 'no-build'}`, conf: categoryConf.score, lat: lat(mt.category) },
+      { name: 'Planner', input: 'product + twin + category', output: `${reqPlan?.archetype || '—'} · ${llmQs} cards`, conf: undefined as number | undefined, lat: lat(mt.planner) },
+    ].filter((n) => n.lat !== '—');
+    if (!nodes.length && !llm.length) return null;
+    // Cost/token roll-up (ChatGPT C): tokens + est USD across all LLM calls, + category cache hit/miss.
+    const totTok = llm.reduce((s, c) => s + (c.promptTokens || 0) + (c.completionTokens || 0), 0);
+    const totReason = llm.reduce((s, c) => s + (c.reasoningTokens || 0), 0);
+    const totCost = llm.reduce((s, c) => s + (c.costUsd || 0), 0);
+    const cacheState = categoryStatus === 'hit' ? 'HIT' : categoryStatus === 'building' ? 'MISS (building)' : categoryStatus === 'error' ? 'ERROR' : categoryStatus;
+    (window as unknown as { __nodeLogs?: unknown }).__nodeLogs = { nodes, llm, totals: { tokens: totTok, reasoningTokens: totReason, costUsd: totCost, calls: llm.length, categoryCache: cacheState } };
+    return (
+      <div className="border border-slate-400 bg-white rounded-xl p-3 text-[11px] text-slate-800 space-y-0.5">
+        <p className="font-bold">📋 Node Logs — input · output · latency · confidence</p>
+        {nodes.map((n) => <p key={n.name}>• <b>{n.name}</b> · {n.lat} · in: {n.input} · out: {n.output}{n.conf != null ? ` · conf ${n.conf}` : ''}</p>)}
+        <p className="font-semibold pt-1">💰 Totals: {llm.length} LLM calls · {totTok.toLocaleString()} tokens{totReason ? ` (${totReason.toLocaleString()} reasoning)` : ''} · ~${totCost.toFixed(4)} · category cache: {cacheState}</p>
+        <p className="font-semibold pt-1">LLM calls ({llm.length}) — label@version · model · latency · tokens(in→out) · ~cost</p>
+        {llm.slice(-12).map((c, i) => <p key={i} className={c.ok ? '' : 'text-red-600'}>• {c.label}<span className="text-slate-400">@{c.promptVersion || '?'}</span> · {(c.model || '').replace('google/', '')} · {c.ms}ms · {(c.promptTokens || 0)}→{(c.completionTokens || 0)}tok{c.reasoningTokens ? ` (${c.reasoningTokens}r)` : ''} · ~${(c.costUsd || 0).toFixed(4)} · {c.ok ? 'ok' : 'FAIL ' + c.status}</p>)}
+        {llm.length === 0 ? <p className="text-slate-400">— no LLM calls yet</p> : null}
+        <p className="text-slate-400">rates approx (relative cost, not billing) · window.__nodeLogs · window.__llmHealth</p>
+      </div>
+    );
+  };
+
   const renderOptionProvenance = () => {
     const qs = dynQuestions.filter((q) => q.source === 'llm');
     if (!qs.length && !reqPlan && !repostSource) return null;
@@ -4016,6 +4951,16 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       <div className="border border-violet-200 bg-violet-50 rounded-xl p-3 text-[11px] text-violet-900 space-y-1">
         <p className="font-bold">🧭 Option Provenance — non-spec questions must derive from the registry (A1)</p>
         {(() => { const rm = requirementMode(); return <p className="text-violet-700">🧠 Requirement Mode (R): <b>{rm.mode}</b> · payment-lean <b>{rm.paymentLean}</b> <span className="text-violet-400">— {rm.descriptor || 'awaiting qty/intent'} · EPHEMERAL (this order only; persona is a prior, not the driver)</span></p>; })()}
+        {/* The governance engines (Transfer · Consumption · Consistency · Completeness · Procurement) — shown HERE on the spec page where the product context exists (they're current-requirement signals). */}
+        {(() => { const td = transferDecision(); if (!td.transfer.length && !td.withhold.length) return null; const byTier = (t: string) => td.transfer.filter((i) => i.tier === t).length; const c = consume(td.transfer, { archetype: reqPlan?.archetype, orderScale: classifyOrderScale(form.quantity, form.unit).band }); return (<>
+          <p className="text-sky-700">🧠 Transfer: relatedness <b>{td.relatedness}/100</b> → {td.categoryTransfers ? 'category intel CARRIES' : 'category intel WITHHELD'} · carries A:{byTier('A')} B:{byTier('B')} C:{byTier('C')} · {td.withhold.filter((i) => i.tier === 'D').length} product-specs never portable</p>
+          <p className="text-teal-700">🎚 Consumption: process <b>{c.processMatters ? 'MATTERS' : 'minimal'}</b> → drivers [{c.drivers.map((d) => d.key.replace(/^(history|theme):\s*/, '')).slice(0, 6).join(', ') || 'none'}] · quiet [{c.quiet.map((q) => q.key.replace(/^(history|theme):\s*/, '')).join(', ') || 'none'}]</p>
+        </>); })()}
+        {(() => { const rm2 = requirementMode(); const conflicts = checkConsistency({ buyerKind: page1Choice, buyerType: canonicalBuyerType(), journey: requirementIntent?.journey, orderScaleBand: classifyOrderScale(form.quantity, form.unit).band, orderScaleImplication: coverage.current.coveredBy('order scale')?.value || '', requirementMode: rm2.mode, paymentLean: rm2.paymentLean, installation: coverage.current.coveredBy('installation support')?.value || '' }); return <p className={conflicts.length ? 'text-red-600' : 'text-emerald-600'}>🧪 Consistency: {conflicts.length ? `${conflicts.length} CONFLICT — ${conflicts.map((cf) => cf.a + ' ✕ ' + cf.b).join(' · ')}` : '✓ facts coexist'}</p>; })()}
+        {(() => { const comp = scoreCompleteness({ mustHaveSpecs: reqPlan?.mustHaveSpecs || [], allSpecNames: isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC), isFilled: (n) => !!(form.dynamicSpecs[n] || '').trim() || coverage.current.isCovered(n), hasQuantity: !!(form.quantity || '').trim(), hasIntent: !!(requirementIntent?.value || '').trim() || coverage.current.isCovered('intent') }); return <p className={comp.sellerReady ? 'text-emerald-700' : 'text-orange-600'}>📊 Completeness: <b>{comp.pct}%</b> {comp.sellerReady ? '✓ seller-ready — STOP asking' : `· still needed: ${comp.missingRequired.join(', ')}`} · {comp.optional.length} optional</p>; })()}
+        {(() => { const pc = classifyProcurement({ nature: buyerProfile?.nature, authorityRole: buyerProfile?.authorityRole, journey: requirementIntent?.journey || undefined, intentText: requirementIntent?.value || undefined, orderScaleBand: classifyOrderScale(form.quantity, form.unit).band, requirementMode: requirementMode().mode }); if (pc.context === 'unknown') return null; return <p className="text-amber-700">🏷 Procurement: <b>{pc.label}</b> · GST {pc.implications.gstLikely ? 'needed' : 'not needed'} · approval: {pc.implications.approvalFlow}</p>; })()}
+        {(() => { const rb = resolvedRequirement; if (!requirementBrain) return <p className="text-fuchsia-400">🧩 Requirement Brain (n8n v12): not in this pull — resolver wired & degrading to planner order. Deploy v12 to feed it.</p>; return <p className="text-fuchsia-700">🧩 Requirement Brain: {rb.criticalRanked.length} category criticals · ask [{rb.ask.slice(0, 6).join(', ') || 'none'}]{rb.knownDropped.length ? <> · <span className="text-emerald-700">NOT asking (known): {rb.knownDropped.join(', ')}</span></> : ''}{rb.addedSpecs.length ? ` · +added: ${rb.addedSpecs.join(', ')}` : ''}{rb.knownInSchema.length ? <> · <span className="text-emerald-700">reuse {rb.knownInSchema.length} known (no category needed): {rb.knownInSchema.join(', ')}</span></> : ''} · {rb.registryFacts.length} facts · <span className={categoryStatus === 'hit' ? 'text-emerald-700' : categoryStatus === 'building' ? 'text-indigo-600' : 'text-fuchsia-400'}>category {categoryStatus}</span></p>; })()}
+        {convSignals.signals.length ? <p className="text-rose-700">💬 Conversational ({convSignals.signals.length}): {formatConvSignals(convSignals)}{convSignals.locationPreference ? <> · <span className="font-semibold">location pref: {convSignals.locationPreference}</span></> : ''}</p> : null}
         {repostSource && (() => { const ms = Object.values(repostMeta); const matched = ms.filter((m) => !m.custom).length; const custom = ms.filter((m) => m.custom).length; return <p className="text-teal-700">🔁 Re-post (P): <b>{repostSource.title}</b> from {agoLabel(repostSource.recencyDays)} · {matched} spec{matched === 1 ? '' : 's'} prefilled + {custom} drift-added · intent SKIPPED · cadence=recurring (History, auth 75)</p>; })()}
         <p className="text-violet-500">Spec fields + their options = IndiaMART ISQ API [exempt]. EVERY other question/chip must be grounded in qty / category / profile / history.</p>
         {qs.length ? qs.map((q) => (
@@ -4030,21 +4975,25 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     );
   };
 
-  // Run World/OSINT with the SYNTHETIC demo provider so the World→Verified→Twin stitch is visible
-  // without a real backend (and without compiling any real person). Uses the REAL seed from the pull
-  // (company/city) so the anti-bogus anchor is genuine; only the OSINT result is synthetic ([DEMO]).
+  // Run World/OSINT via the REAL Firecrawl web search — fired post-product so the query carries the
+  // richest anchors (company/name + city + industry). Returns traceable source URLs, never a fabricated
+  // profile. A wired window.__osintProvider would override it with a different backend.
   const runWorldDemo = async () => {
     const b = enrichment?.buyer;
     const seed: ExternalSeed = {
       mobile: b?.mobile,
       companyName: b?.companyName || (form.additionalDetails || '').trim() || undefined,
+      gstin: b?.gst,
+      udyam: b?.udyam,
       website: b?.website,
       name: b?.fullName || b?.firstName,
       city: b?.city || enrichment?.cslCity,
+      industry: (form.productName || '').trim() || undefined, // product = a disambiguating anchor for OSINT
       glid: enrichment?.glid || glidInput || undefined,
     };
     try {
-      const res = await runExternal(seed, { nowIso: new Date().toISOString(), osintFn: osintDemoProvider });
+      const wp = (window as unknown as { __osintProvider?: (s: ExternalSeed) => Promise<WorldOsint> }).__osintProvider;
+      const res = await runExternal(seed, { nowIso: new Date().toISOString(), osintFn: typeof wp === 'function' ? wp : firecrawlOsint });
       setExternal(res);
       const w = window as unknown as { __ebi?: unknown; __externalSeed?: unknown };
       w.__ebi = { externalEvidenceLedger: res.externalEvidenceLedger, sources: res.sources, gate: res.gate, ran_at: res.ranAt, crossValidation: res.crossValidation };
@@ -4054,13 +5003,13 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   };
   const renderExternalPullHealth = () => {
     const demoBtn = (
-      <button type="button" onClick={runWorldDemo} className="rounded-full border border-fuchsia-300 px-2 py-0.5 text-fuchsia-700 hover:bg-fuchsia-100 font-medium">▶ Run World OSINT (demo)</button>
+      <button type="button" onClick={runWorldDemo} className="rounded-full border border-fuchsia-300 px-2 py-0.5 text-fuchsia-700 hover:bg-fuchsia-100 font-medium">▶ Run World search (Firecrawl)</button>
     );
     if (!external) {
       return (
         <div className="border border-fuchsia-200 bg-fuchsia-50 rounded-xl p-3 text-[11px] text-fuchsia-900 space-y-1">
           <p className="font-bold">🌐 External Pull Health — Befisc · Sign3 · World</p>
-          <p className="text-fuchsia-600">No external run yet. {demoBtn} <span className="text-fuchsia-400">— synthetic OSINT to SEE the World → Verified → Twin/registry stitch end-to-end; wire <b>window.__osintProvider</b> to a real WebSearch/backend for live data.</span></p>
+          <p className="text-fuchsia-600">No external run yet. {demoBtn} <span className="text-fuchsia-400">— REAL web search via Firecrawl (proxied, key server-side); returns traceable source URLs. Override with <b>window.__osintProvider</b> for a different backend.</span></p>
         </div>
       );
     }
@@ -4126,7 +5075,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         ) : (
           <p className="text-fuchsia-400">No Verified external facts recorded yet — run World (demo) above, or wire a real provider.</p>
         ); })()}
-        <p className="text-fuchsia-400">Stitch rule: ONLY structured government-grade truths (GST/HSN/Udyam/NIC, anti-bogus-gated) → recorded as <b>Verified</b> facts → feed the planner/Truth-Table. <b>World/OSINT + Befisc/Sign3 identity stay OBSERVED-only</b> (shown here, NOT a planning input) — a web match on a generic name could be the wrong company; World graduates to Verified only once confidence-scored (post-pilot). mobile→GST→HSN chain (Part C). World runs via window.__osintProvider; the demo button uses a synthetic [DEMO] provider so you can see the fetch shape.</p>
+        <p className="text-fuchsia-400">Stitch rule: ONLY structured government-grade truths (GST/HSN/Udyam/NIC, anti-bogus-gated) → recorded as <b>Verified</b> facts → feed the planner/Truth-Table. <b>World/OSINT + Befisc/Sign3 identity stay OBSERVED-only</b> (shown here, NOT a planning input) — a web match on a generic name could be the wrong company; World graduates to Verified only once confidence-scored (post-pilot). mobile→GST→HSN chain (Part C). World now runs a REAL Firecrawl web search by default (traceable source URLs); window.__osintProvider can override it with another backend.</p>
       </div>
     );
   };
@@ -4220,6 +5169,16 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
           {internal.length ? <p>{internal.map(([k, n]) => `${k}(${n})`).join(' · ')}{eb ? ` · evidence: ${[eb.bls_created && eb.bls_created + ' BLs', eb.whatsapp_events && eb.whatsapp_events + ' WA', eb.csl_events && eb.csl_events + ' CSL'].filter(Boolean).join(', ')}` : ''}</p> : <p className="text-gray-400">— no GLID pulled (cold)</p>}
           {/* P2.1/P2.3: themes, not counts — what the buyer actually sources for (Twin clusters) */}
           {twinThemes().length > 0 && <p className="text-indigo-500">themes: <b>{twinThemes().join(' · ')}</b> <span className="text-indigo-300">(sources for — distilled from WA/CSL/BL, not raw counts)</span></p>}
+          {/* P2.7 — BUYER STORY: the narrative arc across the category timeline (oldest → newest). SOFT signal. */}
+          {trajectory.length >= 2 && (
+            <p className="text-violet-600">🧭 Buyer Story: <b>{buyerStory?.arc || (trajectoryShape(enrichment?.categories || []) === 'repeat' ? 'Routine replenishment' : 'reading the journey…')}</b>
+              {buyerStory?.story ? <span className="text-violet-500"> — {buyerStory.story}{typeof buyerStory.confidence === 'number' ? ` (conf ${buyerStory.confidence})` : ''}</span> : null}
+              <span className="text-violet-300"> · timeline: {trajectory.map((t) => t.mcat).join(' → ')} · SOFT (explains an odd product, never a hard fact)</span>
+            </p>
+          )}
+          {/* Transfer · Consumption · Consistency · Completeness · Procurement render on the SPEC page
+              (renderOptionProvenance), where the product context they reason over actually exists — not in
+              this pre-product staging dossier where they'd be product-less. (Chaos-test UX fix.) */}
         </div>
         <div className={Sec}>
           <p className="font-semibold text-fuchsia-600">② Verified Business Truths <span className="font-normal text-gray-400">· GST/HSN/Udyam/NIC/Website</span></p>
@@ -4273,14 +5232,33 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   // ── P0.5: smart spec-step progress — shown ONLY while the planner (the one genuine
   //    dependency for spec ORDER) is deciding. Background work (Twin/external/intent) never
   //    blocks. A reassurance checklist, not a blocking gear. ──
-  const renderSpecProgress = () => (
+  // Phase A — orchestration loader. The spec/question page opens ONLY when the gate is READY; until
+  // then this shows a truthful per-source checklist (what's done / pending / skipped). The buyer is
+  // never stuck: WAITING_CATEGORY offers "Start anyway" (proceed now, re-rank when category lands).
+  const renderSpecProgress = (gate: ReturnType<typeof plannerGate>, onStartAnyway: () => void) => (
     <div className="rounded-2xl border border-teal-200 bg-teal-50/60 p-5 space-y-2.5 animate-[fadeIn_0.3s_ease]" aria-busy="true">
-      <p className="text-sm font-semibold text-gray-800">Setting up your specifications…</p>
+      <p className="text-sm font-semibold text-gray-800">{gateHeadline(gate.status)}</p>
       <ul className="space-y-1.5 text-[13px] text-gray-600">
-        <li className="flex items-center gap-2"><CheckCircle2 size={14} className="text-teal-500 shrink-0" /> Reviewing your buying history</li>
-        <li className="flex items-center gap-2"><CheckCircle2 size={14} className="text-teal-500 shrink-0" /> Understanding your use case</li>
-        <li className="flex items-center gap-2"><span className="inline-block w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin shrink-0" /> Prioritizing the specifications that matter</li>
+        {gate.checklist.filter((r) => r.state !== 'skip').map((r) => (
+          <li key={r.key} className="flex items-center gap-2">
+            {r.state === 'done'
+              ? <CheckCircle2 size={14} className="text-teal-500 shrink-0" />
+              : <span className="inline-block w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin shrink-0" />}
+            {r.label}
+          </li>
+        ))}
       </ul>
+      {gate.status === 'WAITING_CATEGORY' && (
+        <button type="button" onClick={onStartAnyway} className="text-[12px] font-medium text-teal-600 hover:text-teal-700 underline underline-offset-2">
+          Start anyway — we'll sharpen as it loads →
+        </button>
+      )}
+      {debug && (
+        <label className="flex items-center gap-1.5 text-[10px] text-gray-400 cursor-pointer select-none pt-1">
+          <input type="checkbox" checked={freshCategory} onChange={(e) => setFreshCategory(e.target.checked)} className="accent-teal-600" />
+          fresh build (force live category, wait for it) · {gate.status}
+        </label>
+      )}
     </div>
   );
 
@@ -4290,9 +5268,14 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
   const renderPage1TwinNote = () => {
     const tw = ignoreTwin ? null : liveTwin();
     if (!tw) return null; // cold / no-Twin → nothing
-    const off = offProfileNow() || twinMuted.current; // A3: twin history AND enrichment both miss
-    if (off) {
-      return debug ? <p className="text-[11px] text-gray-400 mt-1.5">Looks like a new area for you — we'll tailor fresh questions.</p> : null;
+    // INTELLIGENCE TRANSFER: we ALWAYS carry who-they-are + how-they-buy (Tier A/B); only their past
+    // CATEGORIES (Tier C) are gated by relatedness. So we NEVER tell a known buyer "a new area for you" —
+    // that is FALSE (their manufacturer identity still applies) and destroys trust. When the category
+    // doesn't transfer, show an HONEST, quiet line (debug-only); never the old misleading one.
+    const tDec = transferDecision();
+    if (twinMuted.current || !tDec.categoryTransfers) {
+      const carried = tDec.transfer.filter((i) => i.tier !== 'D').length;
+      return debug && carried ? <p className="text-[11px] text-gray-400 mt-1.5">Carrying your buyer profile · {carried} fact{carried === 1 ? '' : 's'} still apply. This specific category looks new for you, so we'll tailor the specifics.</p> : null;
     }
     const repeat = repeatSignal(); // P2.2: RFQ-specific repeat-order signal beats a generic persona line
     const traits = conciergeTraits(tw).slice(0, 2);
@@ -4471,6 +5454,93 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     );
   };
 
+  // ── First-page (step 0) INTENT — candidate leaderboard. Debug mode used to show NOTHING on the
+  //    landing page despite the deriveIntent call. This makes the PRECEDENCE RACE legible: every
+  //    candidate source (Registry prior · Twin active-intent · LLM derivation) with its confidence
+  //    and DISPOSITION (CHOSEN / BELOW_THRESHOLD / OFF_PROFILE / OVERRIDDEN), plus the chip options. ──
+  const renderPage1IntentDebug = () => {
+    const ri = requirementIntent;
+    const dec = intentDecisionRef.current;
+    const cands = intentCandidatesRef.current; // LLM's own scored end-use ranking
+    const dc: Record<string, string> = { CHOSEN: 'text-emerald-700 font-semibold', BELOW_THRESHOLD: 'text-amber-600', OFF_PROFILE: 'text-rose-600', OVERRIDDEN: 'text-slate-500', ASK_FALLBACK: 'text-blue-700' };
+    if (!dec) {
+      return (
+        <div className="border border-rose-200 bg-rose-50 rounded-xl p-3 text-[11px] text-rose-900 space-y-0.5 mt-3">
+          <p className="font-bold">🎯 First-Page Intent — candidate leaderboard</p>
+          <p className="text-rose-500">{QUESTION_ENGINE && hasGeminiKey() ? 'deriving… (deriveIntent in flight) — the precedence race appears here the moment it lands' : 'engine off — no derivation on this page'}</p>
+        </div>
+      );
+    }
+    const board = intentLeaderboard(dec);
+    (window as unknown as { __intentBoard?: unknown }).__intentBoard = board;
+    const last = getLLMHealth().filter((r) => r.label === 'deriveIntent').slice(-1)[0];
+    return (
+      <div className="border border-rose-300 bg-rose-50 rounded-xl p-3 text-[11px] text-rose-900 space-y-0.5 mt-3">
+        <p className="font-bold">🎯 First-Page Intent — candidate leaderboard <span className="font-normal text-rose-500">({intentSummary(board, dec.chosenValue)})</span></p>
+        <p className="text-rose-600"><b>journey:</b> {ri?.journey || '—'} · <b>Q:</b> "{ri?.question || '—'}" · <b>re-derived:</b> {intentDecisionTick}× · <b>bar:</b> {dec.threshold ?? 80}</p>
+        {board.map((r, i) => (
+          <p key={i}>{String(i + 1).padStart(2)}. <b>{r.source}</b> "{r.value}" <span className="text-rose-400">[conf {r.source === 'Chip' ? 'n/a' : r.confidence}]</span> → <span className={dc[r.disposition] || ''}>{r.disposition}</span> · {r.reason}</p>
+        ))}
+        {cands && cands.length > 0 && (
+          <div className="mt-1 pt-1 border-t border-rose-200">
+            <p className="font-semibold text-rose-700">🏆 LLM end-use ranking (deriveIntent self-scored — the "Manufacturing 92 / Commercial 71 / Residential 12" view):</p>
+            {cands.map((c, i) => (
+              <p key={'c' + i}>{String(i + 1).padStart(2)}. <b>{c.label}</b> <span className="text-rose-500">[{c.score}]</span>{c.reason ? ` · ${c.reason}` : ''}</p>
+            ))}
+          </div>
+        )}
+        <p className="text-rose-400 pt-0.5">Precedence: registry prior ≥{dec.threshold ?? 80} › on-profile Twin active-intent ≥{dec.threshold ?? 80} › LLM derivation ≥{dec.threshold ?? 80} › ask the chips. LLM self-scored end-use ranking shown above (intent-v5).{last ? ` · LLM ${last.model} ${last.promptVersion || ''} ${Math.round(last.ms)}ms${typeof last.costUsd === 'number' ? ' $' + last.costUsd.toFixed(5) : ''}` : ''} · window.__intentBoard</p>
+      </div>
+    );
+  };
+
+  // ── EXECUTIVE SUMMARY — a one-glance "what the engine knows + did" read of THIS page, on EVERY page,
+  //    toggleable (execOpen). Distinct from the verbose traces below it: this is the CEO summary. ──
+  const renderExecSummary = (page: 0 | 1 | 2) => {
+    const facts = coverage.current.facts().filter((f) => f.status === 'active' || f.status === 'confirmed');
+    const intentLine = requirementIntent?.value
+      ? `${requirementIntent.value} · ${requirementIntent.locked ? 'buyer-picked' : 'derived ' + (requirementIntent.confidence || 0)}`
+      : intentGateSkipped ? 'skipped by buyer' : 'asking…';
+    const catLine = categoryStatus === 'hit'
+      ? `${categoryConf.fuse ? 'RICH' : categoryConf.consume ? 'THIN' : 'EMPTY'} (${categoryConf.score}) · ${categoryConf.consume ? (categoryConf.fuse ? 'consumed + fused' : 'consumed, no fusion') : 'gated → buyer-only'}`
+      : categoryStatus === 'building' ? 'building…' : categoryStatus === 'error' ? 'fetch error → buyer-only' : categoryStatus === 'idle' ? '—' : 'no data';
+    const rows: Array<[string, string]> = [];
+    if (page === 0) {
+      rows.push(['Product', `${form.productName || '—'}${form.quantity ? ` · ${form.quantity} ${form.unit || ''}`.trimEnd() : ''}`]);
+      rows.push(['Buyer kind', page1Choice || 'auto-deriving…']);
+      rows.push(['Intent', intentLine]);
+      rows.push(['Category', catLine]);
+      rows.push(['Buyer Twin', pull?.ok ? (buyerTwin ? 'loaded' : 'loading…') : 'no GLID (cold)']);
+    } else if (page === 1) {
+      const asked = dynQuestions.filter((q) => q.source === 'llm');
+      rows.push(['Intent', intentLine]);
+      rows.push(['Category', catLine]);
+      rows.push(['Specs', `${Object.values(form.dynamicSpecs).filter(Boolean).length}/${isqSpecs.length} filled`]);
+      rows.push(['Planner Qs', `${asked.length} of ≤3${reqPlan?.archetype ? ` · ${reqPlan.archetype}` : ''}`]);
+      rows.push(['Known facts', `${facts.length} active/confirmed`]);
+    } else {
+      rows.push(['Intent', intentLine]);
+      rows.push(['GST', form.gstRegistered === null ? 'unknown (not assumed — Golden Rule)' : form.gstRegistered ? 'registered' : 'not registered']);
+      rows.push(['Deliver to', `${form.deliveryLocation || form.clientLocation || '—'}${form.deliveryTimeline ? ` · ${form.deliveryTimeline}` : ''}`]);
+      rows.push(['Payment', form.paymentTerms || 'not set']);
+      rows.push(['Known facts', `${facts.length} active/confirmed`]);
+    }
+    const title = page === 0 ? 'Landing' : page === 1 ? 'Specs & Planner' : 'Delivery & Payment';
+    return (
+      <div className="border border-violet-300 bg-violet-50 rounded-xl px-3 py-2 text-[11px] text-violet-900 mb-2">
+        <button type="button" onClick={() => setExecOpen((v) => !v)} className="w-full flex items-center justify-between font-bold">
+          <span>📋 Executive Summary · {title}</span>
+          <span className="text-violet-400 font-normal">{execOpen ? '▾ hide' : '▸ show'}</span>
+        </button>
+        {execOpen && (
+          <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5">
+            {rows.map(([k, v], i) => (<p key={i} className="truncate"><span className="text-violet-400">{k}:</span> <b>{v}</b></p>))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ── A5: Knowledge Coverage Registry (debug) — the requirement's system-of-record ──
   // Shows every known fact (concept · value · source · conf · lifecycle status) + the
   // shadowed (overridden/rejected) trail. This is what the de-dup reader (A5b) consults.
@@ -4640,16 +5710,19 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       conf: typeof e.confidence === 'number' ? (e.confidence as number) : null,
       used: e.used_by_twin === true,
     }));
-    // CONTRADICTIONS — structural token-overlap between internal history vs external
-    // registry/world keywords. Generic business stopwords only (NOT categories).
-    const STOP = new Set(['product', 'products', 'trading', 'trader', 'traders', 'service', 'services', 'supplier', 'suppliers', 'manufacturer', 'manufacturers', 'wholesale', 'wholesaler', 'retail', 'retailer', 'company', 'india', 'limited', 'private', 'export', 'exporter', 'import', 'importer', 'industries', 'industrial', 'goods', 'item', 'items', 'material', 'materials']);
-    const tok = (xs: string[]) => new Set(xs.flatMap((x) => (String(x).toLowerCase().match(/[a-z]{4,}/g) || [])).filter((w) => !STOP.has(w)));
+    // CONTRADICTIONS — structural token-overlap between internal history vs external registry/world.
+    // Two fixes vs the old version that false-flagged "PVC Bag history ✕ a company that MAKES PVC bags":
+    //   (1) tokenise the FULL value_summary (the World product list), NOT the 60-char-truncated `external`;
+    //   (2) ≥3-char tokens so distinctive short product words ("pvc", "bag", "box", "rim") count.
+    // Generic business stopwords + common 3-char fillers only (NEVER category words).
+    const STOP = new Set(['product', 'products', 'trading', 'trader', 'traders', 'service', 'services', 'supplier', 'suppliers', 'manufacturer', 'manufacturers', 'wholesale', 'wholesaler', 'retail', 'retailer', 'company', 'india', 'limited', 'private', 'export', 'exporter', 'import', 'importer', 'industries', 'industrial', 'goods', 'item', 'items', 'material', 'materials', 'the', 'and', 'for', 'are', 'our', 'was', 'has', 'new', 'pvt', 'ltd', 'with', 'from', 'about']);
+    const tok = (xs: string[]) => new Set(xs.flatMap((x) => (String(x).toLowerCase().match(/[a-z]{3,}/g) || [])).filter((w) => !STOP.has(w)));
     const internalCats = (enrichment?.categories || []).map((c) => s(c.mcat)).filter(Boolean);
-    const externalKw = external.map((e) => e.summary).filter(Boolean);
+    const externalKw = extRaw.map((e) => s(e.value_summary || e.summary || e.value || '')).filter(Boolean); // FULL text (not truncated)
     const aTok = tok(internalCats), bTok = tok(externalKw);
     const contradictions: Array<{ a: string; b: string; fa: string; fb: string }> = [];
     if (aTok.size && bTok.size && ![...aTok].some((w) => bTok.has(w))) {
-      contradictions.push({ a: 'IndiaMART history', b: 'External registry/world', fa: internalCats.slice(0, 2).join(', '), fb: externalKw.slice(0, 2).join(', ') });
+      contradictions.push({ a: 'IndiaMART history', b: 'External registry/world', fa: internalCats.slice(0, 2).join(', '), fb: external.map((e) => e.summary).filter(Boolean).slice(0, 2).join(', ') });
     }
     if (!internal.length && !external.length) return null;
     const dot = (ok: boolean, warn = false) => (warn ? '🟡' : ok ? '🟢' : '⚪');
@@ -4703,7 +5776,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       if (manualSpecs.has(key)) return { src: 'User', icon: '👤', conf: 100, evidence: 'picked by buyer' };
       if (repostMeta[key]) return { src: 'History', icon: '🔁', conf: 90, evidence: `re-posted from your ${agoLabel(repostMeta[key].recencyDays)} order${repostMeta[key].custom ? ' (added — not in this category)' : ''}` };
       if (enrichedSpecs.has(key)) return { src: 'Twin/History', icon: '🧬', conf: 90, evidence: 'from past requirements' };
-      if (cascadeSpecs.has(key)) return { src: 'Cascade', icon: '✨', conf: 82, evidence: cascadeRationale || (cascadeFrom ? `inferred from ${cascadeFrom}` : 'inferred from your answers') };
+      if (cascadeSpecs.has(key)) return { src: 'Cascade', icon: '✨', conf: cascadeConf.current[key] ?? 82, evidence: cascadeRationale || (cascadeFrom ? `inferred from ${cascadeFrom}` : 'inferred from your answers') };
       if (autoFilledSpecs.has(key)) return { src: 'AI', icon: '✨', conf: 75, evidence: 'AI-suggested' };
       if (value && value.trim()) return { src: 'User', icon: '👤', conf: 100, evidence: 'selected by buyer' };
       return { src: '—', icon: '', conf: null, evidence: '' };
@@ -4894,7 +5967,21 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     // the panel question ready. Kills "see specs → planner lands → specs re-rank". The P6
     // user-driven re-rank (replanPending) is intentionally NOT held — it animates in place after
     // the buyer answers a panel question (an expected adapt), via the existing rank-move anim.
-    const plannerPending = dynLoading && isqSpecs.length > 0;
+    // PERF — the spec page must NEVER flip back to a full-screen loader once it has specs to show.
+    // We reveal specs the moment they exist (raw ISQ importance order) and let the planner RE-RANK
+    // IN PLACE; a re-plan firing as the profile / Twin / intent land AFTER Continue re-ranks silently
+    // (and the order locks on first plan-apply anyway, so it won't even reshuffle) — it must not re-
+    // block. Only a genuine cold-start (no plan yet AND nothing rendered) shows the progress checklist.
+    // This is what kills the "spec page not coming / taking too long" multi-loader stall.
+    const plannerPending = dynLoading && isqSpecs.length > 0 && !planReady;
+    // Phase A/P0 — READY gate. Hold the question page behind the orchestration loader until the brains
+    // it consumes are ready (buyer pull done · mcat resolved · category hit-or-time-boxed · planner done).
+    // Uses the SAME gateSourcesNow() as the planner-execution gate, so the render and the planner agree.
+    // The mcatResolved input means the latch can't open in the pre-mcat window (the bug that let category
+    // load after the planner). One-way latch: once opened, a later re-plan re-ranks IN PLACE, never re-blocks.
+    const gate = plannerGate(gateSourcesNow());
+    if (gate.ready) specsRevealed.current = true;
+    const holdForGate = !specsRevealed.current && !gate.ready;
     // P (Re-post): specs the buyer cared about last time that THIS category's ISQ schema doesn't
     // expose (drift) — they were applied as custom keys (repostMeta[].custom) and aren't in the
     // normal spec list, so render them in their own "added from your last order" section.
@@ -4918,12 +6005,64 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
             <span>{debug ? <>Re-planned after: <b>{replanFlash}</b> — reordered the specs that matter most for this</> : <>We reordered these to match your answer</>}</span>
           </div>
         )}
+        {/* Category Brain is still being learned (cold mcat → 3-min build). Non-blocking: specs render
+            below in ISQ order now and re-rank by seller-frequency the moment it lands. (Task 22) */}
+        {categoryStatus === 'building' && (
+          <div className="flex items-start gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2.5 text-[12px] text-indigo-900 animate-[fadeIn_0.3s_ease]">
+            <span className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0 rounded-full border-2 border-indigo-300 border-t-indigo-600 animate-spin" />
+            <div>
+              <p className="font-semibold">Learning this category from seller data…</p>
+              <p className="text-indigo-700 text-[11px]">Analysing historical RFQs · seller questions · buyer responses · ISQ patterns — your questions sharpen when ready (usually 1–3 min). You can keep going now.{debug ? ' [mode=category · build-once + poll]' : ''}</p>
+            </div>
+          </div>
+        )}
         {/* Pulled-data debug panels (🧠 Enrichment · 🕵️ Dossier · 🩺 Pipeline · 🌐 External · 🤖 LLM ·
             🧬 Twin · Ledger) moved to the step-0 STAGING view (landing "Pull"). The FLOW panels — which
             describe the LIVE requirement, not the pull — stay here on the spec page. */}
         {/* L2 — buyer-facing nudges (location mismatch / personal-vs-business / supplier radius). VISIBLE. */}
         {renderNudges()}
+        {/* CONSUME the conversational location preference — CONFIDENCE-GATED (Phase B · Gap 1 + Gap 3):
+            ≥70 chip (assert, with an undo) · 40-69 confirm (a real question) · <40 hide. Answering writes
+            it as a User-authority fact (upgrades the History fact), so it travels with the lead. */}
+        {convSignals.locationPreference && (() => {
+          const X = convSignals.locationPreference.charAt(0).toUpperCase() + convSignals.locationPreference.slice(1);
+          const mode = renderMode(convSignals.locationPreferenceConfidence);
+          if (mode === 'hide') return null;
+          const rej = convSignals.rejectedLocations.length ? ` (and ${convSignals.rejectedLocations.join('/')} sellers kept calling)` : '';
+          const answer = (val: string) => { coverage.current.record('supplier location preference', val, 'User', 100); setLocPrefAnswer(val); };
+          if (locPrefAnswer) return (
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12px] text-emerald-900 animate-[fadeIn_0.3s_ease]">
+              <span className="text-base">📍</span><span>Sourcing preference noted: <b>{locPrefAnswer}</b>.</span>
+            </div>
+          );
+          if (mode === 'chip') return (
+            <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-[12px] text-rose-900 animate-[fadeIn_0.3s_ease]">
+              <span className="text-base">📍</span>
+              <span>You wanted <b>{X}</b> suppliers{rej} — we'll prioritise {X}/nearby sellers for these quotes.
+                <button type="button" onClick={() => answer('Anywhere in India')} className="ml-1.5 underline underline-offset-2 hover:text-rose-700">Not {X}?</button>
+              </span>
+            </div>
+          );
+          return ( // confirm band (40-69): a real question that changes the requirement
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-[12px] text-amber-900 animate-[fadeIn_0.3s_ease]">
+              <p className="font-medium">📍 Prefer suppliers from <b>{X}</b>?{rej}</p>
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                <button type="button" onClick={() => answer(X)} className="rounded-full border border-amber-400 bg-white px-2.5 py-1 text-amber-800 hover:bg-amber-100 font-medium">Yes — prefer {X}</button>
+                <button type="button" onClick={() => answer('Anywhere in India')} className="rounded-full border border-amber-400 bg-white px-2.5 py-1 text-amber-800 hover:bg-amber-100 font-medium">Anywhere in India</button>
+              </div>
+            </div>
+          );
+        })()}
+        {debug && renderExecSummary(1)}
         {debug && renderRequirementUnderstanding()}
+        {debug && renderDependencyTrace()}
+        {debug && renderCategoryConsumption()}
+        {debug && renderCategoryDisposition()}
+        {debug && renderReasonChain()}
+        {debug && renderQuestionGraph()}
+        {debug && renderScorecard()}
+        {debug && renderEvals()}
+        {debug && renderNodeLogs()}
         {debug && renderOptionProvenance()}
         {debug && renderIntentDebug()}
         {debug && renderCoverageRegistry()}
@@ -4958,11 +6097,23 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
             <p><b>must-have specs:</b> {reqPlan.mustHaveSpecs.join(', ') || '—'}</p>
             {cascadeFrom && <p><b>cascade:</b> {cascadeFrom} → {[...cascadeSpecs].join(', ') || '(none)'}</p>}
             {buyerTypeDeducedFrom && <p><b>buyerType:</b> {form.buyerType} (deduced from {buyerTypeDeducedFrom} — role card skipped)</p>}
-            <ul className="list-disc ml-4">
-              {reqPlan.questions.map((q) => (
-                <li key={q.id}>[{q.tier || '?'}·{q.placement}/{q.kind}{q.decisive ? '·★' : ''}] {q.label}</li>
-              ))}
-            </ul>
+            {(() => {
+              // 🏆 CANDIDATE QUESTION LEADERBOARD — every question the planner WEIGHED, ranked by its own
+              // self-score, with SELECTED (asked, ≤3) vs SUPPRESSED (lost to the cap / covered elsewhere) + why.
+              // The deterministic answer to "why wasn't Site-Ready asked?" — it shows where it placed and why it lost.
+              const asked = reqPlan!.questions.map((q) => ({ label: q.label, score: typeof q.priority === 'number' ? q.priority : null, status: 'SELECTED' as const, reason: q.reason || q.groundedIn || '', tag: `${q.tier || '?'}·${q.placement}/${q.kind}${q.decisive ? '·★' : ''}` }));
+              const supp = (reqPlan!.considered || []).map((c) => ({ label: c.label, score: c.score as number | null, status: 'SUPPRESSED' as const, reason: c.reason, tag: '' }));
+              const rows = [...asked, ...supp].sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+              return (
+                <div className="mt-1 pt-1 border-t border-purple-200">
+                  <p className="font-semibold text-purple-800">🏆 Candidate Question Leaderboard <span className="font-normal text-purple-500">(selected {asked.length} of ≤3 · {supp.length} suppressed · planner self-scored, plan-v7)</span></p>
+                  {rows.map((r, i) => (
+                    <p key={i}>{String(i + 1).padStart(2)}. <b>{r.label}</b> <span className="text-purple-400">[{r.score ?? '—'}]</span> → <span className={r.status === 'SELECTED' ? 'text-emerald-700 font-semibold' : 'text-rose-600'}>{r.status}</span>{r.reason ? ` · ${r.reason}` : ''}{r.tag ? ` · ${r.tag}` : ''}</p>
+                  ))}
+                  {!reqPlan!.considered && <p className="text-purple-400">scores + suppressed list populate when the planner runs on plan-v7 (older cached plans carry no <code>priority</code>/<code>considered</code>).</p>}
+                </div>
+              );
+            })()}
             <p><b>serve signals:</b> {reqPlan.serveSignals.join(' · ') || '—'}</p>
           </div>
         )}
@@ -5032,12 +6183,20 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
           /* Page-1 late-fallback: deriveIntent resolved AFTER Continue — capture it here
              rather than dropping it. The common path answers intent on page 1. */
           renderIntentGate()
-        ) : plannerPending ? (
-          /* P0.5: the planner is the one genuine dependency for specs — show a smart
-             progress checklist (not a blocking gear) only while it decides the order. */
-          renderSpecProgress()
+        ) : holdForGate ? (
+          /* READY gate (Phase A): hold the question page until buyer/category/planner are ready —
+             then reveal ONCE, in final order. Latched, so a later re-plan re-ranks in place (below). */
+          renderSpecProgress(gate, () => setCategoryWaitElapsed(true))
         ) : (
           <>
+            {plannerPending && (
+              /* Specs are already shown — the planner is only refining their ORDER in the background.
+                 A slim inline note, never a blocking screen, so the page comes forward immediately. */
+              <div className="flex items-center gap-2 text-[12px] text-teal-600 mb-1 animate-[fadeIn_0.3s_ease]">
+                <span className="inline-block w-3 h-3 border-2 border-teal-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                Prioritising these for you…
+              </div>
+            )}
             {topSpecs.map(renderSpecField)}
 
             {/* The long tail of specs + any A5b-hidden (covered-by-answer) specs stay behind an
@@ -5089,8 +6248,10 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
           </>
         )}
 
-        {/* Non-spec context + persona + soft profile live in the details wizard. */}
-        {renderPanelChip()}
+        {/* Non-spec context + persona + soft profile live in the details wizard. P0: the planner panel
+            questions (budget/brand/scale) are ALSO held behind the READY gate — they're planner output,
+            so they must not appear before category either (the leak the dry run exposed). */}
+        {!holdForGate && renderPanelChip()}
       </div>
     );
   };
@@ -5324,6 +6485,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     else add('SKIPPED', 'text-gray-400', 'Firm Name', 'not a business/bulk buyer → not asked');
     if (enrichment?.buyer?.verifiedBusiness) add('VERIFIED', 'text-emerald-700', 'GST', 'verified-business flag on profile');
     else if (isBusinessRole && fullProfile) add('RELEVANT', 'text-amber-600', 'GST', 'business + bulk, no GSTIN on file → asked (Tier-1/Befisc creds-blocked)');
+    else if (isBusinessRole && gstRelevantByContext) add('RELEVANT', 'text-amber-600', 'GST', 'institution / capital buy → GST invoice needed even at qty 1 (P3 procurement context)');
     else add('SKIPPED', 'text-gray-400', 'GST', 'not a business/bulk buyer → not asked');
     ([['deliveryTimeline', 'Delivery'], ['paymentTerms', 'Payment Terms']] as const).forEach(([id, lbl]) => {
       const d = deducedLogistics[id];
@@ -5432,6 +6594,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       )}
 
       {/* P1.6: last-page relevance verdicts (debug) */}
+      {debug && renderExecSummary(2)}
       {debug && renderLastPageRelevance()}
 
       {/* "Almost there" helper — only surfaces when the user tries to leave */}
@@ -5536,10 +6699,10 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         )}
       </div>
 
-      {/* ── Card: Your business — GST/Firm, only for business + bulk buyers.
-          Role/Industry/Size/Frequency are collected in the details wizard;
-          Login lives in the Contact card below. ── */}
-      {isBusinessRole && fullProfile && (
+      {/* ── Card: Your business — GST/Firm, for business+bulk buyers OR an institution/capital buy
+          (P3: an academic/gov institution or a capital/project purchase needs a GST invoice even at
+          qty 1 — the IIT-Kanpur single-unit lab buy was wrongly skipped before). ── */}
+      {isBusinessRole && (fullProfile || gstRelevantByContext) && (
         <div className="rounded-2xl border border-gray-100 p-4 sm:p-5 mb-4">
           <p className="text-xs uppercase font-semibold text-gray-400 tracking-wide mb-4">Your business</p>
           <div className="flex flex-col sm:grid sm:grid-cols-2 gap-4 sm:gap-6">
@@ -5562,6 +6725,9 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
                 <RadioChip label="Yes" selected={form.gstRegistered === true} onClick={() => setField('gstRegistered', true)} />
                 <RadioChip label="No" selected={form.gstRegistered === false} onClick={() => setField('gstRegistered', false)} />
               </div>
+              {form.gstRegistered === null && (
+                <p className="text-[11px] text-amber-600 mt-1.5">We couldn't verify your GST from your profile — please select (we won't assume you're unregistered).</p>
+              )}
               {form.gstRegistered === true && (
                 <input
                   type="text"
@@ -5894,8 +7060,11 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
         </p>
       )}
       {identity && identity.anchorCount > 0 && (
-        <p className="mt-1 pt-1 border-t border-blue-200"><b>🪪 Identity (composite):</b> {identityLine(identity)} <span className="text-blue-400">· source first-party + observed-external (PAN) · OBSERVED-only (confidence + dossier, NOT a planner driver) · window.__identity</span>{identity.conflicts.length > 0 && <span className="text-red-500"> · ⚠ {identity.conflicts.join('; ')}</span>}</p>
+        <p className="mt-1 pt-1 border-t border-blue-200"><b>🪪 Identity (composite):</b> {identityLine(identity)} <span className="text-blue-400">· source first-party + observed-external (PAN) · window.__identity</span>{identity.conflicts.length > 0 && <span className="text-red-500"> · ⚠ {identity.conflicts.join('; ')}</span>}</p>
       )}
+      {(() => { const oc = observedExternalContext(); return oc ? (
+        <p className="mt-1 pt-1 border-t border-blue-200"><b>🛰 Observed → planner:</b> {oc} <span className="text-blue-400">· Befisc/Sign3/identity distilled to a SOFT signal · now FED to planRequirement + deriveIntent (weighed, never a hard/Verified fact)</span></p>
+      ) : null; })()}
       <p className="text-blue-400">raw: {enrichmentRaw ? 'window.__enrichment' : '—'} · profile: window.__buyerProfile · identity: window.__identity</p>
     </div>
   ));
@@ -5970,8 +7139,21 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
       </button>
       <div className="flex min-h-full items-center justify-center p-4 sm:p-6">
       <div
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl lg:max-w-3xl overflow-hidden animate-modal-in"
+        className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl lg:max-w-3xl overflow-hidden animate-modal-in"
       >
+        {/* GLOBAL processing loader — shows on EVERY step whenever ANY model call / data processing is
+            in flight (intent → planner → refine → deduce, profile, twin), so the form never looks frozen
+            between Continue/Next and the next screen ("specs not coming"). Thin top sweep + a floating
+            pill naming what's running. Absolutely-positioned pill → no layout shift. */}
+        <div className="h-1 w-full overflow-hidden bg-gray-100">
+          {(llmBusy || specsLoading) && <div className="h-full w-1/3 bg-teal-500 rounded-full animate-[progress-bar_1.1s_ease-in-out_infinite]" />}
+        </div>
+        {(llmBusy || specsLoading) && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[68] flex items-center gap-1.5 bg-teal-600 text-white text-[11px] font-medium px-3 py-1 rounded-full shadow-lg pointer-events-none animate-[fadeIn_0.2s_ease]">
+            <span className="inline-block w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+            {specsLoading && !llmBusy ? 'Loading specifications…' : llmBusyText(llmBusyLabel)}
+          </div>
+        )}
         {stagingOnly ? renderStagingView() : step === 0 ? (
           /* ── TWO PANEL LAYOUT ── */
           <div className="flex h-full" style={{ minHeight: 520 }}>
@@ -6205,8 +7387,10 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
                   business/personal toggle. Buyer-kind is auto-derived from the Twin (or inferred
                   from the chosen journey for cold buyers), so we never ask "who's buying" outright.
                   P0.4: a glanceable confirmable buyer-kind note sits above it. */}
+              {debug && renderExecSummary(0)}
               {renderBuyerKindNote()}
               {renderPage1Intent()}
+              {debug && renderPage1IntentDebug()}
 
               <button
                 onClick={handleNext}

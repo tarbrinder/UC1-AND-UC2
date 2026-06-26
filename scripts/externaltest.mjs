@@ -2,16 +2,26 @@
 // Proves the ANTI-BOGUS gate (no web search without a unique anchor) + the per-source
 // status logic (creds_pending when unconfigured, ok/no_record/skipped). No network, no LLM.
 
-// ── mirror of anchorStrength ──
+// ── mirror of anchorStrength (UNIQUE id alone, OR a business specifier {company|industry} + a 2nd anchor;
+//    name+location alone is too broad) ──
 function anchorStrength(seed) {
   if (seed.gstin && /^[0-9A-Z]{15}$/i.test(String(seed.gstin).trim()))
     return { osintEligible: true, strongest: 'GSTIN', reason: 'GSTIN is a unique business identifier' };
+  if (seed.udyam && seed.udyam.trim().length >= 6)
+    return { osintEligible: true, strongest: 'Udyam', reason: 'Udyam / Udyog-Aadhaar is a unique MSME identifier' };
   if (seed.website && /\./.test(seed.website))
     return { osintEligible: true, strongest: 'website', reason: 'a website resolves to exactly one business' };
-  if (seed.companyName && seed.companyName.trim().length >= 4 && seed.city && seed.city.trim())
-    return { osintEligible: true, strongest: 'company_name', reason: 'company name + city is specific enough' };
-  const have = [seed.mobile && 'mobile', seed.name && 'name', seed.companyName && 'company(no city)', seed.city && 'city'].filter(Boolean).join('+') || 'nothing';
-  return { osintEligible: false, strongest: have, reason: seed.companyName ? 'company name without a city is too generic — could match the wrong business' : 'only a mobile/first-name — too weak to search the open web without returning the wrong company' };
+  const has = {
+    company: !!(seed.companyName && seed.companyName.trim().length >= 4),
+    name: !!(seed.name && seed.name.trim().length >= 3),
+    location: !!(seed.city && seed.city.trim().length >= 2),
+    industry: !!(seed.industry && seed.industry.trim().length >= 3),
+  };
+  const anchors = Object.keys(has).filter((k) => has[k]);
+  const hasSpecifier = has.company || has.industry;
+  if (hasSpecifier && anchors.length >= 2) return { osintEligible: true, strongest: anchors.join('+'), reason: `${anchors.join(' + ')} specific enough` };
+  const have = [...anchors, seed.mobile && 'mobile(contact-only)'].filter(Boolean).join('+') || 'nothing';
+  return { osintEligible: false, strongest: have, reason: !hasSpecifier && has.name && has.location ? 'name + location alone is too broad (namesakes)' : 'too thin' };
 }
 
 // ── mirror of runExternal's status decisions (sync, no I/O) ──
@@ -40,12 +50,18 @@ const statusOf = (r, src) => r.sources.find((s) => s.source === src)?.status;
 let pass = 0, fail = 0;
 const ok = (n, c) => { if (c) pass++; else { fail++; console.log('  ✗ FAIL:', n); } };
 
-// 1. THE anti-bogus gate — a web search needs a UNIQUE anchor.
-ok('bare mobile → OSINT skipped (anti-bogus)', anchorStrength({ mobile: '9929163666' }).osintEligible === false);
-ok('the cable-lug seed (mobile+name+city, NO company) → OSINT skipped', anchorStrength({ mobile: '9929163666', name: 'Sanjay', city: 'Kanpur' }).osintEligible === false);
-ok('company name ALONE (no city) → NOT eligible (generic-name guard, audit #2)', anchorStrength({ companyName: 'Trident Electro Components' }).osintEligible === false);
+// 1. THE gate — a UNIQUE business id, OR a specifier {company|industry} + a 2nd anchor. name+location too broad.
+ok('bare mobile → OSINT skipped (mobile is a contact, not an anchor)', anchorStrength({ mobile: '9929163666' }).osintEligible === false);
+ok('name + mobile only → skipped (1 anchor)', anchorStrength({ mobile: '9929163666', name: 'Sanjay' }).osintEligible === false);
+ok('name + location ALONE → NOT eligible (too broad — namesakes)', anchorStrength({ mobile: '9929163666', name: 'Sanjay', city: 'Kanpur' }).osintEligible === false);
+ok('name + location reason cites "too broad / namesakes"', /too broad|namesakes/i.test(anchorStrength({ name: 'Sanjay', city: 'Kanpur' }).reason));
+ok('PERMUTATION name + industry + location → eligible (industry is a specifier)', anchorStrength({ name: 'Ashraffunnisa', industry: 'diesel generator', city: 'Ramanagar' }).osintEligible === true);
+ok('PERMUTATION company + industry → eligible', anchorStrength({ companyName: 'Trident Electro', industry: 'capacitors' }).osintEligible === true);
+ok('GST on profile → eligible (unique)', anchorStrength({ gstin: '29AAACT2727Q1ZW' }).osintEligible === true);
+ok('Udyam on profile → eligible (unique)', anchorStrength({ udyam: 'UDYAM-KR-03-0001234' }).osintEligible === true && anchorStrength({ udyam: 'UDYAM-KR-03-0001234' }).strongest === 'Udyam');
+ok('company name ALONE (no 2nd anchor) → NOT eligible ("not just company name")', anchorStrength({ companyName: 'Trident Electro Components' }).osintEligible === false);
 ok('company name + city → OSINT eligible', anchorStrength({ companyName: 'Trident Electro Components', city: 'Mumbai' }).osintEligible === true);
-ok('short company name (<4) → NOT eligible', anchorStrength({ companyName: 'ABC' }).osintEligible === false);
+ok('short company name (<4) alone → NOT eligible', anchorStrength({ companyName: 'ABC' }).osintEligible === false);
 ok('GSTIN (15 chars) → OSINT eligible', anchorStrength({ gstin: '09AAACT2727Q1ZW' }).osintEligible === true);
 ok('website → OSINT eligible', anchorStrength({ website: 'tridentelectro.in' }).osintEligible === true);
 ok('strongest anchor reported = GSTIN when present', anchorStrength({ gstin: '09AAACT2727Q1ZW', companyName: 'X Corp' }).strongest === 'GSTIN');
@@ -61,7 +77,8 @@ ok('Befisc ok when configured', statusOf(withCreds, 'Befisc') === 'ok');
 ok('Sign3 ok when configured', statusOf(withCreds, 'Sign3') === 'ok');
 
 // 3. World statuses — skipped (no anchor), not_run (eligible, no provider), ok/no_record (provider ran).
-ok('World skipped_low_confidence for the cable-lug seed', statusOf(runExternal({ mobile: '9929163666', name: 'Sanjay', city: 'Kanpur' }), 'World') === 'skipped_low_confidence');
+ok('World skipped for name+location (too broad — namesakes)', statusOf(runExternal({ mobile: '9929163666', name: 'Sanjay', city: 'Kanpur' }), 'World') === 'skipped_low_confidence');
+ok('World runs (eligible) for name+industry+location', statusOf(runExternal({ name: 'Sanjay', industry: 'diesel generator', city: 'Kanpur' }, {}, { summary: 'x' }), 'World') === 'ok');
 // #2 (audit): a company name WITHOUT a city is too generic → World skipped (anti-bogus).
 ok('company name ALONE (no city) → World skipped (generic-name guard)', statusOf(runExternal({ companyName: 'M Enterprises' }, {}, { summary: 'x' }), 'World') === 'skipped_low_confidence');
 ok('company name + CITY → World eligible', anchorStrength({ companyName: 'M Enterprises', city: 'Noida' }).osintEligible === true);
@@ -117,7 +134,10 @@ function crossValidateExternal(sources, seed) {
   providers.push({ provider: 'first_party', facts: seedFacts });
   for (const s of sources) { if (s.status !== 'ok') continue; providers.push({ provider: s.source, facts: extractFacts(s, seed) }); }
   const map = new Map();
-  for (const { provider, facts } of providers) { for (const [key, value] of Object.entries(facts)) { const nv = xslug(value); if (!nv) continue; const id = `${key}::${nv}`; if (!map.has(id)) map.set(id, { key, value, sources: new Set() }); map.get(id).sources.add(provider); } }
+  const nameToks = (v) => v.toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
+  for (const { provider, facts } of providers) { for (const [key, value] of Object.entries(facts)) { const nv = xslug(value); if (!nv) continue;
+    if (key === 'name') { const toks = nameToks(value); let merged = false; for (const entry of map.values()) { if (entry.key !== 'name') continue; if (toks.some((t) => nameToks(entry.value).includes(t))) { entry.sources.add(provider); merged = true; break; } } if (!merged) map.set(`name::${nv}`, { key, value, sources: new Set([provider]) }); continue; }
+    const id = `${key}::${nv}`; if (!map.has(id)) map.set(id, { key, value, sources: new Set() }); map.get(id).sources.add(provider); } }
   const facts = [...map.values()].map((f) => { const agreement = f.sources.size; const tier = agreement >= 3 ? 'verified' : agreement === 2 ? 'corroborated' : 'observed'; const confidence = agreement >= 3 ? 92 : agreement === 2 ? 78 : 55; return { key: f.key, value: f.value, sources: [...f.sources], agreement, tier, confidence }; }).sort((a, b) => b.agreement - a.agreement);
   return { facts, verifiedFacts: facts.filter((f) => f.tier === 'verified') };
 }
@@ -131,11 +151,24 @@ ok('P4: seed + Befisc + World agree → VERIFIED (3×, conf 92)', fact(cv3, 'com
 ok('P4: verified company graduates observed→Verified (in verifiedFacts)', cv3.verifiedFacts.some((f) => f.key === 'company'));
 const cvName = crossValidateExternal([{ source: 'Befisc', status: 'ok', value: { name: 'Dinesh Chandra' } }], { name: 'Dinesh Chandra', companyName: 'Chetna Industries' });
 ok('P4: seed + Befisc agree on name → corroborated', fact(cvName, 'name').tier === 'corroborated');
-const cvDis = crossValidateExternal([{ source: 'Befisc', status: 'ok', value: { name: 'D Chandra' } }], { name: 'Dinesh Chandra' });
-ok('P4: differing names do NOT corroborate (each 1× observed)', cvDis.facts.filter((f) => f.key === 'name').every((f) => f.agreement === 1));
+const cvDis = crossValidateExternal([{ source: 'Befisc', status: 'ok', value: { name: 'Suresh Kumar' } }], { name: 'Dinesh Chandra' });
+ok('P4: genuinely different names (no shared token) do NOT corroborate (each 1× observed)', cvDis.facts.filter((f) => f.key === 'name').every((f) => f.agreement === 1));
+// the ASHRAFFUNNISA case — Befisc appends the father's name; shared core token → SAME person → corroborated.
+const cvVar = crossValidateExternal([{ source: 'Befisc', status: 'ok', value: { name: 'ASHRAFFUNNISA LATE ABDUL' } }], { name: 'ASHRAFFUNNISA' });
+ok('P4: name VARIANT sharing a core token → corroborated (2×), one merged fact', (() => { const ns = cvVar.facts.filter((f) => f.key === 'name'); return ns.length === 1 && ns[0].agreement === 2 && ns[0].tier === 'corroborated'; })());
 const cvNo = crossValidateExternal([{ source: 'Befisc', status: 'no_record', value: { company_name: 'Chetna Industries' } }], { companyName: 'Chetna Industries' });
 ok('P4: a no_record source cannot corroborate (company stays 1× observed)', fact(cvNo, 'company').agreement === 1);
 ok('P4: bridge records ONLY business cross-facts (company/city) Verified — NOT name/email/pan', /^(company|city)$/.test('company') && !/^(company|city)$/.test('name'));
+
+// ── P3.9: external HONESTY — only Tier-1 government IDs promote to a Verified registry fact; World/OSINT,
+// Befisc and Sign3 stay OBSERVED (soft, fed via observedExternalContext, never a hard Verified fact).
+// (Reuses the TIER1 gate declared above — the same regex the registry bridge uses.) ──
+ok('honesty: GST source → promotes to Verified', TIER1.test('GST'));
+ok('honesty: Udyam → promotes to Verified', TIER1.test('Udyam'));
+ok('honesty: World/OSINT → stays OBSERVED (NOT auto-Verified on a generic web match)', !TIER1.test('world') && !TIER1.test('osint'));
+ok('honesty: Befisc → stays OBSERVED (soft signal, not a hard fact)', !TIER1.test('Befisc'));
+ok('honesty: Sign3 → stays OBSERVED', !TIER1.test('Sign3'));
+ok('honesty: composite identity → stays OBSERVED (a lookup can be the wrong namesake)', !TIER1.test('identity'));
 
 console.log(`\nexternaltest (anti-bogus gate + source status + demo provider + Verified stitch + P4 agreement ladder): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

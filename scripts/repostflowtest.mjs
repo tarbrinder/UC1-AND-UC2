@@ -123,5 +123,27 @@ ok('no overlap at all → everything custom-added', drift3.matched.length === 0 
 const drift4 = driftMap({ 'Bolts': '4' }, ['Bolt Count', 'Finish']);
 ok('plural-stem match: "Bolts" → "Bolt Count"', drift4.matched.some((m) => m.current === 'Bolt Count'));
 
-console.log(`\nrepostflowtest (P: priorRequirements + spec-drift mapping): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// ── Re-post TIGHTENING (mirror handleRepost): carry qty/unit + skip them as drift, cascade off, order locked ──
+const qKeyOf = (specs) => Object.keys(specs).find((k) => /^\s*quantity\s*$/i.test(k));
+const uKeyOf = (specs) => Object.keys(specs).find((k) => /^\s*(?:quantity\s*unit|unit)\s*$/i.test(k));
+const PRIOR = { 'Quantity': '100', 'Quantity Unit': 'Piece', 'Closure Type': 'Button', 'Length': '12 inch' };
+const qk = qKeyOf(PRIOR), uk = uKeyOf(PRIOR);
+ok('re-post: extracts the Quantity key', qk === 'Quantity');
+ok('re-post: extracts the Quantity-Unit key', uk === 'Quantity Unit');
+ok('re-post: prior qty → digits (100)', (qk ? String(PRIOR[qk]).replace(/[^0-9.]/g, '') : '') === '100');
+ok('re-post: prior unit carried verbatim (Piece)', (uk ? String(PRIOR[uk]).trim() : '') === 'Piece');
+// the drift loop SKIPS qty/unit (they go to form.quantity/unit, NOT display/custom specs)
+const driftKeys = Object.keys(PRIOR).filter((k) => k !== qk && k !== uk);
+ok('re-post: qty/unit are NOT applied as specs; real specs still flow', !driftKeys.includes('Quantity') && !driftKeys.includes('Quantity Unit') && driftKeys.includes('Closure Type') && driftKeys.includes('Length'));
+// cascade gate: `if (... || repostSource) return;`
+const cascadeRuns = (repostSource) => !repostSource;
+ok('re-post: cascade GATED OFF when repostSource set', cascadeRuns({ title: 'Frosted PVC Bag' }) === false);
+ok('non-re-post: cascade still runs', cascadeRuns(null) === true);
+// spec order LOCKED to the ISQ schema order (planner re-rank ignored): computeSpecOrder = lockedSpecOrder ?? planner
+const ISQ_ORDER = ['Capacity', 'Bottle Material', 'Lid Type'];
+const lockedSpecOrder = ISQ_ORDER.slice();           // handleRepost: setLockedSpecOrder(currentNames)
+const plannerOrder = ['Bottle Material', 'Capacity', 'Lid Type']; // what the planner WOULD reorder to
+ok('re-post: spec order locked to ISQ order (planner cannot re-rank)', JSON.stringify(lockedSpecOrder ?? plannerOrder) === JSON.stringify(ISQ_ORDER));
+
+console.log(`\nrepostflowtest (P: priorRequirements + spec-drift mapping + re-post tightening: qty/unit carry · cascade off · order lock): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

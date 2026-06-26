@@ -44,5 +44,64 @@ ok('spec NOT hidden by Cascade', coveredByQuestion(f('Cascade')) === false);
 ok('spec NOT hidden by History', coveredByQuestion(f('History')) === false);
 ok('spec NOT hidden by Deduced', coveredByQuestion(f('Deduced')) === false);
 
-console.log(`\nsuppressiontest (only explicit sources hide questions; inferred prefill-only): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// ── P1.2: FACT-UPGRADE / corroboration loop (mirror coverage.record() lifecycle) ──
+// A Twin guess prefills (never suppresses); a buyer's own answer or a Verified fact stating the SAME
+// value graduates it Observed/Likely → Confirmed; a DIFFERENT higher-authority answer overrides it.
+const AUTH = { User: 100, LastPage: 95, Intent: 92, Spec: 85, Verified: 78, History: 75, Planner: 70, Cascade: 55, Enrichment: 52, Twin: 50, Deduced: 40 };
+function record(store, concept, value, source) {
+  const v = String(value).trim().toLowerCase();
+  const prior = store.find((x) => x.concept === concept && (x.status === 'active' || x.status === 'confirmed'));
+  if (prior) {
+    if (prior.value.toLowerCase() === v) { if (source !== prior.source && AUTH[source] >= AUTH[prior.source]) prior.status = 'confirmed'; return; }
+    if (AUTH[source] >= AUTH[prior.source]) prior.status = 'overridden';
+    else { store.push({ concept, value, source, status: 'rejected' }); return; }
+  }
+  store.push({ concept, value, source, status: 'active' });
+}
+const activeOf = (store, c) => store.find((x) => x.concept === c && (x.status === 'active' || x.status === 'confirmed'));
+
+// the named scenario: Twin guesses "Manufacturer", buyer confirms the SAME → Observed→Confirmed
+let s1 = []; record(s1, 'buyer_type', 'Manufacturer', 'Twin'); record(s1, 'buyer_type', 'Manufacturer', 'User');
+ok('corroboration: Twin "Manufacturer" + buyer confirms same → CONFIRMED', activeOf(s1, 'buyer_type').status === 'confirmed');
+ok('corroboration: confirmed fact keeps the winning value', activeOf(s1, 'buyer_type').value === 'Manufacturer');
+
+// buyer CORRECTS the Twin guess → buyer answer wins, Twin overridden
+let s2 = []; record(s2, 'buyer_type', 'Manufacturer', 'Twin'); record(s2, 'buyer_type', 'Trader', 'User');
+ok('override: buyer "Trader" beats Twin "Manufacturer" (buyer corrects the guess)', activeOf(s2, 'buyer_type').value === 'Trader' && activeOf(s2, 'buyer_type').source === 'User');
+
+// a Verified business fact also corroborates a Twin guess
+let s3 = []; record(s3, 'cross:company', 'Acme Pvt Ltd', 'Twin'); record(s3, 'cross:company', 'Acme Pvt Ltd', 'Verified');
+ok('corroboration: Twin + Verified same value → CONFIRMED', activeOf(s3, 'cross:company').status === 'confirmed');
+
+// a lower-authority source can NEVER override a buyer answer (stays rejected, debug trail)
+let s4 = []; record(s4, 'buyer_type', 'Trader', 'User'); record(s4, 'buyer_type', 'Manufacturer', 'Twin');
+ok('guard: Twin cannot override a User answer (kept as rejected trail)', activeOf(s4, 'buyer_type').value === 'Trader' && s4.some((x) => x.status === 'rejected'));
+
+// the Twin role fact, recorded as source 'Twin', still does NOT suppress the buyer-type question
+ok('the recorded Twin buyer-role fact does NOT hide the buyer-type question', coverHides(f('Twin', 50, 'Buyer type'), 'Which best describes you?') === false);
+
+// ── P1.4: explicit_negative_signals → never re-suggest (mirror parseNegativeBans / violatesNegativeBan) ──
+function parseNegativeBans(signals) {
+  const bans = [];
+  for (const s of signals || []) {
+    const m = String(s).toLowerCase().match(/\b(?:no|not|never|avoid|without|don'?t|dont|except)\s+([a-z][a-z0-9 -]{2,40})/);
+    if (m) { const phrase = m[1].replace(/\b(please|thanks?|suppliers?|sellers?|vendors?|me|us)\b/g, ' ').replace(/\s+/g, ' ').trim(); if (phrase.length >= 3) bans.push(phrase); }
+  }
+  return bans;
+}
+function violatesNegativeBan(text, bans) {
+  const t = (text || '').toLowerCase();
+  return bans.some((b) => { const tok = b.split(/\s+/).find((w) => w.length >= 4) || (b.length >= 4 ? b : ''); return !!tok && t.includes(tok); });
+}
+const BANS = parseNegativeBans(['No plastic', 'OEM only', "Don't call me", 'Avoid Chinese imports']);
+ok('NS: "No plastic" → banned phrase parsed', BANS.includes('plastic'));
+ok('NS: "Avoid Chinese imports" → banned phrase parsed', BANS.some((b) => b.includes('chinese')));
+ok('NS: "OEM only" (inclusion, not a "no X") → NOT parsed as a ban (left to the prompt)', !BANS.some((b) => b.includes('oem')));
+ok('NS: spec Material=Plastic is BLOCKED from auto-suggest', violatesNegativeBan('Material Plastic', BANS) === true);
+ok('NS: spec Material=Steel is ALLOWED (not rejected)', violatesNegativeBan('Material Steel', BANS) === false);
+ok('NS: Origin=Chinese is BLOCKED', violatesNegativeBan('Origin Chinese', BANS) === true);
+ok('NS: empty constraints → nothing banned (no over-block)', parseNegativeBans([]).length === 0 && violatesNegativeBan('Material Plastic', []) === false);
+ok('NS: bare "no" with nothing after → not parsed (no spurious ban)', parseNegativeBans(['no']).length === 0);
+
+console.log(`\nsuppressiontest (only explicit sources hide questions; inferred prefill-only; P1.4 negative-signal gate): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

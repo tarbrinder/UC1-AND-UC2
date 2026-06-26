@@ -64,3 +64,14 @@ export function classifyEmailDomain(email?: string, companyName?: string): Email
 export function natureDrives(n: EmailNature): boolean {
   return (n.institutionType === 'academic' || n.institutionType === 'government' || n.institutionType === 'corporate') && !!n.value && n.confidence >= 60;
 }
+
+// The canonical BUYER-TYPE label for an evidence-gated INSTITUTIONAL Nature — the top of the identity
+// hierarchy (Nature > Identity > Business Type > Behaviour). An academic/government domain is institutional
+// procurement and must NEVER read as "Manufacturer"/"Trader" (the IIT-Kanpur mislabel). Returns '' for
+// corporate/generic/unknown so a REAL company (a notebook-machine buyer) keeps its inferred business_type.
+export function institutionalRole(n: EmailNature, authorityRole?: string): string {
+  if (!n || n.confidence < 80) return '';
+  if (n.institutionType === 'academic') return authorityRole === 'procurement' ? 'Institution — Procurement' : 'Research / Academic Institution';
+  if (n.institutionType === 'government') return 'Government / PSU';
+  return '';
+}

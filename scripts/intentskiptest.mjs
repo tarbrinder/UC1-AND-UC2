@@ -80,5 +80,20 @@ ok('G3: off-profile + Twin known + LLM confident → LLM product derivation (sti
 ok('G3: on-profile + Twin known → Twin still wins (relation exists)',
   pickIntentValue({ twinKnown: true, twinVal: 'Notebook Manufacturing Inputs', offProfile: false, derivedKnown: true, derivedVal: 'resale' }) === 'Notebook Manufacturing Inputs');
 
-console.log(`\nintentskiptest (intent ask/confirm/skip policy matrix): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
+// ── PERSONAL-JOURNEY GUARD (the Jaiveer bug): a BUSINESS buyer or a BULK/WHOLESALE order can NEVER be
+// "personal". Mirrors the deriveIntent backstop — when the model slips, return null (→ planner-first)
+// rather than ask a wrong "for personal use?" question. ──
+const personalAllowed = (journey, buyerKind, orderScale) => {
+  if (journey !== 'personal') return true; // non-personal journeys always pass
+  return !(buyerKind === 'business' || orderScale === 'bulk' || orderScale === 'wholesale');
+};
+ok('PJ: business buyer + personal journey → BLOCKED (Jaiveer: notebook maker, paper)', personalAllowed('personal', 'business', 'wholesale') === false);
+ok('PJ: 10,000 kg (wholesale) personal → BLOCKED even if buyer-kind unknown', personalAllowed('personal', undefined, 'wholesale') === false);
+ok('PJ: bulk order personal → BLOCKED', personalAllowed('personal', undefined, 'bulk') === false);
+ok('PJ: genuine personal (single qty, non-business) → ALLOWED', personalAllowed('personal', 'personal', 'single') === true);
+ok('PJ: personal (small, unknown kind) → ALLOWED', personalAllowed('personal', undefined, 'small') === true);
+ok('PJ: business + industrial journey → unaffected (only personal is guarded)', personalAllowed('industrial', 'business', 'wholesale') === true);
+ok('PJ: business + resale journey → unaffected', personalAllowed('resale', 'business', 'bulk') === true);
+
+console.log(`\nintentskiptest (intent ask/confirm/skip policy matrix + personal-journey guard): ${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ' ✓'}`);
 process.exit(fail ? 1 : 0);

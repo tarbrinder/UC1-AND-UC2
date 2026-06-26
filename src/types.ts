@@ -54,7 +54,7 @@ export interface RFQFormData {
   buyerType: string;
   industry: string;
   companySize: string;
-  gstRegistered: boolean;
+  gstRegistered: boolean | null; // null = UNKNOWN (couldn't fetch) — never collapse to false (Golden Rule)
   gstNumber: string;
   requirementFrequency: string;
   contactName: string;
