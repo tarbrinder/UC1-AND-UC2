@@ -13,16 +13,19 @@
 import { useState, type ReactNode } from 'react';
 import { Band, KV, StatePill, MiniBar, Expand, BandEmpty, type BandTone } from './Band';
 import type { UC2Enrichment, UC2Edit, UC2EditFull, UC2Eval } from '../../lib/uc2Enrichment';
-import { runSellerVerify, hasCrawlerKey, type SellerVerifyState } from '../../lib/sellerVerify';
+import { hasCrawlerKey } from '../../lib/sellerVerify';
+import { runOsintEnrichment, type OsintEnrichment, type OsintSeed } from '../../lib/osintEnrich';
 
 const fmtUsd = (n: number) => (n >= 0.01 ? `$${n.toFixed(3)}` : n > 0 ? `$${n.toFixed(5)}` : '$0');
 
 // ── JSON TREE (owner: "raw data as a tree, expandable, better UI than a wall of JSON") — a compact, recursive,
 // collapsible view of any payload. Objects/arrays are <details> (top 2 levels open); leaves are colour-typed. ──
-export function JsonTree({ data, k, depth = 0 }: { data: unknown; k?: string; depth?: number }) {
+export function JsonTree({ data, k, depth = 0, openDepth = 2 }: { data: unknown; k?: string; depth?: number; openDepth?: number }) {
   // Children render ONLY when the node is open (lazy) — so a collapsed subtree costs nothing, and a large raw payload
   // (e.g. hundreds of CSL log rows) doesn't blow up first paint. Width is capped per container to bound the DOM.
-  const [open, setOpen] = useState(depth < 1);
+  // openDepth (default 2) = how many top levels start open — matches the "top 2 levels open" comment above; callers
+  // pass openDepth={99} to fully expand small/critical trees (e.g. tiny API query objects) with zero clicks.
+  const [open, setOpen] = useState(depth < openDepth);
   const pad = { paddingLeft: depth ? 10 : 0 };
   const keyLabel = k != null ? <span className="text-slate-500">{k}: </span> : null;
   if (data === null || data === undefined || typeof data !== 'object') {
@@ -37,7 +40,7 @@ export function JsonTree({ data, k, depth = 0 }: { data: unknown; k?: string; de
   return (
     <details open={open} onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)} className="text-[10px] font-mono leading-snug" style={pad}>
       <summary className="cursor-pointer list-none text-slate-500 hover:text-slate-700 select-none">{keyLabel}<span className="text-gray-400">{isArr ? `[${entries.length}]` : `{${entries.length} ${entries.length === 1 ? 'field' : 'fields'}}`}</span></summary>
-      {open && shown.map(([kk, vv]) => <JsonTree key={kk} k={kk} data={vv} depth={depth + 1} />)}
+      {open && shown.map(([kk, vv]) => <JsonTree key={kk} k={kk} data={vv} depth={depth + 1} openDepth={openDepth} />)}
       {open && entries.length > CAP && <div className="text-[9.5px] text-gray-400" style={{ paddingLeft: 10 }}>… {entries.length - CAP} more (truncated for display)</div>}
     </details>
   );
@@ -104,8 +107,8 @@ export function L0Band({ calls, totals, evalDetail, harness, promptVersion, defa
               ))}
             </div>
           </Expand>
-          {evalDetail && <Expand label="eval — grounding · confidence · what the verdict is built on" tone="emerald">{evalDetail}</Expand>}
-          {harness && <Expand label="harness & eval-over-time — the offline suites + drift by prompt-version" tone="slate">{harness}</Expand>}
+          {evalDetail && <Expand label="eval — grounding · confidence · what the verdict is built on" tone="emerald" defaultOpen>{evalDetail}</Expand>}
+          {harness && <Expand label="harness & eval-over-time — the offline suites + drift by prompt-version" tone="slate" defaultOpen>{harness}</Expand>}
         </>
       )}
     </Band>
@@ -118,7 +121,7 @@ export interface HealthRow { node: string; ok: boolean; latency_ms?: number; out
 export interface SourceRow { label: string; sent: number; cited: number }
 // ONE unified node row (owner: "every node in health will have raw what LLM saw, and our readable version"): liveness
 // (ok/latency/count) + OUR humanised readable view + the distilled summary the LLM saw + the full raw payload — GST included.
-export interface L1NodeRow { key: string; label: string; ok?: boolean; latency_ms?: number; output_count?: number; readable?: ReactNode; summary?: unknown; raw?: unknown }
+export interface L1NodeRow { key: string; label: string; ok?: boolean; status?: string; latency_ms?: number; output_count?: number; readable?: ReactNode; summary?: unknown; raw?: unknown; input?: unknown }
 export function L1Band({ nodes, cov, endpoint, drill, defaultOpen }: {
   nodes: L1NodeRow[]; cov?: { sent: number; cited: number; noise: number } | null;
   endpoint?: string; drill?: ReactNode; defaultOpen?: boolean;
@@ -134,26 +137,33 @@ export function L1Band({ nodes, cov, endpoint, drill, defaultOpen }: {
       {nodes.length > 0 ? (
         <div className="space-y-1">
           {nodes.map((n) => {
-            const hasBody = n.readable != null || n.summary !== undefined || n.raw !== undefined;
+            const hasBody = n.readable != null || n.summary !== undefined || n.raw !== undefined || n.input !== undefined;
             return (
               <details key={n.key} className="rounded-lg border border-gray-150 bg-gray-50/50">
                 <summary className="cursor-pointer list-none flex items-center gap-2 px-2 py-1.5 text-[11px] hover:bg-gray-50">
                   <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${n.ok === false ? 'bg-rose-500' : n.ok === true ? 'bg-emerald-500' : 'bg-gray-300'}`} title={n.ok === false ? 'failed' : n.ok === true ? 'ok' : 'no n8n health signal for this node'} />
                   <span className="flex-1 min-w-0 text-gray-700 truncate font-medium">{n.label}</span>
+                  {n.status && n.status !== 'ok' && n.status !== 'success' && <span className={`shrink-0 text-[8.5px] px-1 rounded border ${n.status === 'error' ? 'bg-rose-50 text-rose-600 border-rose-200' : n.status === 'timeout' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>{n.status}</span>}
                   {typeof n.output_count === 'number' && <span className="text-gray-400 shrink-0">{n.output_count} out</span>}
                   {typeof n.latency_ms === 'number' && <span className="text-gray-400 shrink-0 tabular-nums">{n.latency_ms} ms</span>}
                   <span className="shrink-0 text-gray-300 text-[10px]">▾</span>
                 </summary>
                 <div className="px-2 pb-2 pt-1.5 border-t border-gray-100">
                   {!hasBody ? <div className="text-[10px] text-gray-400">health only — no payload returned for this node.</div> : (<>
-                    {/* RAW — the data, as a collapsible tree (primary, owner). Falls back to the distilled summary when no pre-distill raw exists. */}
+                    {/* INPUT — what we SENT this node (query/params/prompt). Default-open so raw input shows at click 2 (owner goal 2). Amber = 'sent', distinct from slate 'returned'. */}
+                    {n.input !== undefined && (
+                      <Expand label={`raw INPUT — what we sent this node (${sizeHint(n.input)})`} tone="amber" defaultOpen><div className="max-h-72 overflow-auto">{typeof n.input === 'string' ? <div className="text-[10px] font-mono whitespace-pre-wrap break-words">{n.input}</div> : <JsonTree data={n.input} openDepth={99} />}</div></Expand>
+                    )}
+                    {/* HUMANISED first + default-open — the plain-English card (holds the 🔎 queried line) is no longer 1 click deeper than raw. */}
+                    {n.readable != null && <Expand label="our humanised view (plain English)" tone="sky" defaultOpen>{n.readable}</Expand>}
+                    {/* RAW OUTPUT — default-open; JsonTree now opens 2 levels deep by default (edit 1). */}
                     {n.raw !== undefined ? (
-                      <Expand label={`raw data — what n8n returned (${sizeHint(n.raw)})`} tone="slate" defaultOpen><div className="max-h-80 overflow-auto"><JsonTree data={n.raw} /></div></Expand>
+                      <Expand label={`raw OUTPUT — what n8n returned (${sizeHint(n.raw)})`} tone="slate" defaultOpen><div className="max-h-80 overflow-auto"><JsonTree data={n.raw} /></div></Expand>
                     ) : n.summary !== undefined ? (
                       <Expand label={`data — what the LLM saw (${sizeHint(n.summary)})`} tone="emerald" defaultOpen><div className="max-h-80 overflow-auto"><JsonTree data={n.summary} /></div></Expand>
                     ) : null}
-                    {n.raw !== undefined && n.summary !== undefined && <Expand label="what the LLM saw (distilled summary)" tone="emerald"><div className="max-h-72 overflow-auto"><JsonTree data={n.summary} /></div></Expand>}
-                    {n.readable != null && <Expand label="our humanised view (plain English)" tone="sky">{n.readable}</Expand>}
+                    {/* Distilled summary alongside raw — also default-open so 'what the LLM saw' is not a 3rd click. */}
+                    {n.raw !== undefined && n.summary !== undefined && <Expand label={`what the LLM saw (distilled summary · ${sizeHint(n.summary)})`} tone="emerald" defaultOpen><div className="max-h-72 overflow-auto"><JsonTree data={n.summary} /></div></Expand>}
                   </>)}
                 </div>
               </details>
@@ -181,6 +191,7 @@ export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, 
   usage?: { inputTokens?: number; outputTokens?: number; reasoningTokens?: number; ms?: number; costUsd?: number } | null;
   sourceGuide?: ReactNode; defaultOpen?: boolean;
 }) {
+  const [allEv, setAllEv] = useState(false);
   return (
     <Band code="L3" title="Sent to the LLM" subtitle="the ONE extract call · model · context window · cost" tone="violet" defaultOpen={defaultOpen}
       status="1 call · system + user" statusTone="violet"
@@ -195,7 +206,7 @@ export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, 
         {usage?.costUsd != null && <KV k="cost" v={fmtUsd(usage.costUsd)} mono />}
         {usage?.ms != null && <KV k="latency" v={`${usage.ms} ms`} mono />}
       </div>
-      {sourceGuide && <Expand label="per-node CONTEXT — the SOURCE GUIDE the LLM is given (trust · what each node may influence · conflict priority)" tone="violet">{sourceGuide}</Expand>}
+      {sourceGuide && <Expand label="per-node CONTEXT — the SOURCE GUIDE the LLM is given (trust · what each node may influence · conflict priority)" tone="violet" defaultOpen>{sourceGuide}</Expand>}
       {sources && sources.length > 0 && (
         <Expand label={`grounding — how much of each source the LLM actually cited (sent → cited)`} tone="violet">
           <div className="text-[10px] text-gray-400 mb-1">sent = lines shown to the LLM · cited = lines it referenced in an attribute's reasoning. A low bar means the source was sent but barely grounded an answer.</div>
@@ -209,6 +220,7 @@ export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, 
         </Expand>
       )}
       <Expand label={`evidence sent — ${catalog.length} nodes (expand a node to see its exact fN lines)`} tone="violet" defaultOpen>
+        {catalog.length > 0 && <button type="button" onClick={() => setAllEv((v) => !v)} className="mb-1 text-[10px] text-violet-700 hover:underline">{allEv ? '▾ collapse all evidence lines' : '▸ expand all evidence lines'}</button>}
         {catalog.length === 0 ? <BandEmpty>Context not built yet.</BandEmpty> : catalog.map((c) => (
           <div key={c.node} className="py-0.5">
             <div className="flex justify-between gap-2 text-[10.5px]">
@@ -216,7 +228,7 @@ export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, 
               <span className="text-gray-600 shrink-0"><b>{c.sent}</b> line{c.sent === 1 ? '' : 's'}</span>
             </div>
             {c.evidence && c.evidence.length > 0 && (
-              <Expand label={`${c.evidence.length} line${c.evidence.length === 1 ? '' : 's'} → exact text`} tone="slate">
+              <Expand label={`${c.evidence.length} line${c.evidence.length === 1 ? '' : 's'} → exact text`} tone="slate" defaultOpen={allEv}>
                 {c.evidence.map((e) => (
                   <div key={e.id} data-fact-id={e.id} className="text-[10px] py-0.5 border-b border-gray-100 last:border-0 scroll-mt-16">
                     <span className="font-mono text-violet-600">[{e.id}]</span> <span className="text-gray-400">{e.tag}</span><div className="text-gray-700 break-words">{e.raw}</div>
@@ -232,8 +244,8 @@ export function L3Band({ model, maxTokens, temperature, promptVersion, catalog, 
 }
 
 // ── L4 · RAW PROMPT (system + user, verbatim) ───────────────────────────────────────────────────────────────────
-export function L4Band({ system, user, output, defaultOpen }: { system?: string; user?: string; output?: string; defaultOpen?: boolean }) {
-  const sys = system || ''; const usr = user || ''; const out = output || '';
+export function L4Band({ system, user, output, rawRequest, defaultOpen }: { system?: string; user?: string; output?: string; rawRequest?: string; defaultOpen?: boolean }) {
+  const sys = system || ''; const usr = user || ''; const out = output || ''; const req = rawRequest || '';
   const chars = sys.length + usr.length;
   return (
     <Band code="L4" title="Raw prompt — the ONE call" subtitle="system + user are two PARTS of a single chat-completion (not two calls) — nothing hidden" tone="indigo" defaultOpen={defaultOpen}
@@ -241,14 +253,20 @@ export function L4Band({ system, user, output, defaultOpen }: { system?: string;
       {!chars ? <BandEmpty>Prompt not built yet (no key, or the LLM hasn't been invoked on this view).</BandEmpty> : (
         <>
           <div className="text-[10px] text-gray-400 mb-1.5"><b>One</b> Gemini call, two parts. <b>system</b> = instructions only (role · frozen use-cases · source guide) — not your data. <b>user</b> = your ENTIRE n8n buyer payload, flattened into numbered lines (fN) the model must cite. So "evidence" = your n8n input; everything buyer-originated IS evidence — the only thing excluded is plumbing (ids · timestamps · parse flags).</div>
-          <Expand label={`① system part — ${(sys.length / 1000).toFixed(1)}k chars (instructions / source guide)`} tone="indigo">
+          <Expand label={`① system part — ${(sys.length / 1000).toFixed(1)}k chars (instructions / source guide)`} tone="indigo" defaultOpen>
             <pre className="text-[10px] leading-snug whitespace-pre-wrap break-words font-mono text-gray-600 max-h-[36rem] overflow-auto">{sys || '(empty)'}</pre>
           </Expand>
-          <Expand label={`② user part — ${(usr.length / 1000).toFixed(1)}k chars (the buyer evidence)`} tone="indigo">
+          <Expand label={`② user part — ${(usr.length / 1000).toFixed(1)}k chars (the buyer evidence)`} tone="indigo" defaultOpen>
             <pre className="text-[10px] leading-snug whitespace-pre-wrap break-words font-mono text-gray-600 max-h-[36rem] overflow-auto">{usr || '(empty)'}</pre>
           </Expand>
+          {req && (
+            <Expand label={`◆ EXACT INPUT SENT — ${(req.length / 1000).toFixed(1)}k chars (the VERBATIM request body over the wire: model + messages[system,user] + params, as ONE block)`} tone="slate">
+              <div className="text-[9px] text-gray-400 mb-1">This is the literal JSON POSTed to the LLM — system + user are NOT clubbed into one string; they're the two <code>messages[]</code> entries the API received. Copy this to reproduce the exact call.</div>
+              <pre className="text-[10px] leading-snug whitespace-pre-wrap break-words font-mono text-gray-600 max-h-[40rem] overflow-auto">{req}</pre>
+            </Expand>
+          )}
           {out && (
-            <Expand label={`③ RAW model OUTPUT — ${(out.length / 1000).toFixed(1)}k chars (the verbatim JSON the LLM returned, BEFORE parse → extractedToFinals)`} tone="violet">
+            <Expand label={`③ RAW model OUTPUT — ${(out.length / 1000).toFixed(1)}k chars (the verbatim JSON the LLM returned, BEFORE parse → extractedToFinals)`} tone="violet" defaultOpen>
               <pre className="text-[10px] leading-snug whitespace-pre-wrap break-words font-mono text-gray-600 max-h-[36rem] overflow-auto">{out}</pre>
             </Expand>
           )}
@@ -264,12 +282,14 @@ export interface EvalRow { label: string; score: number }
 export function L5Band({ attrs, evalRows, evalDrill, prune, status, drillFor, defaultOpen }: {
   attrs: OutAttr[]; evalRows?: EvalRow[]; evalDrill?: ReactNode; prune?: { kept: number; of: number; status?: string }; status: string; drillFor?: (key: string) => ReactNode; defaultOpen?: boolean;
 }) {
+  const [allOpen, setAllOpen] = useState(false);
   const shown = attrs.filter((a) => !a.held);
   const held = attrs.filter((a) => a.held);
   const groups = [...new Set(shown.map((a) => a.group || 'attributes'))];
   return (
     <Band code="L5" title="LLM output — the Buyer Twin" subtitle="reasoning · eval · governance · provenance" tone="emerald" defaultOpen={defaultOpen}
       status={status === 'done' ? `${shown.length} held` : status} statusTone={status === 'done' ? 'emerald' : 'amber'}>
+      {drillFor && shown.length > 0 && <button type="button" onClick={() => setAllOpen((v) => !v)} className="mb-1 text-[10px] text-emerald-700 hover:underline">{allOpen ? '▾ collapse all reasoning' : '▸ expand all reasoning (raw + evidence)'}</button>}
       {(evalRows && evalRows.length > 0) || prune ? (
         <div className="mb-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -280,7 +300,7 @@ export function L5Band({ attrs, evalRows, evalDrill, prune, status, drillFor, de
             ))}
             {prune && <span className="text-[10px] text-gray-500">critic kept <b className="text-gray-700">{prune.kept}</b>/{prune.of}{prune.status === 'skip' ? ' (no key)' : ''}</span>}
           </div>
-          {evalDrill && <Expand label="why these scores — ungrounded · low-confidence · verdict basis" tone="emerald">{evalDrill}</Expand>}
+          {evalDrill && <Expand label="why these scores — ungrounded · low-confidence · verdict basis" tone="emerald" defaultOpen>{evalDrill}</Expand>}
         </div>
       ) : null}
       {shown.length === 0 ? <BandEmpty>{status === 'done' ? 'No attributes survived the prune pass.' : 'Synthesis in progress…'}</BandEmpty> : (
@@ -297,7 +317,7 @@ export function L5Band({ attrs, evalRows, evalDrill, prune, status, drillFor, de
                     <span className="text-[10px] text-gray-400 tabular-nums shrink-0">{a.confidence}%</span>
                     {a.grounded === false && <span className="text-[9px] text-rose-500 shrink-0" title="no matching evidence">⚠</span>}
                   </div>
-                  {drillFor && <Expand label="full reasoning → evidence → raw line" tone="emerald">{drillFor(a.key)}</Expand>}
+                  {drillFor && <Expand label="full reasoning → evidence → raw line" tone="emerald" defaultOpen={allOpen}>{drillFor(a.key)}</Expand>}
                 </div>
               ))}
             </div>
@@ -322,12 +342,14 @@ export function L5Band({ attrs, evalRows, evalDrill, prune, status, drillFor, de
 // ── L6 · UC1 · BUYLEAD DETAILS + BUYER DETAILS — the rich card (owner: "use this UI we already had") ─────────────
 export interface OfferFieldRow { label: string; before?: string; after: string; action: string; drill?: ReactNode }
 export interface L6Requirement { title: string; posted?: string; expiry?: string; status?: string; isExpired?: boolean; recencyDays?: number; category?: string; location?: string; specs?: Array<{ k: string; v: string; filledBy?: string }>; specsStatus?: string; buyerInfo?: string; commercials?: string }
-export interface L6Availability { key: string; label: string; present: boolean; verified: boolean; value: string; externalValue?: string; source: string; note: string }
+export interface L6Availability { key: string; label: string; present: boolean; verified: boolean; isNew?: boolean; value: string; externalValue?: string; source: string; note: string }
 export interface L6ProfileRow { label: string; value: string; drill?: ReactNode; prov?: 'llm' | 'det' }
-export interface L6BuyerDetails { name?: string; memberSince?: string; responseCalls?: number; responseReplies?: number; ageGender?: string; ageGenderDrill?: ReactNode; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[] }
+export interface L6BuyerDetails { name?: string; company?: { value: string; verified: boolean; drill?: ReactNode }; memberSince?: string; memberSinceDrill?: ReactNode; device?: { value: string; note: string; source?: string }; responseCalls?: number; responseReplies?: number; ageGender?: string; ageGenderDrill?: ReactNode; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[] }
 
 // compact channel icons for the "Available" row (matches the classic Buylead-Details card)
-const AVAIL_ICON: Record<string, string> = { mobile: '📱', email: '✉️', address: '🏢', pan: '🪪', gst: '🧾', whatsapp: '💬', name: '👤', age: '🎂' };
+const AVAIL_ICON: Record<string, string> = { mobile: '📱', email: '✉️', address: '🏢', pan: '🪪', gst: '🧾', whatsapp: '💬', name: '👤', age: '🎂', company: '🏛️' };
+// device icon by resolved value (§F): WhatsApp → 💬 · any app/mobile-site → 📱 · desktop → 🖥
+const deviceIcon = (v: string): string => /whatsapp/i.test(v) ? '💬' : /android|ios|app|mobile/i.test(v) ? '📱' : '🖥';
 
 // a clean "Label : value" row; clickable (reveals its drill) when a deduction/source exists, plain otherwise
 function DrillRow({ label, value, drill }: { label: ReactNode; value: ReactNode; drill?: ReactNode }) {
@@ -337,14 +359,16 @@ function DrillRow({ label, value, drill }: { label: ReactNode; value: ReactNode;
   );
 }
 
-export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, locationCorrected, fields, offerEval, enrichControl, gstVerified, stillAsk, mode: modeProp, onMode, defaultOpen }: {
+export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFrequency, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, locationCorrected, fields, offerEval, enrichControl, enrichInput, gstVerified, stillAsk, mode: modeProp, onMode, defaultOpen }: {
   picker?: ReactNode; selectedReq?: L6Requirement | null; uc2?: UC2Enrichment | null;
   productsOfInterest?: { value: string; changed: boolean; drill?: ReactNode } | null;
+  reqFrequency?: { value: string; drill?: ReactNode } | null;
   requirementCount?: number; buyerDetails?: L6BuyerDetails | null; retailLead?: boolean;
   titleDrill?: ReactNode; locationDrill?: ReactNode; locationCorrected?: { from: string; to: string };
   fields: OfferFieldRow[]; offerEval?: { groundedPct: number; hallucinations: number; verdict: string } | null;
-  enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[] } | null; stillAsk?: string[];
+  enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[]; advance?: { legalName?: string; tradeName?: string; constitution?: string; status?: string; taxpayerType?: string; registeredAddress?: string; registrationDate?: string; natureOfBusiness?: string[]; sac?: { code: string; desc: string }[]; signatories?: string[]; turnover?: string; email?: string; mobile?: string; centralJurisdiction?: string; stateJurisdiction?: string; filing?: { latest?: string; types: string[]; count: number } } | null } | null; stillAsk?: string[];
   mode?: 'original' | 'profile' | 'requirement'; onMode?: (m: 'original' | 'profile' | 'requirement') => void; defaultOpen?: boolean;
+  enrichInput?: unknown;
 }) {
   const ACTION_TONE: Record<string, string> = { kept: 'text-gray-400', corrected: 'text-amber-700', added: 'text-emerald-700', dropped: 'text-rose-600 line-through', suggested: 'text-sky-700' };
   const avail = (buyerDetails?.availability || []).filter((a) => a.present);
@@ -358,16 +382,37 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
   // Clickability by tab (owner): Original = nothing · Buyer Profile = RIGHT column only · Requirement = left+right+top.
   const profileClickable = mode !== 'original';   // right column (buyer profile / identity) — Profile + Requirement
   const reqClickable = mode === 'requirement';    // left + top (requirement: title · location · enriched specs)
+  // Original = "what we had BEFORE AI": only the recorded lead + raw recorded identity (no AI-extracted profile rows,
+  // no Products-of-Interest, no Identity Confidence, no Needs-input; Available is single-tick, no cross-source ✓✓).
+  const isOriginal = mode === 'original';
   // GST Verified ribbon — shown ONLY when the GST node returned a GSTIN; right of the "Buyer Details" heading.
   // Expandable (clickable modes) to the decode; a static badge in Original.
   const gstRibbon = !gstVerified ? null : profileClickable ?(
     <details className="relative shrink-0">
       <summary className="cursor-pointer list-none inline-flex items-center gap-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-300 px-2 py-0.5 text-[10px] font-bold">🧾 GST Verified{gstVerified.count > 1 ? ` (${gstVerified.count})` : ''} ▾</summary>
-      <div className="absolute right-0 mt-1 z-20 w-64 rounded-lg bg-white border border-emerald-200 shadow-lg p-2 text-[10.5px] text-gray-700 font-normal">
+      <div className="absolute right-0 mt-1 z-20 w-80 max-h-[28rem] overflow-auto rounded-lg bg-white border border-emerald-200 shadow-lg p-2 text-[10.5px] text-gray-700 font-normal">
         <div className="font-mono text-gray-800 break-all">{gstVerified.gstin}</div>
         <div className="text-gray-500 mt-0.5">{gstVerified.state} · {gstVerified.entity}</div>
+        {/* GST-Advance registration record (KYB FFFQ/v2) — the full taxpayer profile, when fetched */}
+        {gstVerified.advance && (
+          <div className="mt-1.5 border-t border-emerald-100 pt-1.5 space-y-0.5">
+            {gstVerified.advance.legalName && <div><span className="text-gray-400">Legal:</span> <b>{gstVerified.advance.legalName}</b></div>}
+            {gstVerified.advance.tradeName && gstVerified.advance.tradeName !== gstVerified.advance.legalName && <div><span className="text-gray-400">Trade:</span> {gstVerified.advance.tradeName}</div>}
+            {gstVerified.advance.constitution && <div><span className="text-gray-400">Constitution:</span> {gstVerified.advance.constitution}</div>}
+            {(gstVerified.advance.status || gstVerified.advance.taxpayerType) && <div><span className="text-gray-400">Status:</span> {[gstVerified.advance.status, gstVerified.advance.taxpayerType].filter(Boolean).join(' · ')}{gstVerified.advance.registrationDate ? ` · since ${gstVerified.advance.registrationDate}` : ''}</div>}
+            {gstVerified.advance.natureOfBusiness && gstVerified.advance.natureOfBusiness.length > 0 && <div><span className="text-gray-400">Nature:</span> {gstVerified.advance.natureOfBusiness.join(', ')}</div>}
+            {gstVerified.advance.turnover && <div><span className="text-gray-400">Turnover:</span> {gstVerified.advance.turnover}</div>}
+            {gstVerified.advance.registeredAddress && <div><span className="text-gray-400">Address:</span> {gstVerified.advance.registeredAddress}</div>}
+            {gstVerified.advance.sac && gstVerified.advance.sac.length > 0 && <div className="mt-0.5"><span className="text-gray-400">HSN/SAC:</span><div className="ml-1">{gstVerified.advance.sac.slice(0, 8).map((s) => <div key={s.code} className="text-[9.5px] text-gray-600"><span className="font-mono">{s.code}</span> {s.desc}</div>)}</div></div>}
+            {gstVerified.advance.signatories && gstVerified.advance.signatories.length > 0 && <div><span className="text-gray-400">Signatories:</span> {gstVerified.advance.signatories.join(', ')}</div>}
+            {gstVerified.advance.filing && gstVerified.advance.filing.count > 0 && <div><span className="text-gray-400">Filing:</span> {gstVerified.advance.filing.latest || `${gstVerified.advance.filing.count} returns`} <span className="text-gray-400">({gstVerified.advance.filing.types.join('/')})</span></div>}
+            {(gstVerified.advance.email || gstVerified.advance.mobile) && <div><span className="text-gray-400">Contact:</span> {[gstVerified.advance.email, gstVerified.advance.mobile].filter(Boolean).join(' · ')}</div>}
+            {gstVerified.advance.centralJurisdiction && <div className="text-gray-400 text-[9px]">CBIC: {gstVerified.advance.centralJurisdiction}</div>}
+            {gstVerified.advance.stateJurisdiction && <div className="text-gray-400 text-[9px]">State: {gstVerified.advance.stateJurisdiction}</div>}
+          </div>
+        )}
         {gstVerified.list.length > 1 && <div className="mt-1 border-t border-gray-100 pt-1"><span className="text-gray-400">all GSTINs:</span> {gstVerified.list.map((g) => <div key={g} className="font-mono text-[9.5px] text-gray-600 break-all">{g}</div>)}</div>}
-        <div className="text-gray-400 mt-1">source: Mobile/Email→GST (KYB)</div>
+        <div className="text-gray-400 mt-1">source: Mobile/Email→GST (KYB){gstVerified.advance ? ' · GST Verification Advance (FFFQ/v2)' : ''}</div>
       </div>
     </details>
   ) : (
@@ -442,6 +487,14 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
               ) : selectedReq.specsStatus && selectedReq.specsStatus !== 'present' && !selectedReq.buyerInfo && !selectedReq.commercials ? (
                 <div className="mt-2 text-[11px] text-gray-400 italic">{selectedReq.specsStatus === 'getisq5_empty_run' ? '⚠ getisq5 returned NOTHING this pull (specs API empty/timed out) — re-pull to fetch ISQ' : selectedReq.specsStatus === 'beyond_fetch_cap' ? 'ISQ specs not fetched for this lead this pull (beyond the per-offer ISQ fetch cap)' : selectedReq.specsStatus === 'not_fetched' ? "no ISQ on file for this lead (getisq5 didn't return it)" : selectedReq.specsStatus === 'none' ? "no ISQ specs — buyer didn't answer the ISQ for this lead" : `no specs (${selectedReq.specsStatus})`}</div>
               ) : null}
+              {/* V10 §D — Purchase frequency MOVED here: it's a per-requirement read (how often THEY buy this line), not a buyer-wide trait. LLM-derived (violet), clickable in Profile/Requirement. */}
+              {!isOriginal && reqFrequency && (
+                <div className="mt-2 text-[12px]">
+                  {profileClickable && reqFrequency.drill ? (
+                    <details className="inline-block"><summary className="cursor-pointer list-none"><span className="font-semibold text-violet-700">Purchase frequency</span><span className="text-gray-400">: </span><span className="text-violet-700">{reqFrequency.value}</span><span className="text-[9px] text-gray-300 ml-1">▾</span></summary><div className="mt-1 ml-2 rounded bg-gray-50 border border-gray-200 p-2 text-[10px]">{reqFrequency.drill}</div></details>
+                  ) : (<><span className="font-semibold text-violet-700">Purchase frequency</span><span className="text-gray-400">: </span><span className="text-violet-700">{reqFrequency.value}</span></>)}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -452,11 +505,14 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
               <span className="text-[13px] font-semibold text-indigo-700 underline">Buyer Details</span>
               {gstRibbon}
             </div>
-            {productsOfInterest && <DrillRow label={<span className="text-violet-700">Products of Interest</span>} value={productsOfInterest.value || '—'} drill={profileClickable ?productsOfInterest.drill : undefined} />}
+            {/* V10 §B — Company anchor (deterministic, teal). ✓✓ when a GST on file corroborates a registered entity. Shown in every mode (it's recorded identity). */}
+            {buyerDetails.company && <DrillRow label={<span className="text-teal-700">Company{!isOriginal && buyerDetails.company.verified && <span className="ml-1 text-emerald-600 text-[9px] font-bold">✓✓</span>}</span>} value={buyerDetails.company.value} drill={profileClickable ? buyerDetails.company.drill : undefined} />}
+            {!isOriginal && productsOfInterest && <DrillRow label={<span className="text-violet-700">Products of Interest</span>} value={productsOfInterest.value || '—'} drill={profileClickable ?productsOfInterest.drill : undefined} />}
             {requirementCount != null && <DrillRow label="Requirement till date" value={requirementCount} />}
             {(buyerDetails.responseCalls != null || buyerDetails.responseReplies != null) && <DrillRow label="Response" value={`Calls: ${buyerDetails.responseCalls ?? 0} | Replies: ${buyerDetails.responseReplies ?? 0}`} />}
             {buyerDetails.ageGender && <DrillRow label={<span className="text-teal-700">Age / Gender</span>} value={buyerDetails.ageGender} drill={profileClickable ?buyerDetails.ageGenderDrill : undefined} />}
-            {buyerDetails.memberSince && <DrillRow label="Member since" value={buyerDetails.memberSince} />}
+            {/* V10 §G — Member since: deterministic teal, 100% (GLUSR tenure), never "new". Above Available. */}
+            {buyerDetails.memberSince && <DrillRow label={<span className="text-teal-700">Member since</span>} value={buyerDetails.memberSince} drill={profileClickable ? buyerDetails.memberSinceDrill : undefined} />}
             {/* Available — icons only; click an icon to reveal its value · source (✓ profile / ✓✓ external) */}
             <div className="flex items-start gap-2 text-[12px] py-1">
               <span className="w-40 shrink-0 font-semibold text-teal-700">Available</span>
@@ -464,22 +520,32 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
                 {avail.length === 0 ? <span className="text-gray-400">—</span> : avail.map((a) => profileClickable ?(
                   // name="avail" → exclusive accordion (opening one closes the others); popover is ABSOLUTE so opening
                   // it never reflows / shuffles the icon row (the "random" behaviour the owner hit).
+                  // V10 §E: a.isNew (anchor discovered via external, absent from profile) → VIOLET border + violet ✦ tick.
                   <details key={a.key} name="avail" className="relative inline-block align-middle mr-1.5">
-                    <summary className={`cursor-pointer list-none relative inline-flex items-center justify-center w-7 h-7 rounded border text-[13px] ${a.verified ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-gray-50'}`} title={a.label}>{AVAIL_ICON[a.key] || '•'}<span className={`absolute -top-1 -right-1 text-[7px] font-bold ${a.verified ? 'text-emerald-600' : 'text-gray-400'}`}>{a.verified ? '✓✓' : '✓'}</span></summary>
-                    <div className="absolute left-0 top-full mt-1 z-30 w-52 rounded-lg bg-white border border-gray-200 shadow-lg p-1.5 text-[10px] text-gray-600"><b>{a.label}</b>: {a.value || '—'}<div className="text-gray-500 mt-0.5">{a.note}</div><div className="text-gray-400">source: {a.source}</div></div>
+                    {/* §E: tick keeps ✓ (single) / ✓✓ (cross-source) — VIOLET (border+tick) carries the NEW axis, NOT a different symbol. */}
+                    <summary className={`cursor-pointer list-none relative inline-flex items-center justify-center w-7 h-7 rounded border text-[13px] ${a.isNew ? 'border-violet-300 bg-violet-50' : a.verified ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-gray-50'}`} title={a.label}>{AVAIL_ICON[a.key] || '•'}<span className={`absolute -top-1 -right-1 text-[7px] font-bold ${a.isNew ? 'text-violet-500' : a.verified ? 'text-emerald-600' : 'text-gray-400'}`}>{a.verified ? '✓✓' : '✓'}</span></summary>
+                    {/* §A: deterministic anchors carry a 100% confidence chip (the value is on-file; ✓/✓✓ conveys corroboration). */}
+                    <div className="absolute left-0 top-full mt-1 z-30 w-52 rounded-lg bg-white border border-gray-200 shadow-lg p-1.5 text-[10px] text-gray-600"><div className="flex items-center gap-1 mb-0.5"><b>{a.label}</b>{confidenceChip(100, false)}{a.isNew && <span className="text-violet-600 font-semibold">NEW</span>}</div>{a.value || '—'}<div className="text-gray-500 mt-0.5">{a.note}</div><div className="text-gray-400">source: {a.source}</div></div>
                   </details>
                 ) : (
-                  // Original (frozen) — static icon, no popover
-                  <span key={a.key} className={`relative inline-flex items-center justify-center w-7 h-7 rounded border text-[13px] align-middle mr-1.5 ${a.verified ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-gray-50'}`} title={`${a.label}: ${a.value || '—'}`}>{AVAIL_ICON[a.key] || '•'}<span className={`absolute -top-1 -right-1 text-[7px] font-bold ${a.verified ? 'text-emerald-600' : 'text-gray-400'}`}>{a.verified ? '✓✓' : '✓'}</span></span>
+                  // Original — static icon, SINGLE tick only (no cross-source ✓✓ and no NEW marker; that's enrichment, shown in Profile)
+                  <span key={a.key} className="relative inline-flex items-center justify-center w-7 h-7 rounded border border-gray-200 bg-gray-50 text-[13px] align-middle mr-1.5" title={`${a.label}: ${a.value || '—'}`}>{AVAIL_ICON[a.key] || '•'}<span className="absolute -top-1 -right-1 text-[7px] font-bold text-gray-400">✓</span></span>
+                ))}
+                {/* V10 §F — device: which surface the buyer transacted on. Same w-7 h-7 icon-square as the other anchors; expandable (clickable modes) to value · source · note, static icon in Original. */}
+                {buyerDetails.device && (profileClickable ? (
+                  <details name="avail" className="relative inline-block align-middle mr-1.5">
+                    <summary className="cursor-pointer list-none relative inline-flex items-center justify-center w-7 h-7 rounded border border-teal-300 bg-teal-50 text-[13px]" title={`Device: ${buyerDetails.device.value}`}>{deviceIcon(buyerDetails.device.value)}</summary>
+                    <div className="absolute left-0 top-full mt-1 z-30 w-52 rounded-lg bg-white border border-gray-200 shadow-lg p-1.5 text-[10px] text-gray-600"><b>Device</b>: {buyerDetails.device.value}<div className="text-gray-500 mt-0.5">{buyerDetails.device.note}</div>{buyerDetails.device.source && <div className="text-gray-400">source: {buyerDetails.device.source}</div>}</div>
+                  </details>
+                ) : (
+                  <span className="relative inline-flex items-center justify-center w-7 h-7 rounded border border-gray-200 bg-gray-50 text-[13px] align-middle mr-1.5" title={`Device: ${buyerDetails.device.value}`}>{deviceIcon(buyerDetails.device.value)}</span>
                 ))}
               </span>
             </div>
-            {/* Identity Confidence — trust signal about the anchors, pinned right below Available (owner). LLM-derived → violet key. */}
-            {buyerDetails.identityConfidence && <DrillRow label={<span className="text-violet-700">Identity Confidence</span>} value={buyerDetails.identityConfidence.value || '—'} drill={profileClickable ?buyerDetails.identityConfidence.drill : undefined} />}
-            {/* buyer-profile findings — key COLOURED by provenance (violet=LLM · teal=deterministic/direct); value plain; detail on click */}
-            {buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<span className={p.prov === 'det' ? 'text-teal-700' : 'text-violet-700'}>{p.label}</span>} value={p.value || '—'} drill={profileClickable ?p.drill : undefined} />))}
-            {/* Still-ask — questions that could NOT be deduced at high confidence (not everything can be); ask the buyer */}
-            {stillAsk && stillAsk.length > 0 && (
+            {/* AI-EXTRACTED rows (Identity Confidence · profile findings · Needs-input) — hidden in Original (raw view); shown in Buyer Profile / Requirement */}
+            {!isOriginal && buyerDetails.identityConfidence && <DrillRow label={<span className="text-violet-700">Identity Confidence</span>} value={buyerDetails.identityConfidence.value || '—'} drill={profileClickable ?buyerDetails.identityConfidence.drill : undefined} />}
+            {!isOriginal && buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<span className={p.prov === 'det' ? 'text-teal-700' : 'text-violet-700'}>{p.label}</span>} value={p.value || '—'} drill={profileClickable ?p.drill : undefined} />))}
+            {!isOriginal && stillAsk && stillAsk.length > 0 && (
               <div className="mt-3 rounded-md bg-amber-50/70 border border-amber-200 px-2.5 py-1.5">
                 <div className="text-[11px] font-semibold text-amber-800">Needs input — ask the buyer (+{stillAsk.length})</div>
                 <div className="text-[10.5px] text-amber-700 mt-0.5">{stillAsk.join(' · ')}</div>
@@ -497,7 +563,8 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
       </div>
       {/* one collapsed debug expander (offer-LLM enrichment + correctness) — off the clean card */}
       {(fields.length > 0 || offerEval || enrichControl) && (
-        <Expand label="＋ enrichment & correctness (LLM debug)" tone="amber">
+        <Expand label="＋ enrichment & correctness (LLM debug)" tone="amber" defaultOpen>
+          {enrichInput !== undefined && <Expand label="raw INPUT — enrichment source fields sent to the offer-LLM" tone="slate" defaultOpen><div className="max-h-72 overflow-auto"><JsonTree data={enrichInput} openDepth={99} /></div></Expand>}
           <div className="flex items-center gap-2 mb-1.5">
             {offerEval && (<>
               <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${offerEval.groundedPct >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}><b>{Math.round(offerEval.groundedPct)}%</b> grounded</span>
@@ -512,7 +579,7 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, requireme
                 <span className="text-gray-400 shrink-0">{f.label}</span>
                 <span className="text-right min-w-0 break-words">{f.before && f.action !== 'kept' && <span className="line-through text-rose-300 mr-1">{f.before}</span>}<span className={ACTION_TONE[f.action] || 'text-gray-700'}>{f.after || '—'}</span><span className="text-[9px] text-gray-300 ml-1">{f.action}</span></span>
               </div>
-              {f.drill && <Expand label="reasoning → evidence" tone="amber">{f.drill}</Expand>}
+              {f.drill && <Expand label="reasoning → evidence" tone="amber" defaultOpen>{f.drill}</Expand>}
             </div>
           ))}
         </Expand>
@@ -585,21 +652,21 @@ export function UC2DebugBand({ reqTitle, status, model, promptVersion, usage, ev
               )}
               {applied.length === 0 && status === 'done' && <div className="text-[11px] text-gray-500 italic">No changes applied — all {held.length} candidate edit{held.length === 1 ? ' was' : 's were'} held (ungrounded or below the confidence gate). The base requirement stands.</div>}
               {held.length > 0 && (
-                <details className="rounded-lg border border-gray-150 bg-gray-50/50">
+                <details open className="rounded-lg border border-gray-150 bg-gray-50/50">
                   <summary className="cursor-pointer list-none px-2 py-1 text-[10px] text-gray-500">Held / not applied ({held.length}) — assessed but ungrounded or below the confidence gate ▾</summary>
-                  <div className="px-2 pb-1.5 space-y-0.5">{held.map((e, i) => editRow(e, i))}</div>
+                  <div className="px-2 pb-1.5 space-y-0.5">{held.map((e, i) => editRow(e, i, true))}</div>
                 </details>
               )}
             </div>
           ) : status === 'done' ? <div className="text-[11px] text-gray-400 italic">No corrections/additions — requirement confirmed clean.</div> : <div className="text-[11px] text-gray-400">{status === 'loading' ? 'running enrichment…' : 'idle'}</div>}
           {input && (input.system || input.user) && (
-            <Expand label="＋ prompt input (system · user — exactly what the LLM saw)" tone="violet">
+            <Expand label="＋ prompt input (system · user — exactly what the LLM saw)" tone="violet" defaultOpen>
               {input.system && <><div className="text-[9px] uppercase tracking-wide text-gray-400 mt-1">system</div><pre className="whitespace-pre-wrap break-words text-[10px] text-gray-600">{input.system}</pre></>}
               {input.user && <><div className="text-[9px] uppercase tracking-wide text-gray-400 mt-1">user</div><pre className="whitespace-pre-wrap break-words text-[10px] text-gray-600">{input.user}</pre></>}
             </Expand>
           )}
           {rawOutput && (
-            <Expand label={`＋ RAW model OUTPUT — ${(rawOutput.length / 1000).toFixed(1)}k chars (verbatim JSON, BEFORE parse → mergeUC2LLM)`} tone="violet">
+            <Expand label={`＋ RAW model OUTPUT — ${(rawOutput.length / 1000).toFixed(1)}k chars (verbatim JSON, BEFORE parse → mergeUC2LLM)`} tone="violet" defaultOpen>
               <pre className="whitespace-pre-wrap break-words text-[10px] font-mono text-gray-600 max-h-[28rem] overflow-auto">{rawOutput}</pre>
             </Expand>
           )}
@@ -612,22 +679,41 @@ export function UC2DebugBand({ reqTitle, status, model, promptVersion, usage, ev
 // ── CRAWLER · web-verify (OSINT) — FRONTEND-only async scrape, rendered as its own block BELOW UC2 (owner) ────────
 // On-demand: a button fires runSellerVerify(glid) (fire → poll), kept OUT of the n8n pull so it never stalls the
 // synchronous response. Self-contained state. Raw scrape result shown verbatim (shape captured on first live call).
-export function CrawlerBand({ glid, defaultOpen }: { glid?: string; defaultOpen?: boolean }) {
-  const [st, setSt] = useState<SellerVerifyState>({ status: 'idle' });
-  const [tick, setTick] = useState(0);
-  const run = () => { if (!glid) return; setSt({ status: 'running' }); setTick(0); runSellerVerify(glid, { onTick: (n) => setTick(n) }).then(setSt).catch((e) => setSt({ status: 'failed', error: String(e) })); };
-  const statusTxt = st.status === 'idle' ? 'on-demand' : st.status === 'running' ? `scraping… (${tick})` : st.status;
+export function CrawlerBand({ glid, seed, defaultOpen }: { glid?: string; seed?: OsintSeed; defaultOpen?: boolean }) {
+  const [st, setSt] = useState<OsintEnrichment>({ status: 'idle', queries: [], results: [], signals: [] });
+  const [tick, setTick] = useState({ done: 0, total: 0 });
+  const sd: OsintSeed = seed || { glid };
+  const run = () => { setSt({ status: 'running', queries: [], results: [], signals: [] }); setTick({ done: 0, total: 0 }); runOsintEnrichment(sd, { onTick: (done, total) => setTick({ done, total }) }).then(setSt).catch((e) => setSt({ status: 'failed', queries: [], results: [], signals: [], error: String(e) })); };
+  const statusTxt = st.status === 'idle' ? 'on-demand' : st.status === 'running' ? `searching… (${tick.done}/${tick.total})` : st.status === 'done' ? `${st.signals.length} signals · ${st.results.length} urls${st.ms ? ` · ${(st.ms / 1000).toFixed(0)}s` : ''}` : st.status;
   return (
     <Band code="OSINT" title="Web verify (crawler) — on-demand entity scrape" tone="slate" defaultOpen={defaultOpen} status={statusTxt} statusTone={st.status === 'done' ? 'indigo' : 'slate'}>
-      <div className="text-[10.5px] text-gray-500 mb-1.5">Frontend-only async OSINT scrape for this GLID (fire → poll). Kept OUT of the n8n pull so it never stalls the sync response (V10 lock). Uses the IndiaMART LLM key.</div>
-      {!hasCrawlerKey() ? <BandEmpty>No LLM key — crawler disabled (set VITE_LLM_KEY).</BandEmpty> : !glid ? <BandEmpty>No GLID in context.</BandEmpty> : (
+      <div className="text-[10.5px] text-gray-500 mb-1.5">Frontend-only OSINT — fires a Firecrawl query-matrix (name·company·mobile·GST·PAN + site-scoped social/B2B) → LLM extracts specific signals. OUT of the n8n pull (V10 lock). 🔒 <b>OBSERVED-ONLY</b> — these LOW-confidence signals are NEVER folded into the profile twin (a fact graduates only when ≥2 sources corroborate). Uses the IndiaMART LLM key.</div>
+      {!hasCrawlerKey() ? <BandEmpty>No LLM key — crawler disabled (set VITE_LLM_KEY).</BandEmpty> : (!glid && !seed) ? <BandEmpty>No GLID / anchors in context.</BandEmpty> : (
         <>
-          <button type="button" onClick={run} disabled={st.status === 'running'} className="text-[11px] px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50">{st.status === 'running' ? 'Scraping…' : st.status === 'done' ? 'Re-run scrape' : `Verify GLID ${glid}`}</button>
-          {st.status === 'failed' && <div className="text-[10.5px] text-rose-500 mt-1">failed: {st.error || 'unknown'}{st.ms ? ` (${(st.ms / 1000).toFixed(0)}s)` : ''}</div>}
+          <button type="button" onClick={run} disabled={st.status === 'running'} className="text-[11px] px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50">{st.status === 'running' ? 'Searching…' : st.status === 'done' ? 'Re-run web verify' : `Verify GLID ${glid || ''}`}</button>
+          {st.status === 'failed' && <div className="text-[10.5px] text-rose-500 mt-1">failed: {st.error || 'unknown'}</div>}
+          {st.status === 'no-anchor' && <div className="text-[10.5px] text-amber-600 mt-1">{st.note}</div>}
           {st.status === 'done' && (
-            <Expand label={`＋ scrape result${st.ms ? ` · ${(st.ms / 1000).toFixed(0)}s · ${st.polls ?? 0} polls` : ''}`} tone="slate">
-              <pre className="whitespace-pre-wrap break-words text-[10px] font-mono text-gray-600 max-h-[28rem] overflow-auto">{(() => { try { return JSON.stringify(st.result, null, 2); } catch { return String(st.result); } })()}</pre>
-            </Expand>
+            <div className="mt-1.5 space-y-1">
+              {/* Layer C — extracted signals (the readable takeaway, each cited to a source URL) */}
+              <Expand label={`signals (${st.signals.length}) — observed-only`} tone="slate" defaultOpen>
+                {st.signals.length === 0 ? <div className="text-[10.5px] text-gray-400">no grounded signals extracted from the results</div> : st.signals.map((s, i) => (
+                  <div key={i} className="flex items-start gap-2 text-[10.5px] py-0.5">
+                    <span className="text-[8px] uppercase font-bold text-slate-500 w-24 shrink-0 pt-0.5">{s.signal_type}</span>
+                    <span className="flex-1 text-gray-700 break-words">{s.value} {confidenceChip(s.confidence, false)}</span>
+                    {s.source_url && <a href={s.source_url} target="_blank" rel="noreferrer" className="text-[9px] text-indigo-500 hover:underline shrink-0">{s.platform || 'src'} ↗</a>}
+                  </div>
+                ))}
+              </Expand>
+              {/* Layer A — the query matrix that ran (transparency on what we searched) */}
+              <Expand label={`queries fired (${st.queries.length})`} tone="slate" defaultOpen>
+                {st.queries.map((q, i) => (<div key={i} className="text-[10px] py-0.5"><span className="text-gray-400">{q.anchor}:</span> <span className="font-mono text-gray-600 break-all">{q.q}</span></div>))}
+              </Expand>
+              {/* Layer B — RAW Firecrawl output, verbatim */}
+              <Expand label={`RAW results (${st.results.length} urls)`} tone="slate" defaultOpen>
+                <pre className="whitespace-pre-wrap break-words text-[10px] font-mono text-gray-600 max-h-[28rem] overflow-auto">{(() => { try { return JSON.stringify(st.results, null, 2); } catch { return String(st.results); } })()}</pre>
+              </Expand>
+            </div>
           )}
         </>
       )}
@@ -658,8 +744,8 @@ export function L7Band({ rows, added, ask, dropped, coverage, hasBrain, drill, d
             <div className="rounded-lg bg-sky-50 border border-sky-200 py-1.5"><div className="text-[16px] font-bold text-sky-700 tabular-nums">{added.length}</div><div className="text-[9px] text-sky-600 uppercase tracking-wide">added (intel)</div></div>
           </div>
           {ask.length > 0 && <Expand label={`still ask (${ask.length})`} tone="teal" defaultOpen>{ask.map((q, i) => <div key={i} className="text-[11px] text-gray-700 py-0.5">• {q}</div>)}</Expand>}
-          {dropped.length > 0 && <Expand label={`dropped — proven known, the guardrail (${dropped.length})`} tone="emerald">{dropped.map((d, i) => <div key={i} className="flex justify-between gap-2 text-[10.5px] py-0.5"><span className="text-gray-600">{d.key}</span><span className="text-gray-400">{d.reason}</span></div>)}</Expand>}
-          {added.length > 0 && <Expand label={`added from category intel (${added.length})`} tone="sky">{added.map((a, i) => <div key={i} className="text-[11px] text-gray-700 py-0.5">+ {a}</div>)}</Expand>}
+          {dropped.length > 0 && <Expand label={`dropped — proven known, the guardrail (${dropped.length})`} tone="emerald" defaultOpen>{dropped.map((d, i) => <div key={i} className="flex justify-between gap-2 text-[10.5px] py-0.5"><span className="text-gray-600">{d.key}</span><span className="text-gray-400">{d.reason}</span></div>)}</Expand>}
+          {added.length > 0 && <Expand label={`added from category intel (${added.length})`} tone="sky" defaultOpen>{added.map((a, i) => <div key={i} className="text-[11px] text-gray-700 py-0.5">+ {a}</div>)}</Expand>}
           {rows.length > 0 && (
             <div className="mt-2">
               <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">per-requirement alignment (every deduction → its brains)</div>

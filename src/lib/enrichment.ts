@@ -680,19 +680,31 @@ export function extractServerTrace(raw: unknown): ServerTrace | null {
 }
 
 // L1 · per-node health (n8n emits __health on the bi-user-insights response; the default -advanced path does not).
-export interface HealthNode { node: string; ok: boolean; source?: string; latency_ms?: number; output_count?: number; keys?: number }
+export interface HealthNode { node: string; ok: boolean; source?: string; latency_ms?: number; output_count?: number; keys?: number; status?: string; version?: string; fetched_at?: string; error_msg?: string; requested?: number }
 let lastHealth: HealthNode[] = [];
 export function getEnrichmentHealth(): HealthNode[] { return lastHealth; }
 export function extractHealth(raw: unknown): HealthNode[] {
   const h = raw && typeof raw === 'object' ? (raw as { __health?: unknown }).__health : undefined;
   if (!Array.isArray(h)) return [];
-  return h.map((n) => { const o = (n && typeof n === 'object') ? (n as Record<string, unknown>) : {}; return { node: String(o.node || ''), ok: o.ok !== false, source: o.source != null ? String(o.source) : undefined, latency_ms: typeof o.latency_ms === 'number' ? o.latency_ms : undefined, output_count: typeof o.output_count === 'number' ? o.output_count : undefined, keys: typeof o.keys === 'number' ? o.keys : undefined }; });
+  return h.map((n) => { const o = (n && typeof n === 'object') ? (n as Record<string, unknown>) : {}; return { node: String(o.node || ''), ok: o.ok !== false, source: o.source != null ? String(o.source) : undefined, latency_ms: typeof o.latency_ms === 'number' ? o.latency_ms : undefined, output_count: typeof o.output_count === 'number' ? o.output_count : (typeof o.count === 'number' ? o.count : undefined), keys: typeof o.keys === 'number' ? o.keys : undefined, status: o.status != null ? String(o.status) : undefined, version: o.version != null ? String(o.version) : undefined, fetched_at: o.fetched_at != null ? String(o.fetched_at) : undefined, error_msg: o.error_msg != null ? String(o.error_msg) : undefined, requested: typeof o.requested === 'number' ? o.requested : undefined }; });
 }
 // (v11) pickRequirementBrain removed with the dual-fetch — requirement_brain now rides the single response's
 // top-level field, recovered in normalizeNewUserInsights (lines ~666-670). One webhook, one call.
 
-export async function fetchEnrichment(glid: string): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> {
+// DEDUP GUARD — "why are there always two runs, I fired once": the pull had NO in-flight guard, so it fired twice
+// (React StrictMode double-invokes effects in dev via main.tsx; the landing auto-pull + a manual pull; or V3+V4 both
+// mounting). Each unguarded call = a separate ~7-min n8n execution. This map coalesces concurrent callers for the SAME
+// glid onto ONE fetch → n8n Executions shows a SINGLE run per GLID. Entry clears on settle, so a later re-pull works.
+const enrichInFlight = new Map<string, Promise<{ profile: EnrichmentProfile | null; raw: unknown }>>();
+export async function fetchEnrichment(glid: string, opts?: { fast?: boolean }): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> {
   if (!glid?.trim()) return { profile: null, raw: null };
+  // fast=1 (respond-after-facts): the workflow gates web_osint + udyam OFF (v16.5) → responds at the ~164s fast tier.
+  // Deduped SEPARATELY from the full pull (different key) so the frontend can fire both in parallel: fast paints first,
+  // full upgrades with web_osint/udyam. On a v16.4-or-earlier endpoint fast=1 is simply ignored (full pull) — safe.
+  const _key = glid.trim() + (opts?.fast ? ':fast' : '');
+  const _inflight = enrichInFlight.get(_key);
+  if (_inflight) return _inflight; // a pull for this GLID is already running — share it, don't fire a 2nd execution
+  const _run = (async (): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> => {
   try {
     // `-advanced` is the v12 path: same 7 buyer sources PLUS the appended `requirement_brain`
     // item (Buyer Brain facts + known specs/intent) that the form-side resolver consumes. The
@@ -712,7 +724,10 @@ export async function fetchEnrichment(glid: string): Promise<{ profile: Enrichme
     // SINGLE FETCH (v11) — the dual-fetch is GONE (fixes the "4 executions"). The old second call hit the IDENTICAL
     // N8N_HOOK, so it was a pure duplicate. requirement_brain now rides the SAME response's top-level field
     // (recovered in normalizeNewUserInsights), so UC2/L7 keep working with ONE call. (StrictMode still double-invokes in dev.)
-    const res = await fetch(api(`/api/imworkflow/webhook/${path}?glid=${g}`), { signal: AbortSignal.timeout(240000) });
+    // V16.2 pulls run ~7-10 min (Parallel web-OSINT + IDfy/Sign3 async polls). The old 240s (4min) abort fired BEFORE
+    // n8n responded → screen fell back to "No buyer data". Bumped to 660s (11 min) to cover the real runtime.
+    // (Proper fix is speeding up the pull — de-Wait the async poll loops — but this unblocks the dashboard now.)
+    const res = await fetch(api(`/api/imworkflow/webhook/${path}?glid=${g}${opts?.fast ? '&fast=1' : ''}`), { signal: AbortSignal.timeout(660000) });
     if (!res.ok) return { profile: null, raw: null };
     const _resp = await res.json();
     // n8n "Respond to Webhook" may emit the single final-assemble item WRAPPED IN AN ARRAY ([{ glid, sources, … }]).
@@ -738,6 +753,33 @@ export async function fetchEnrichment(glid: string): Promise<{ profile: Enrichme
   } catch {
     return { profile: null, raw: null };
   }
+  })();
+  enrichInFlight.set(_key, _run);
+  try { return await _run; } finally { enrichInFlight.delete(_key); }
+}
+
+// ── B · independent server-side-LLM buyer-profile endpoint (bi-buyer-profile) ──────────────────────────────────
+// Calls the SEPARATE n8n workflow (unique path — never fires bi-user-insights-v10x). That workflow = v16.4 pipeline +
+// a final LLM node → returns { glid, sources, derived_anchors, llm_profile (the TrustSEAL card attributes), __health }.
+// The alternate UI (BuyerProfileCard / BuyerProfileStandalone) renders this directly — no client-side extract. Same
+// dev-proxy (/api/imworkflow → imworkflow.intermesh.net), just a different webhook path. Deduped like fetchEnrichment.
+const profileInFlight = new Map<string, Promise<unknown>>();
+export async function fetchBuyerProfileLLM(glid: string): Promise<unknown> {
+  if (!glid?.trim()) return null;
+  const key = glid.trim();
+  const hit = profileInFlight.get(key);
+  if (hit) return hit;
+  const run = (async (): Promise<unknown> => {
+    try {
+      const res = await fetch(api(`/api/imworkflow/webhook/bi-buyer-profile?glid=${encodeURIComponent(key)}`), { signal: AbortSignal.timeout(660000) });
+      if (!res.ok) return null;
+      const resp = await res.json();
+      // n8n Respond may wrap the single item in an array — unwrap to the object carrying sources/llm_profile
+      return Array.isArray(resp) ? (resp.find((x) => x && typeof x === 'object' && ('sources' in x || 'llm_profile' in x)) ?? resp[0] ?? resp) : resp;
+    } catch { return null; }
+  })();
+  profileInFlight.set(key, run);
+  try { return await run; } finally { profileInFlight.delete(key); }
 }
 
 // ── CATEGORY BRAIN (mcat-keyed, cacheable, channel-agnostic) ──────────────────

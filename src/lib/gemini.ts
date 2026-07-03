@@ -59,8 +59,8 @@ export const PROMPTS_VERSION = '2026.06.14';
 const PROMPT_VER: Record<string, string> = {
   planRequirement: 'plan-v7', deriveIntent: 'intent-v5', refineQuestions: 'refine-v2',
   inferSpecsFromApplication: 'cascade-v3', deriveBuyerTwin: 'twin-v1.2', deriveBuyerProfile: 'profile-v1',
-  getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1', extractBuyerProfile: 'extract-v8', // MUST mirror EXTRACT_PROMPT_VERSION (v8: simple India-B2B English values+reasoning)
-  offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v7', // MUST mirror UC2_PROMPT_VERSION in uc2Enrichment.ts (v7: clean values, conflict notes → reason)
+  getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1', extractBuyerProfile: 'extract-v23', // MUST mirror EXTRACT_PROMPT_VERSION (v23: noise-strip + curated csl/external/identity/pns composers + widened SKIP_KEY + TIMELINE/NUMBERS/SELLER-GLID rules; v22: web_osint LOW-confidence + strict corroboration-gate (matches verified GST/Udyam/PAN/name/location or IGNORE; caps ~45; never overrides KYB); v21: Udyam/MSME source-def — enterprise_type=size + NIC industry + org type + address triangulation; v20: Web OSINT Parallel.ai deep web-search — footprint/scale/legitimacy, corroboration + identity_confidence, never overrides KYB; v19: Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union/gst_detail_union 3-vendor consensus + agreement→confidence + pan_type authority; v18: IDfy sources live end-to-end — pan_gst_idfy/gst_cert_idfy/epfo now emitted by backend v15; v17: PNS calls source — sourcing basket/persona + circle→location + offer_id⋈BuyLead + transcript→UC2; v16: IDfy triangulation source-defs; v15: PAN/GSTIN entity-char → b2b_b2c; v14: verified-address lock on operating city; v13: Call-recordings source-def + composeCalls; v12: Befisc GST Advanced source-def → B2B/role/sub_industry/hard-city; v11: clean `sources` catalog, never external/profile; v10: recurring guard · req-scoped purchase_frequency · Preferred sourcing city · strip is_expired · retail_wholesale · b2b_b2c)
+  offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v9', // MUST mirror UC2_PROMPT_VERSION in uc2Enrichment.ts (v9: date-matched call transcript; v8: "Preferred sourcing city"; v7: clean values)
 };
 const promptVer = (label: string): string => PROMPT_VER[label] || PROMPTS_VERSION;
 
@@ -220,6 +220,34 @@ export async function pruneTwinLLM(system: string, user: string): Promise<string
       : (Object.values(p || {}).find((v) => Array.isArray(v)) as unknown[] | undefined);
     return Array.isArray(keep) ? keep.map(String) : null;
   } catch { return null; }
+}
+
+// OSINT SIGNAL EXTRACTION (Web-verify band) — reads the combined Firecrawl results, returns SPECIFIC grounded
+// signals, each cited to a source URL. Observed-only / LOW-confidence by nature — the caller keeps them SEGREGATED
+// from the twin (they graduate into the profile only via the cross-validation ladder). Structural params (no import
+// cycle with osintEnrich). Empty on no-key / no results / failure.
+export async function osintSignalsLLM(
+  seed: unknown,
+  results: ReadonlyArray<{ url: string; title?: string; description?: string; platform: string; viaAnchors?: string[] }>,
+): Promise<{ signals: Array<{ signal_type: string; value: string; confidence: number; source_url: string; platform: string }> }> {
+  if (!hasGeminiKey() || !results.length) return { signals: [] };
+  const system = [
+    'You are an OSINT analyst building a LOW-CONFIDENCE web footprint for an India-B2B buyer.',
+    'From the web search results, extract ONLY signals you can GROUND in a specific result URL — about THIS buyer/entity.',
+    'Be skeptical: open-web search returns namesakes. If a result is clearly a DIFFERENT entity, DROP it. Never invent.',
+    'Useful signal_type values: entity_match · role (manufacturer/wholesaler/distributor/retailer/reseller/service) ·',
+    'industry · scale (employees/turnover/years/branches) · location_confirm · social_handle · also_a_seller · website · rating · gst_or_pan_match.',
+    'confidence 0-100 = how strongly the result is THIS entity AND how reliable the platform is (LinkedIn/own-site > generic directory).',
+    'Return STRICT JSON: { "signals": [ { "signal_type", "value", "confidence", "source_url", "platform" } ] }. Omit anything ungrounded.',
+  ].join(' ');
+  const user = 'BUYER ANCHORS: ' + JSON.stringify(seed) + '\n\nWEB RESULTS:\n' +
+    results.map((r, i) => `${i + 1}. [${r.platform}] ${r.title || ''} — ${r.description || ''}  (${r.url})`).join('\n');
+  try {
+    const text = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 4000, model: MODEL_FAST, label: 'osintSignals' });
+    const p = JSON.parse(text) as { signals?: unknown };
+    const sigs = Array.isArray(p.signals) ? p.signals : [];
+    return { signals: sigs.map((s) => { const o = (s || {}) as Record<string, unknown>; return { signal_type: String(o.signal_type || o.type || 'signal'), value: String(o.value || ''), confidence: Math.max(0, Math.min(100, Number(o.confidence) || 0)), source_url: String(o.source_url || o.url || ''), platform: String(o.platform || '') }; }).filter((s) => s.value) };
+  } catch { return { signals: [] }; }
 }
 
 // OFFER ENRICHMENT (Case 2) — the authority pass: re-reads the raw BuyLead + the buyer-originated signals and

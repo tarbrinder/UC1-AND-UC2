@@ -50,7 +50,7 @@ export function buildUC2Enrichment(input: UC2Input): UC2Enrichment {
 // · Specs. Buyer PROFILE is NOT re-derived — passed as CONTEXT (cite its [fN]). Every change must cite ≥1 buyer
 // signal id from the SAME fN universe the L5 twin uses (synthCtx.bundle.evidence). Confidence gate + hallucination
 // guard ported from offerEnrich; output projects to the UC2Enrichment render contract (L6) + a richer debug shape.
-export const UC2_PROMPT_VERSION = 'uc2Enrich.v7'; // v7: CLEAN values ("to" = crisp value/range only; conflict/verify/recommend notes go in "reason"). v6: simple India-B2B English reasons/confidence text (professional, not casual). v5: plain-English first pass. v4: per-edit confidence_reason + to_100 (why this %, what would make it 100). v3: PRODUCT-LINE LOCK (machine lead ≠ paper lead — never retitle/recategorise across product lines or graft cross-product specs) + category zero-overlap merge guard. v2: pure-LLM · location-lock + Sourcing Preference · PNS hero→specs · qty-conflict · age/gender
+export const UC2_PROMPT_VERSION = 'uc2Enrich.v9'; // v9: DATE-MATCHED CALL transcript block (nearest call to the requirement date = strongest enrichment signal). v8: §H "Preferred sourcing city". v7: CLEAN values ("to" = crisp value/range only; conflict/verify/recommend notes go in "reason"). v6: simple India-B2B English reasons/confidence text (professional, not casual). v5: plain-English first pass. v4: per-edit confidence_reason + to_100 (why this %, what would make it 100). v3: PRODUCT-LINE LOCK (machine lead ≠ paper lead — never retitle/recategorise across product lines or graft cross-product specs) + category zero-overlap merge guard. v2: pure-LLM · location-lock + Sourcing Preference · PNS hero→specs · qty-conflict · age/gender
 
 export interface UC2Evidence { evidence_id: string; node: string; tag?: string; raw: string } // mirror synthCtx.bundle.evidence
 export interface UC2Context {
@@ -60,6 +60,7 @@ export interface UC2Context {
   addSpecs: string[];                                             // category criticals the requirement is missing (resolved.addedSpecs)
   anchors?: { city?: string; state?: string };                   // derived_anchors — location ground truth
   external?: { age?: string; gender?: string; incomeBand?: string }; // O36 — deterministic external context (Befisc) for the LLM's reasoning (e.g. young, first-venture)
+  matchedCall?: { date: string; topic?: string; transcript: string; daysApart?: number }; // V11 — the call transcript NEAREST this requirement's date (date-matched), the strongest enrichment signal
 }
 // richer per-edit, surfaced in the UC2·debug band (confidence/grounded/evidence/reason)
 export interface UC2EditFull { field: string; group: 'title' | 'category' | 'location' | 'spec'; kind: 'kept' | 'corrected' | 'added'; from: string; to: string; confidence: number; grounded: boolean; applied: boolean; evidence: UC2Evidence[]; reason: string; confidenceReason?: string; to100?: string }
@@ -96,8 +97,8 @@ export const UC2_ENRICH_SYSTEM = [
   '- LOCATION (LOCKED — NEVER overwrite): the recorded operating/buyer city stays VERBATIM. NEVER emit a "corrected"',
   '  location that replaces the buyer\'s city with a seller / sourcing / call city (e.g. do NOT turn "Auraiya" into',
   '  "Kanpur"). Instead, when the buyer SOURCES from one or more different cities, ADD a spec named exactly',
-  '  "Sourcing Preference" with kind "added" listing those cities (grounded, comma-separated). The requirement',
-  '  location and the sourcing preference are two SEPARATE things.',
+  '  "Preferred sourcing city" with kind "added" listing those cities (grounded, comma-separated). The requirement',
+  '  location and the preferred sourcing city are two SEPARATE things.',
   '- SPECS: (a) do NOT "merge" a value + its unit as a correction — value/unit display-joining is formatting, not a',
   '  change; only emit a spec edit for a REAL, evidence-grounded value change. (b) replace-only a spec value the',
   '  evidence directly contradicts; (c) ADD a category-critical spec the buyer answered elsewhere or stated on a call —',
@@ -155,6 +156,9 @@ export function buildUC2Prompt(ctx: UC2Context): { system: string; user: string;
     ...(ctx.external && (ctx.external.age || ctx.external.gender || ctx.external.incomeBand)
       ? [`  external (deterministic — reasoning context only): ${[ctx.external.age && `age ${ctx.external.age}`, ctx.external.gender, ctx.external.incomeBand && `income ${ctx.external.incomeBand}`].filter(Boolean).join(' · ')}`]
       : []),
+    ...(ctx.matchedCall && ctx.matchedCall.transcript
+      ? ['', `DATE-MATCHED CALL (${ctx.matchedCall.date}${ctx.matchedCall.daysApart != null ? ` · ${ctx.matchedCall.daysApart}d from this requirement` : ''}${ctx.matchedCall.topic ? ` · ${ctx.matchedCall.topic}` : ''}) — the buyer's SPOKEN words nearest this requirement; the STRONGEST enrichment signal. Use it to fix/add specs (qty, grade, delivery, payment) the buyer actually stated; cite it.`, `  "${ctx.matchedCall.transcript}"`]
+      : []),
     '',
     ctx.addSpecs.length ? `CATEGORY CRITICALS (specs this MCAT usually needs — ADD only if buyer evidence supports a value): ${ctx.addSpecs.join(' · ')}` : '',
     '',
@@ -190,7 +194,7 @@ export function mergeUC2LLM(ctx: UC2Context, out: UC2LLMOut | null): UC2Result {
       const to = String(e.to ?? e.value ?? '');
       const from = String(e.from ?? '');
       // O28 LOCATION LOCK — never apply a location *overwrite*; the operating city is immutable. (A sourcing city
-      // must arrive as an ADDED "Sourcing Preference" spec instead.) Demote any location 'corrected' to kept.
+      // must arrive as an ADDED "Preferred sourcing city" spec instead.) Demote any location 'corrected' to kept.
       const locationOverwrite = group === 'location' && kind === 'corrected';
       // PRODUCT-LINE LOCK (backstop) — block a category "correction" that shares NO ≥4-char token with the recorded
       // category: that's a product-line switch (e.g. "Notebook Making Machines" → "Raw Paper Material"), not a refinement.
