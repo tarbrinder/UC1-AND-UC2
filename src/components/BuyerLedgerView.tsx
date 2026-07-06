@@ -31,7 +31,8 @@ import { parseRequirementBrain, resolveRequirement } from '../lib/requirementBra
 import { stateFromFrequency } from '../lib/brains/threeBrainRegistry';
 import { L0Band, L1Band, L3Band, L4Band, L5Band, L6Band, UC2DebugBand, CrawlerBand, L7Band, UC3Band, confidenceChip, type SignalChannel, type OutAttr, type EvalRow, type CatalogRow, type OfferFieldRow, type L6Availability, type L6ProfileRow, type ReqRow, type L1NodeRow } from './bands/ledgerBands';
 import BuyerProfileCard from './BuyerProfileCard';
-import { downloadProfileHtml } from '../lib/downloadProfile';
+import { downloadProfileHtml, downloadInteractiveHtml } from '../lib/downloadProfile';
+import { getOfflineSnapshot, type OfflineSnapshot } from '../lib/offlineSnapshot';
 import { Band, StatePill } from './bands/Band';
 
 // UI declutter (owner): L6 sits on top; everything else folds under ONE "Debug" container in 4 grouped sections.
@@ -144,6 +145,10 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const [prevLedger, setPrevLedger] = useState<Ledger | null>(null); // for Replay (Run A vs Run B diff)
   const [highlightFact, setHighlightFact] = useState<string | null>(null); // an evidence id (fN) clicked in the LLM reasoning → jump + highlight its source line
   const [sampleOfferIdx, setSampleOfferIdx] = useState(0); // #3 enrichment "sample offer" picker — latest (0) auto-selected
+  // Readable mode (#8) — the debug bands run dense (text-[9px]…[11px]); a persisted CSS zoom scales the WHOLE view
+  // (text + badges together → no overflow/clipping, unlike a per-class bump). Default 1.1 = a modest readable bump.
+  const [readZoom, setReadZoom] = useState<number>(() => { try { const v = Number(localStorage.getItem('rfqDbgZoom')); return v >= 0.9 && v <= 1.6 ? v : 1.1; } catch { return 1.1; } });
+  const bumpZoom = (d: number) => setReadZoom((z) => { const n = Math.min(1.6, Math.max(0.9, Math.round((z + d) * 100) / 100)); try { localStorage.setItem('rfqDbgZoom', String(n)); } catch { /* noop */ } return n; });
 
   useEffect(() => {
     if (presetLedger) return; // a pre-built ledger (e.g. RFQ ledger) — no pull needed
@@ -249,6 +254,8 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   useEffect(() => { setMsynth({ status: 'idle', out: null, ms: 0, usage: null }); }, [ledger]);
   useEffect(() => {
     if (!synthCtx || msynth.status !== 'idle') return; // L1–L7 Ledger needs the extract twin for L5/L6/L7
+    const _off = getOfflineSnapshot(); // OFFLINE (P4): use the CAPTURED extract output — never call the LLM
+    if (_off) { setMsynth(_off.extractOut ? { status: 'done', out: _off.extractOut as SynthLLMOut, ms: _off.extractMs || 0, usage: (_off.extractUsage as SynthUsage) || null } : { status: 'no-key', out: null, ms: 0, usage: null }); return; }
     if (!hasGeminiKey()) { setMsynth({ status: 'no-key', out: null, ms: 0, usage: null }); return; }
     setMsynth({ status: 'loading', out: null, ms: 0, usage: null });
     const t0 = performance.now();
@@ -264,6 +271,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   useEffect(() => { setPrune({ status: 'idle', keep: null }); }, [ledger]);
   useEffect(() => {
     if (msynth.status !== 'done' || !rawFinals.length || prune.status !== 'idle') return;
+    const _off = getOfflineSnapshot(); if (_off) { setPrune({ status: 'done', keep: _off.pruneKeep ?? null }); return; } // OFFLINE (P4): captured keep-set
     if (!hasGeminiKey()) { setPrune({ status: 'skip', keep: null }); return; }
     setPrune({ status: 'loading', keep: null });
     const p = buildPrunePrompt(rawFinals);
@@ -279,6 +287,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   useEffect(() => { setOfferLLM({ status: 'idle', out: null }); }, [ledger, offerIdx]);
   useEffect(() => {
     if (enrichMode !== 'offer' || !offerSkeleton || offerLLM.status !== 'idle') return;
+    if (getOfflineSnapshot()) { setOfferLLM({ status: 'skip', out: null }); return; } // OFFLINE (P4): no LLM → deterministic skeleton stands
     if (!hasGeminiKey()) { setOfferLLM({ status: 'skip', out: null }); return; }
     setOfferLLM({ status: 'loading', out: null });
     const p = buildOfferEnrichPrompt(offerSkeleton, requirements[offerIdx]);
@@ -336,14 +345,15 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // UC2 is PER-REQUIREMENT (owner): a MAP keyed by offer index keeps a debug block for EVERY requirement enriched this
   // pull. The lazy effect writes map[offerIdx]; per-call cost is captured from the LLM health ring right after the call.
   type Uc2Entry = { status: 'idle' | 'loading' | 'done' | 'no-key'; out: UC2LLMOut | null; usage: SynthUsage | null; costUsd?: number; rawOutput?: string };
-  const [uc2Map, setUc2Map] = useState<Record<number, Uc2Entry>>({});
-  useEffect(() => { setUc2Map({}); }, [ledger]);                                  // reset enrichment history each pull
+  const [uc2Map, setUc2Map] = useState<Record<number, Uc2Entry>>(() => (getOfflineSnapshot()?.uc2Map as Record<number, Uc2Entry>) || {});
+  useEffect(() => { setUc2Map((getOfflineSnapshot()?.uc2Map as Record<number, Uc2Entry>) || {}); }, [ledger]);   // reset each pull; OFFLINE (P4) → seed captured per-offer enrichment
   const uc2LLM: Uc2Entry = uc2Map[offerIdx] || { status: 'idle', out: null, usage: null };
   // ONE enrichment in flight at a time — so the per-call cost + raw output we read from the global LLM ring in .then
   // belong to THIS call (no cross-attribution when the user switches requirement mid-enrich). anyUc2Loading also re-runs
   // the effect when a queued requirement's turn comes.
   const anyUc2Loading = Object.values(uc2Map).some((e) => e.status === 'loading');
   useEffect(() => {
+    if (getOfflineSnapshot()) return;             // OFFLINE (P4): uc2Map is seeded from the snapshot; never call the LLM
     if (cardMode !== 'requirement') return;       // lazy: only enrich when the user opens the Requirement tab
     if (!uc2Ctx || uc2LLM.status !== 'idle' || anyUc2Loading) return;
     if (!hasGeminiKey()) { setUc2Map((m) => ({ ...m, [offerIdx]: { status: 'no-key', out: null, usage: null } })); return; }
@@ -696,10 +706,16 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
               {(['business', 'ai', 'system'] as const).map((lv) => (<button key={lv} onClick={() => setLevel(lv)} className={`rounded-md px-2 py-1 capitalize transition ${level === lv ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>{lv === 'business' ? '👔 Business' : lv === 'ai' ? '🤖 AI' : '⚙️ Raw'}</button>))}
             </div>
           )}
+          {/* Readable mode (#8) — zoom the debug view; persisted. A− smaller · A+ larger. */}
+          <div className="flex items-center rounded-lg border border-gray-200 bg-white text-[13px] font-semibold overflow-hidden" title="Readable mode — zoom the debug view (saved). A− smaller · A+ larger.">
+            <button onClick={() => bumpZoom(-0.15)} className="px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800" aria-label="smaller text">A−</button>
+            <span className="px-1.5 text-gray-400 tabular-nums text-[10px] border-x border-gray-100">{Math.round(readZoom * 100)}%</span>
+            <button onClick={() => bumpZoom(0.15)} className="px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800" aria-label="larger text">A+</button>
+          </div>
           {glid && <button onClick={() => window.open(`?profile=${encodeURIComponent(glid)}`, '_blank', 'noopener')} title="Open the standalone TrustSEAL card for this GLID (fed by the independent bi-buyer-profile endpoint + server-side LLM) in a new tab" className="text-indigo-700 hover:text-indigo-900 text-[12px] rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1">open standalone ↗</button>}
           {ledger && (fullPending
             ? <span title="Download unlocks once the FULL pull (web OSINT + Udyam) completes and the profile is ready" className="text-gray-400 text-[12px] rounded-full border border-gray-200 bg-gray-50 px-3 py-1 cursor-not-allowed inline-flex items-center gap-1"><span className="w-2.5 h-2.5 border-2 border-gray-300 border-t-transparent rounded-full animate-spin" />⬇ Download (enriching…)</span>
-            : <button onClick={() => downloadProfileHtml(getEnrichmentRich() ?? raw, glid)} title="Download the WHOLE debug view — profile · all data sources (expandable) · health · timing · the LLM prompts/outputs · server trace — as a self-contained, offline HTML file. Requirement-enrichment CTA omitted (needs the live app)." className="text-teal-700 hover:text-teal-900 text-[12px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1">⬇ Download</button>)}
+            : <button onClick={() => downloadInteractiveHtml({ v: 1, glid, stampIso: new Date().toISOString(), rich: getEnrichmentRich(), legacy: raw, serverTrace: getServerTrace(), health: getEnrichmentHealth() as unknown[], llmRaw: getLLMRaw() as Record<string, unknown>, extractOut: msynth.out, extractUsage: msynth.usage, extractMs: msynth.ms, pruneKeep: prune.keep, uc2Map: uc2Map as Record<string, unknown>, readZoom }, { fallbackRich: getEnrichmentRich() ?? raw })} title="Download a FULLY-INTERACTIVE offline copy — the whole app + this GLID's data baked in. Opens with the network off; every band, JSON tree, expand/collapse and scroll works exactly like live. (Run `npm run build:offline` once to generate the shell.)" className="text-teal-700 hover:text-teal-900 text-[12px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1">⬇ Download</button>)}
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm rounded-full border border-gray-200 px-3 py-1">✕ close</button>
         </div>
       </div>
@@ -1165,8 +1181,8 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           nodeRows.push({ key: cn, label: NODE_LABEL[cn] || cn, ok: h?.ok, status: h?.status, latency_ms: h?.latency_ms, output_count: h?.output_count, readable: readableByNode[cn], summary: hasSummary ? summaryByNode[cn] : undefined, raw: hasRaw ? rawByNode[cn] : undefined, input: cn in inputByNode ? inputByNode[cn] : undefined });
         }
         return (
-          <div className="flex-1 min-h-0 overflow-y-auto p-4 bg-gray-50/40">
-            <div className="max-w-6xl mx-auto space-y-2.5">
+          <div className="flex-1 min-h-0 overflow-auto p-4 bg-gray-50/40">
+            <div className="max-w-6xl mx-auto space-y-2.5" style={{ zoom: readZoom } as React.CSSProperties}>
               {/* TrustSEAL Buyer Profile — the polished buyer-facing view on TOP (owner-requested), data-driven from the
                   same rich pull. Reads parseBuyerProfile(rich); zero fabricated data; provenance-badged. Debug bands below. */}
               <BuyerProfileCard rich={getEnrichmentRich()} glid={glid} pending={fullPending} />

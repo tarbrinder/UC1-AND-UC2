@@ -14,7 +14,7 @@ import type { FinalAttr } from './synthesisEngine';
 import type { SynthLLMOut } from './gemini';
 import { attrMeta } from './personaRegistry';
 
-export const EXTRACT_PROMPT_VERSION = 'extract-v23'; // v23: NOISE-STRIP + curated composers for csl/external/identity/pns (was generic-flatten leaking custtype_weight/location_preference/internal ids) + widened SKIP_KEY + 3 global rules: TIMELINE time-proximity (calls/WA/CSL nearest the requirement = context around the offer), NUMBERS signal-vs-noise (only phone/spec/qty/rate/date/tenure/pincode/PAN/GST/agreement — rest ignored), SELLER-GLID (custtype/listing → seller-also-buying signal). v22: web_osint DOWNGRADED to LOW-confidence + STRICT corroboration-gate (use only when it matches a verified GST/Udyam/PAN/company-person/location anchor; else IGNORE — scraper conflates namesakes; never sets an attribute alone, never overrides KYB, caps ~45). v21: V16.2.1 Udyam/MSME source-def (Sign3 pan_to_udyam→udyam_verification) — enterprise_type=authoritative SIZE, NIC industry, org type, address triangulation. v20: V16.2 Web OSINT (Parallel.ai deep web-search) — digital footprint/scale/legitimacy source-def, corroboration + identity_confidence hardening, NEVER overrides KYB. v19: V16 Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union + gst_detail_union (3-vendor per-field consensus w/ agreement→confidence rubric, pan_advance entity authority, HSN→industry corroboration). v18: IDfy triangulation sources now LIVE end-to-end (backend v15 emits sources.pan_gst_idfy/gst_cert_idfy/epfo → dormant composers activate + 3 separate health nodes; prompt source-defs added v16). v17: PNS calls source — sourcing-basket (products/categories called about → persona/sub_industry; raw-material+machine ⇒ manufacturer), telecom circle = LOW-weight location triangulation, offer_id ⋈ BuyLead, transcript = spoken intent (matched to requirement → UC2). v16: IDfy triangulation source-defs — PAN→GST (multi-state=scale/B2B) · GST Certificate (2nd KYB source; agree-with-Befisc ⇒ high conf; drives b2b_b2c/retail_wholesale/sub_industry + filing compliance) · EPFO (registered-employer size proxy). v15: PAN/GSTIN 4th-char entity → b2b_b2c classifier (C/F/T/H ⇒ B2B high-conf; P ⇒ lean B2C hint, not proof) + retail_wholesale entity tie-breaker. v14: VERIFIED-ADDRESS LOCK — a Befisc/Sign3/GST address that AGREES with the registered Profile city CONFIRMS it & blocks the operating-city flip; a vague PNS "near the seller" is a sourcing hint, NEVER overrides two agreeing addresses (fixes Auraiya→Kanpur misfire). v13: Call-recordings source-def (spoken intent, PNS-tier authority; nearest-dated call → UC2) + composeCalls rich transcript lines. v12: Befisc GST (Advanced) source-def — GSTIN record ⇒ B2B + established + role(business_nature) + sub_industry(SAC desc) + hard operating-city + filing cadence. v11: §C — `sources` must use the closed clean catalog (never "external"/"profile") + bundle routes merged-external fields to Befisc/Sign3 by field name. v10: §D recurring 7-day guard (re-post <7d = re-search, not recurring) · purchase_frequency scoped to the requirement · §H "Preferred sourcing city" · §I strip is_expired from bundle + ban "expired" in reasoning · §J2 retail_wholesale (per-req product+qty, 66% rollup) · §J3 b2b_b2c (PNS b2b_or_b2c else persona). v9: location — telecom SIM circle = low-weight location hint; ≥2 converged buyer signals override the (weak) registered Profile city as operating. v8: simple INDIA-B2B English values+reasoning (professional, not casual/tacky, not Hindi — e.g. "early-stage manufacturer in <industry>") · v7: plain-English first pass · v6: per-attribute confidence_reason + to_100 (why this %, what would make it 100) · v5: PAN-entity ↔ persona reconciliation (Individual-PAN + Manufacturer → "early-stage/aspiring") · urgency back as a delivery_timeline FALLBACK (with explainer) · added payment_mode (explicit-only). v4: removed repeat_buyer/next_best/purchasing_power/urgency; added buyer_maturity/purchase_frequency/delivery_timeline/digital_footprint; WA location → evidence; expired = NEUTRAL
+export const EXTRACT_PROMPT_VERSION = 'extract-v26'; // v26: WEB-ENGINE SELF-REPORT — fast mode adds Gemini 2.5 Flash + Google Search grounding as a web_osint engine (both modes; Parallel adds/prefers in full). It SELF-REPORTS match_confidence (high/med/low/none) + matched anchors + turnover_source (gst_filed vs directory_declared); composeWebOsint now emits a "web-engine self-report" verdict line FIRST so the LLM trusts web facts ONLY per that verdict (match_confidence=none/low ⇒ namesake, do NOT set attributes) — and the buyerProfileModel webVerified gate honors match_confidence!=='none' end-to-end (Amit-lens: never treat an unconfirmed web hit as fact). v25: CALL EVIDENCE = Go-schema structured extraction — composeCalls/composePnsCalls now emit products/specs/price/qty · buyer_intent · call_outcome · call_type(B2B/persona/order/repeat) · deal_readiness · payment · language from calls[].extraction (n8n v18 audio nodes now do full structured extraction per the Go call-extractor, not just transcription); transcript_en kept as fallback for old pulls. v24: PROMPT HYGIENE — glossary hoisted to TOP (GLID/MCAT/ISQ/RFQ/KYB/GSTIN/PAN/Udyam/CSL/PNS/telecom-circle/buyer-vs-our-turns defined BEFORE first use) + 2 new global rules: SYNTHESIZE-don't-ECHO (reconcile ≥2 sources, never restate one field verbatim) + NAME-THE-VENDOR (cite Befisc vs Sign3 specifically, never generic "external"). web_osint REFRAMED from "LOW-CONFIDENCE/cap-45" → "may contain garbage → VERIFY each field vs a hard anchor (GST/Udyam/PAN name·person·city+address·nature/NIC) → matches=use / mismatches=discard-namesake / can't-tell=unverified-lead; state the verify-verdict; prefer higher-authority citations; never override KYB". composeWebOsint now reads basis[]/proofs[] → each web fact carries its SOURCE URL + excerpt + engine confidence to the LLM (#11). v23: NOISE-STRIP + curated composers for csl/external/identity/pns (was generic-flatten leaking custtype_weight/location_preference/internal ids) + widened SKIP_KEY + 3 global rules: TIMELINE time-proximity (calls/WA/CSL nearest the requirement = context around the offer), NUMBERS signal-vs-noise (only phone/spec/qty/rate/date/tenure/pincode/PAN/GST/agreement — rest ignored), SELLER-GLID (custtype/listing → seller-also-buying signal). v22: web_osint DOWNGRADED to LOW-confidence + STRICT corroboration-gate (use only when it matches a verified GST/Udyam/PAN/company-person/location anchor; else IGNORE — scraper conflates namesakes; never sets an attribute alone, never overrides KYB, caps ~45). v21: V16.2.1 Udyam/MSME source-def (Sign3 pan_to_udyam→udyam_verification) — enterprise_type=authoritative SIZE, NIC industry, org type, address triangulation. v20: V16.2 Web OSINT (Parallel.ai deep web-search) — digital footprint/scale/legitimacy source-def, corroboration + identity_confidence hardening, NEVER overrides KYB. v19: V16 Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union + gst_detail_union (3-vendor per-field consensus w/ agreement→confidence rubric, pan_advance entity authority, HSN→industry corroboration). v18: IDfy triangulation sources now LIVE end-to-end (backend v15 emits sources.pan_gst_idfy/gst_cert_idfy/epfo → dormant composers activate + 3 separate health nodes; prompt source-defs added v16). v17: PNS calls source — sourcing-basket (products/categories called about → persona/sub_industry; raw-material+machine ⇒ manufacturer), telecom circle = LOW-weight location triangulation, offer_id ⋈ BuyLead, transcript = spoken intent (matched to requirement → UC2). v16: IDfy triangulation source-defs — PAN→GST (multi-state=scale/B2B) · GST Certificate (2nd KYB source; agree-with-Befisc ⇒ high conf; drives b2b_b2c/retail_wholesale/sub_industry + filing compliance) · EPFO (registered-employer size proxy). v15: PAN/GSTIN 4th-char entity → b2b_b2c classifier (C/F/T/H ⇒ B2B high-conf; P ⇒ lean B2C hint, not proof) + retail_wholesale entity tie-breaker. v14: VERIFIED-ADDRESS LOCK — a Befisc/Sign3/GST address that AGREES with the registered Profile city CONFIRMS it & blocks the operating-city flip; a vague PNS "near the seller" is a sourcing hint, NEVER overrides two agreeing addresses (fixes Auraiya→Kanpur misfire). v13: Call-recordings source-def (spoken intent, PNS-tier authority; nearest-dated call → UC2) + composeCalls rich transcript lines. v12: Befisc GST (Advanced) source-def — GSTIN record ⇒ B2B + established + role(business_nature) + sub_industry(SAC desc) + hard operating-city + filing cadence. v11: §C — `sources` must use the closed clean catalog (never "external"/"profile") + bundle routes merged-external fields to Befisc/Sign3 by field name. v10: §D recurring 7-day guard (re-post <7d = re-search, not recurring) · purchase_frequency scoped to the requirement · §H "Preferred sourcing city" · §I strip is_expired from bundle + ban "expired" in reasoning · §J2 retail_wholesale (per-req product+qty, 66% rollup) · §J3 b2b_b2c (PNS b2b_or_b2c else persona). v9: location — telecom SIM circle = low-weight location hint; ≥2 converged buyer signals override the (weak) registered Profile city as operating. v8: simple INDIA-B2B English values+reasoning (professional, not casual/tacky, not Hindi — e.g. "early-stage manufacturer in <industry>") · v7: plain-English first pass · v6: per-attribute confidence_reason + to_100 (why this %, what would make it 100) · v5: PAN-entity ↔ persona reconciliation (Individual-PAN + Manufacturer → "early-stage/aspiring") · urgency back as a delivery_timeline FALLBACK (with explainer) · added payment_mode (explicit-only). v4: removed repeat_buyer/next_best/purchasing_power/urgency; added buyer_maturity/purchase_frequency/delivery_timeline/digital_footprint; WA location → evidence; expired = NEUTRAL
 
 // the new n8n response shape (bi-user-insights): { glid, fetched_at, derived_anchors, sources:{ key:{summary,raw} } }
 export interface RichResponse { glid?: string | number; fetched_at?: string; derived_anchors?: Record<string, unknown>; sources?: Record<string, { summary?: unknown; raw?: unknown } | unknown>; }
@@ -59,7 +59,9 @@ function nodeLabel(src: string, tag: string): string {
 // flagged — internal IDs, weights, status codes, byte-lengths, txn/uc/request ids, resolved-away raw IDs (_debug_ids,
 // stateid, cityid → names already surfaced), account tenure timestamps. KEPT (never matched here): phone, spec numbers,
 // quantities/rates, timeline dates, tenure_years, pincode/zip, PAN/GST, offer_id (links a call to a BuyLead), agreement_count.
-const SKIP_KEY = /^(observed_only|txn_id|api_category|api_name|billable|datetime|message|parse_ok|parse_error|status|status_code|fetched_at|glid|csl_activity|.*weight|glusr_usr_id|glusr_usr_custtype_id|custtype_id|location_preference|http_status|http|audio_bytes|b64_len|mime|serial_number|pwncount|page_index|page_size|execution|_debug_ids|stateid|cityid|fk_.*|last_login|last_modified|unique_id|request_id|uc_id|interaction_id|created_at|modified_at|is_active|revocations)$/i;
+// v26 (re-audit ZERO-VALUE-NOISE fix): added _meta / __health (whole plumbing subtrees) + the row-count / vendor-list /
+// run-id / basis-count scaffolding that was leaking into the citable fN set as pure noise + hallucination bait.
+const SKIP_KEY = /^(observed_only|txn_id|api_category|api_name|billable|datetime|message|parse_ok|parse_error|status|status_code|fetched_at|glid|csl_activity|.*weight|glusr_usr_id|glusr_usr_custtype_id|custtype_id|location_preference|http_status|http|audio_bytes|b64_len|mime|serial_number|pwncount|page_index|page_size|execution|_debug_ids|stateid|cityid|fk_.*|last_login|last_modified|unique_id|request_id|uc_id|interaction_id|created_at|modified_at|is_active|revocations|_meta|__health|__raw|contacts_tried|basis_count|proofs_count|fields_returned|run_id|agreement_max|returned|requested|version|error_msg|vendors|node)$/i;
 
 // ── flatten a source SUMMARY into citable evidence lines (pure structural — NO regex extraction) ──
 function flattenInto(node: unknown, src: string, path: string, push: (src: string, tag: string, raw: unknown) => void): void {
@@ -120,14 +122,16 @@ function composeRequirements(summary: unknown, src: string, push: (src: string, 
   return true;
 }
 
-function composeWhatsApp(summary: unknown, src: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
+function composeWhatsApp(summary: unknown, rawNode: unknown, src: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
   const sum = _obj(summary);
-  const tl = _arr(sum.timeline);
+  // v20 audit fix (P0): the merged n8n shape keeps the full 49-turn thread at whatsapp.raw.timeline, NOT summary.timeline
+  // — so this used to fall through to flattenInto and the buyer's actual messages NEVER reached the LLM. Fall back to raw.
+  const tl = _arr(sum.timeline).length ? _arr(sum.timeline) : _arr(_obj(rawNode).timeline);
   if (!tl.length) return false; // legacy shape → flattenInto
   tl.forEach((t, i) => {
     const o = _obj(t);
     const text = _s(o.text); if (!text) return;
-    const side = /buyer/i.test(_s(o.side)) ? 'buyer' : 'ours';
+    const side = /buyer|user/i.test(_s(o.side) || _s(o.sender)) ? 'buyer' : 'ours';  // raw.timeline uses `sender`, summary uses `side`
     const kind = _s(o.kind) || 'message';
     const ts = _s(o.ts) ? ` @${_s(o.ts)}` : '';
     push(src, `wa[${i}]·${side}`, `[${side} · ${kind}${ts}] "${text}"${side === 'ours' ? '  (OUR outbound — context only, NOT buyer intent)' : ''}`);
@@ -150,22 +154,48 @@ function composeWhatsApp(summary: unknown, src: string, push: (src: string, tag:
 // V11 calls — one rich line per TRANSCRIBED call recording (date · topic · full transcript). Spoken buyer intent
 // (high authority, like PNS); the call nearest a requirement's date is also date-matched into UC2. No line cap
 // (owner) — the full transcript reaches the LLM. Falls back to flattenInto if the calls shape is absent.
+// v18: calls now carry a STRUCTURED extraction (Go call-schema: products/specs/price/qty · lead_tag · payment ·
+// metadata{buyer_intent · call_outcome · call_type B2B/persona/order · language · application}). This emits one rich
+// evidence line per signal — spoken buyer-seller call = HIGH authority. Falls back to a raw transcript on old pulls.
+function emitCallExtraction(o: Record<string, unknown>, src: string, i: number, prefix: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
+  const ex = _obj(o.extraction); if (!Object.keys(ex).length) return false;
+  const date = _s(o.date) ? ` (${_s(o.date)})` : '';
+  const md = _obj(ex.metadata);
+  _arr(ex.products).forEach((p, pi) => {
+    const po = _obj(p); const nm = _s(po.product_name); if (!nm) return;
+    const specs = _arr(po.specifications).map((sp) => { const so = _obj(sp); return _s(so.name) && _s(so.value) ? `${_s(so.name)}: ${_s(so.value)}${_s(so.unit) ? ' ' + _s(so.unit) : ''}` : ''; }).filter(Boolean);
+    const qy = _obj(po.quantity_required); const q = _s(qy.value) ? `qty ${_s(qy.value)}${_s(qy.unit) ? ' ' + _s(qy.unit) : ''}` : '';
+    const pr = _obj(po.price); const price = _s(pr.value) ? `rate ${_s(pr.value)}${_s(pr.currency) ? ' ' + _s(pr.currency) : ''}${_s(pr.price_unit) ? '/' + _s(pr.price_unit) : ''}` : '';
+    const bits = [specs.length ? `specs ${specs.join(' · ')}` : '', q, price].filter(Boolean);
+    push(src, `${prefix}_product[${i}.${pi}]`, `Spoken call${date} — product: ${nm}${bits.length ? ' — ' + bits.join(' · ') : ''} [buyer-seller call, HIGH authority]`);
+  });
+  const bi = _obj(md.buyer_intent); if (_s(bi.intent_level) || _s(bi.narrative)) push(src, `${prefix}_intent[${i}]`, `Call${date} buyer intent: ${_s(bi.intent_level)}${_s(bi.narrative) ? ` — ${_s(bi.narrative)}` : ''}${_s(bi.reasoning) ? ` (${_s(bi.reasoning)})` : ''}`);
+  const co = _obj(md.call_outcome); if (_s(co.category)) push(src, `${prefix}_outcome[${i}]`, `Call${date} outcome: ${_s(co.category)}${_s(co.conclusion_notes) ? ` — ${_s(co.conclusion_notes)}` : ''}`);
+  const ct = _obj(md.call_type); const ev = _obj(ct.evidence); const persona = _obj(ev.buyer_persona); const ot = _obj(ev.order_type);
+  const ctBits = [_s(ct.type), _s(persona.persona_category) && `persona ${_s(persona.persona_category)}${_s(persona.persona_detail) ? ` (${_s(persona.persona_detail)})` : ''}`, _s(ev.quantity_scale) && `qty-scale ${_s(ev.quantity_scale)}`, _s(ot.order_type_category) && `order ${_s(ot.order_type_category)}`, ev.repeat_buyer === true && 'repeat buyer'].filter(Boolean);
+  if (ctBits.length) push(src, `${prefix}_class[${i}]`, `Call${date} classification: ${ctBits.join(' · ')}${_s(ct.reason) ? ` — ${_s(ct.reason)}` : ''}`);
+  const ia = _s(md.intended_application); if (ia) push(src, `${prefix}_use[${i}]`, `Call${date} intended application: ${ia}`);
+  const lt = _obj(ex.lead_tag); if (_s(lt.deal_readiness)) push(src, `${prefix}_lead[${i}]`, `Call${date} deal readiness: ${_s(lt.deal_readiness)}${_s(lt.deal_readiness_reason) ? ` — ${_s(lt.deal_readiness_reason)}` : ''}`);
+  const pay = _obj(ex.payment); if (_s(pay.payment_mode)) push(src, `${prefix}_pay[${i}]`, `Call${date} payment mode (stated): ${_s(pay.payment_mode)}${_s(pay.payment_details) ? ` — ${_s(pay.payment_details)}` : ''}`);
+  if (_s(md.primary_language)) push(src, `${prefix}_lang[${i}]`, `Call${date} language: ${_s(md.primary_language)}`);
+  return true;
+}
+// transcript fallback (old-shape pulls) — one line per call
+function emitCallTranscript(o: Record<string, unknown>, src: string, i: number, tag: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
+  const te = o.transcript_en;
+  const t = Array.isArray(te)
+    ? te.map((x) => { const xo = _obj(x); const u = _s(xo.utterance); return u ? `${_s(xo.speaker) || 'Speaker'}: ${u}` : ''; }).filter(Boolean).join('\n')
+    : (_s(te) || _s(o.transcript) || _s(o.text));
+  if (!t) return false;
+  const date = _s(o.date) ? `${_s(o.date)} · ` : '';
+  push(src, tag, `Call ${date}transcript${_s(o.language) ? ` [${_s(o.language)}]` : ''}: "${t}"`);
+  return true;
+}
 function composeCalls(summary: unknown, src: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
   const sum = _obj(summary);
   const calls = _arr(sum.calls);
   if (!calls.length) return false;
-  calls.forEach((c, i) => {
-    const o = _obj(c);
-    const te = o.transcript_en;
-    const t = Array.isArray(te)
-      ? te.map((x) => { const xo = _obj(x); const u = _s(xo.utterance); return u ? `${_s(xo.speaker) || 'Speaker'}: ${u}` : ''; }).filter(Boolean).join('\n')
-      : (_s(te) || _s(o.transcript) || _s(o.text));
-    if (!t) return;
-    const date = _s(o.date) ? `${_s(o.date)} · ` : '';
-    const topic = _s(o.topic) ? `${_s(o.topic)} — ` : '';
-    const lang = _s(o.language) ? ` [${_s(o.language)}]` : '';
-    push(src, `call[${i}]`, `Call ${date}${topic}transcript${lang}: "${t}"`);
-  });
+  calls.forEach((c, i) => { const o = _obj(c); if (!emitCallExtraction(o, src, i, 'call', push)) emitCallTranscript(o, src, i, `call[${i}]`, push); });
   if (_s(sum.brief)) push(src, 'calls_brief', _s(sum.brief));
   return true;
 }
@@ -188,11 +218,8 @@ function composePnsCalls(summary: unknown, src: string, push: (src: string, tag:
     if (date) bits.push(`on ${date}`);
     if (bits.length) push(src, `pns_call[${i}]`, `PNS seller call — ${bits.join(' · ')} (sourcing-basket signal)`);
     if (circle) push(src, `pns_circle[${i}]`, `Caller telecom circle = ${circle} (region — LOW-weight location hint, never overrides an agreeing city)`);
-    const te = o.transcript_en;
-    const t = Array.isArray(te)
-      ? te.map((x) => { const xo = _obj(x); const u = _s(xo.utterance); return u ? `${_s(xo.speaker) || 'Speaker'}: ${u}` : ''; }).filter(Boolean).join('\n')
-      : _s(te);
-    if (t) push(src, `pns_transcript[${i}]`, `PNS call transcript${date ? ` (${date})` : ''}${_s(o.topic) ? ` — ${_s(o.topic)}` : ''}: "${t}"`);
+    // v18: structured extraction (Go call-schema) when present; else the raw transcript (old-shape pulls)
+    if (!emitCallExtraction(o, src, i, 'pns', push)) emitCallTranscript(o, src, i, `pns_transcript[${i}]`, push);
   });
   if (_s(sum.brief)) push(src, 'pns_calls_brief', _s(sum.brief));
   return true;
@@ -269,16 +296,24 @@ function composeExternal(summary: unknown, src: string, push: (src: string, tag:
   const sp = _arr(s.social_platforms).map(_s).filter(Boolean); const spc = _s(s.social_presence_count);
   if (sp.length) push(src, 'social', `digital footprint: ${sp.join(', ')}${spc ? ` (${spc} platform accounts)` : ''}`);
   const circle = _s(s.telecom_sim_circle); if (circle) push(src, 'telecom_circle', `telecom SIM circle: ${circle} (region — LOW-weight location hint, never overrides an agreeing city)`);
+  // P3 (#12): Sign3 email-linked Google-Maps contributor profile — a real digital-footprint signal (was dropped upstream).
+  const gmb = _obj(s.google_business); if (_s(gmb.name) || _s(gmb.url) || _s(gmb.ratings) || _s(gmb.reviews)) push(src, 'google_maps', `Google Maps profile: ${[_s(gmb.name) && `"${_s(gmb.name)}"`, _s(gmb.level) && `level ${_s(gmb.level)}`, _s(gmb.ratings) && `${_s(gmb.ratings)} ratings`, _s(gmb.reviews) && `${_s(gmb.reviews)} reviews`, _s(gmb.url)].filter(Boolean).join(' · ')} [Sign3 — digital footprint, not the buyer's location]`);
   if (s.identity_verified === true) push(src, 'identity_verified', 'External identity verified — Befisc & Sign3 records both found');
   return true;
 }
 
 // v23 PNS (AI-distilled insights, distinct from pns_calls transcripts). Empty (call_count 0) → emit NOTHING (drop the
 // "call_count: 0" noise line) but return true to skip the generic flatten. Non-empty → let flatten walk the insights.
-function composePns(summary: unknown, src: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
+function composePns(summary: unknown, errInfo: unknown, src: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
   const s = _obj(summary);
+  // v26 (re-audit PNS-401-SILENT fix): PNS is the #1-priority SPOKEN source. When its fetch FAILS (e.g. a 401 expired
+  // token), the summary collapses to call_count:0 — which reads identically to "buyer made no calls". That silent
+  // masquerade let a phantom top-priority rung sit in the conflict order. Emit an EXPLICIT unavailability line so the
+  // LLM (and the reader) know it's a FETCH FAILURE, not absence — never infer "no phone activity" from a broken fetch.
+  const err = _obj(errInfo); const errMsg = _s(err.message) || (Object.keys(err).length ? 'upstream error' : '');
+  if (errMsg) { push(src, 'unavailable', `PNS spoken-call insights UNAVAILABLE this run — upstream error: ${errMsg.slice(0, 90)}. PNS is the buyer's HIGHEST-priority spoken-intent source; its absence here is a FETCH FAILURE, NOT evidence the buyer made no calls. Do NOT infer "no phone activity" or lower intent from this. (Fix: refresh the PNS token.)`); return true; }
   const cc = Number(s.call_count);
-  if (!cc || cc <= 0) return true; // handled = nothing to say; suppress noise, skip flatten
+  if (!cc || cc <= 0) return true; // genuine no-calls (no error) → suppress noise, skip flatten
   return false; // real distilled insights present → generic flatten handles the rich fields
 }
 
@@ -418,26 +453,55 @@ function composeGstDetailUnion(summary: unknown, src: string, push: (src: string
   return true;
 }
 
-// V16.2 Web/OSINT (Parallel.ai) — one fN evidence line per web fact. Web is CORROBORATION + digital-footprint/scale/legitimacy;
-// it NEVER overrides KYB identity. Every line tagged [web/OSINT] so the LLM weights it as medium-trust observed data.
-function composeWebOsint(summary: unknown, src: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
+// #11 — build a per-field citation map from Parallel's basis[] (source URL + quoted excerpt + engine confidence).
+// Handles BOTH the raw basis[] shape ({field, citations:[{url,excerpts[]}], confidence}) AND the n8n-distilled
+// proofs[] shape ({field, url, excerpt, confidence}) so it keeps working after the P3 websearch-parse change.
+function webCiteMap(basisOrProofs: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  const arr = Array.isArray(basisOrProofs) ? basisOrProofs : [];
+  for (const b of arr) {
+    const o = _obj(b); const field = _s(o.field); if (!field) continue;
+    let url = _s(o.url); let ex = _s(o.excerpt); // flat proofs[] shape (P3 websearch-parse)
+    if (!url && !ex) { const c0 = _obj(_arr(o.citations)[0]); url = _s(c0.url); ex = _arr(c0.excerpts).map(_s).filter(Boolean)[0] || ''; } // raw basis[] shape
+    ex = ex.replace(/^\(last verified:[^)]*\)\s*/i, '').replace(/\s+/g, ' ').trim();
+    if (ex.length > 160) ex = ex.slice(0, 157) + '…';
+    const conf = _s(o.confidence);
+    const bits = [url && `src ${url}`, ex && `"${ex}"`, conf && `web-conf ${conf}`].filter(Boolean);
+    if (bits.length) out[field] = ` [${bits.join(' · ')}]`;
+  }
+  return out;
+}
+// V16.2 Web/OSINT (Parallel.ai) — one fN evidence line per web fact, EACH carrying its CITATION (source URL + quoted
+// excerpt + the engine's confidence) so the LLM can VERIFY the field against an anchor and weigh source authority
+// (#11 · verify-then-use). Web is corroboration + digital-footprint / scale / legitimacy; it NEVER overrides KYB.
+function composeWebOsint(summary: unknown, basis: unknown, meta: unknown, src: string, push: (src: string, tag: string, raw: unknown) => void): boolean {
   const s = _obj(summary);
   if (!Object.keys(s).length) return false;
+  const cm = webCiteMap(basis);
+  const cite = (f: string) => cm[f] || '';
   const emit = (tag: string, val: string) => { if (val && val.trim()) push(src, tag, val); };
-  if (_s(s.business_type)) emit('web_business_type', `Web business type: ${_s(s.business_type)}${_s(s.industry) ? ' · ' + _s(s.industry) : ''} [web/OSINT — corroborates KYB, does not override]`);
-  else if (_s(s.industry)) emit('web_industry', `Web industry: ${_s(s.industry)} [web/OSINT]`);
-  if (_s(s.official_address)) emit('web_address', `Web official address: ${_s(s.official_address)} [web/OSINT — cross-check vs GST registered address]`);
-  if (_s(s.website)) emit('web_website', `Website: ${_s(s.website)} [web/OSINT — has an online presence]`);
+  // v26: the fast-mode web engine (Gemini 2.5 Flash + Google Search grounding) SELF-REPORTS a match_confidence + which
+  // anchors it matched (the Jaiveer test returned match_confidence:'none' + refused to fabricate a namesake). Surface
+  // that verdict FIRST so the LLM weighs every web fact through the engine's own honesty (Amit's rule: never treat an
+  // unconfirmed web hit as fact). Parallel-only pulls carry no match_confidence → the per-field "VERIFY vs anchor" still applies.
+  const m = _obj(meta);
+  const mc = _s(m.match_confidence); const matchedOn = _arr(m.matched_on).map(_s).filter(Boolean); const eng = _arr(m.web_engines).map(_s).filter(Boolean);
+  if (mc) emit('web_match_verdict', `Web-engine self-report: match_confidence=${mc}${matchedOn.length ? ' (matched anchors: ' + matchedOn.join(', ') + ')' : ''}${eng.length ? ' · engine: ' + eng.join('+') : ''} — TRUST the web fields below ONLY per this verdict; match_confidence=none/low ⇒ likely a NAMESAKE, do NOT set any attribute from web.`);
+  if (_s(s.business_type)) emit('web_business_type', `Web business type: ${_s(s.business_type)}${_s(s.industry) ? ' · ' + _s(s.industry) : ''} [web — VERIFY vs GST nature / persona before use]${cite('business_type')}`);
+  else if (_s(s.industry)) emit('web_industry', `Web industry: ${_s(s.industry)} [web — VERIFY vs GST nature / Udyam NIC]${cite('industry')}`);
+  if (_s(s.official_address)) emit('web_address', `Web official address: ${_s(s.official_address)} [web — cross-check vs GST registered address]${cite('official_address')}`);
+  if (_s(s.website)) emit('web_website', `Website: ${_s(s.website)} [web — online presence]${cite('website')}`);
   const size = [_s(s.employee_count) && `employees ${_s(s.employee_count)}`, _s(s.turnover_estimate) && `turnover ${_s(s.turnover_estimate)}`, _s(s.year_established) && `established ${_s(s.year_established)}`].filter(Boolean).join(' · ');
-  if (size) emit('web_scale', `Scale: ${size} [web/OSINT — size/vintage signal]`);
-  if (_s(s.udyam_number)) emit('web_udyam', `Udyam/MSME: ${_s(s.udyam_number)} [web/OSINT — registered MSME]`);
+  if (size) emit('web_scale', `Scale: ${size} [web — size / vintage signal]${cite('turnover_estimate') || cite('employee_count') || cite('year_established')}`);
+  if (_s(s.udyam_number)) emit('web_udyam', `Udyam/MSME (web): ${_s(s.udyam_number)} [web — verify vs Udyam registry]${cite('udyam_number')}`);
   const soc: string[] = [];
-  (['linkedin', 'facebook', 'instagram', 'twitter_x'] as const).forEach((k) => { const o = _obj(s[k]); if (_s(o.url) || _s(o.activity_level)) soc.push(`${k}${_s(o.activity_level) ? ' (' + _s(o.activity_level) + ')' : ''}`); });
+  // P3: socials are now flat URL strings (trimmed schema); still accept the old {url,activity_level} object shape.
+  (['linkedin', 'facebook', 'instagram', 'twitter_x'] as const).forEach((k) => { const raw = s[k]; const url = typeof raw === 'string' ? _s(raw) : _s(_obj(raw).url); const act = typeof raw === 'string' ? '' : _s(_obj(raw).activity_level); if (url || act) soc.push(`${k}${url ? ' ' + url : ''}${act ? ' (' + act + ')' : ''}`); });
   const gb = _obj(s.google_business); if (gb.exists === true || _s(gb.rating)) soc.push(`Google Business${_s(gb.rating) ? ' ' + _s(gb.rating) + '★' : ''}${_s(gb.reviews_count) ? ' (' + _s(gb.reviews_count) + ' reviews)' : ''}`);
-  if (soc.length) emit('web_digital', `Digital footprint: ${soc.join(', ')} [web/OSINT — digital maturity / legitimacy]`);
-  const others = _arr(s.other_businesses).map(_s).filter(Boolean); if (others.length) emit('web_other_biz', `Other businesses owned: ${others.join('; ')} [web/OSINT]`);
-  const people = _arr(s.key_people).map(_s).filter(Boolean); if (people.length) emit('web_people', `Key people: ${people.join(', ')} [web/OSINT]`);
-  const news = _arr(s.recent_news).map(_s).filter(Boolean); if (news.length) emit('web_news', `Recent activity: ${news.slice(0, 3).join(' | ')} [web/OSINT]`);
+  if (soc.length) emit('web_digital', `Digital footprint: ${soc.join(', ')} [web — digital maturity / legitimacy]${cite('google_business')}`);
+  const others = _arr(s.other_businesses).map(_s).filter(Boolean); if (others.length) emit('web_other_biz', `Other businesses (web, UNVERIFIED — verify vs anchors): ${others.join('; ')}${cite('other_businesses')}`);
+  const people = _arr(s.key_people).map(_s).filter(Boolean); if (people.length) emit('web_people', `Key people: ${people.join(', ')} [web]${cite('key_people')}`);
+  const news = _arr(s.recent_news).map(_s).filter(Boolean); if (news.length) emit('web_news', `Recent activity: ${news.slice(0, 3).join(' | ')} [web]${cite('recent_news')}`);
   return true;
 }
 
@@ -469,6 +533,8 @@ export function bundleFromResponse(resp: RichResponse): SynthBundle {
   const push = (src: string, tag: string, raw: unknown) => {
     const v = typeof raw === 'object' ? JSON.stringify(raw) : String(raw);
     if (!v || v === '-' || v === 'null' || v === 'undefined') return;
+    // v26: a zero-valued count / returned / requested is plumbing ("0 records") — never a citable buyer fact; drop it.
+    if ((v === '0' || v === 'false') && /(?:^|[._[])(count|returned|requested|agreement|records?|total)\b/i.test(tag)) return;
     evidence.push({ evidence_id: `f${++n}`, node: nodeLabel(src, tag), tag, raw: v, role: 'available' }); // V10 (owner #4/#13 · §C source-routed): NO per-line cap — a GSM value / sourcing city / trial qty buried past char 220 must reach the LLM. Cost optimized LATER.
     perSource[src] = (perSource[src] || 0) + 1;
   };
@@ -485,10 +551,10 @@ export function bundleFromResponse(resp: RichResponse): SynthBundle {
     const summary = (val && typeof val === 'object' && 'summary' in (val as Record<string, unknown>)) ? (val as { summary?: unknown }).summary : val;
     // self-describing composers for the two merged sources (one rich line per lead / per turn); else generic walk
     if (src === 'requirement' && composeRequirements(summary, src, push)) continue;
-    if (src === 'whatsapp' && composeWhatsApp(summary, src, push)) continue;
+    if (src === 'whatsapp') { const wv = (val && typeof val === 'object') ? (val as Record<string, unknown>) : {}; if (composeWhatsApp(summary, wv.raw ?? wv, src, push)) continue; }
     if (src === 'calls' && composeCalls(summary, src, push)) continue;
     if (src === 'pns_calls' && composePnsCalls(summary, src, push)) continue;
-    if (src === 'pns' && composePns(summary, src, push)) continue;
+    if (src === 'pns') { const pv = (val && typeof val === 'object') ? (val as Record<string, unknown>) : {}; const err = _obj(pv.raw).error ?? pv.error; if (composePns(summary, err, src, push)) continue; }
     if (src === 'identity' && composeIdentity(summary, src, push)) continue;
     if (src === 'csl' && composeCsl(summary, src, push)) continue;
     if (src === 'external' && composeExternal(summary, src, push)) continue;
@@ -500,9 +566,27 @@ export function bundleFromResponse(resp: RichResponse): SynthBundle {
     if (src === 'pan_union' && composePanUnion(summary, src, push)) continue;
     if (src === 'gstin_union' && composeGstinUnion(summary, src, push)) continue;
     if (src === 'gst_detail_union' && composeGstDetailUnion(summary, src, push)) continue;
-    if (src === 'web_osint' && composeWebOsint(summary, src, push)) continue;
+    if (src === 'web_osint') {
+      const wv = (val && typeof val === 'object') ? (val as Record<string, unknown>) : {};
+      const basis = wv.proofs ?? wv.basis ?? _obj(summary).proofs ?? _obj(summary).basis;
+      // v26 (re-audit OSINT-NAMESAKE fix): the card render is gated by webVerified, but the EXTRACT BUNDLE is built here
+      // and was still shipping the namesake web fields (switchgear f155–f160) to the LLM — forcing it to spend attention
+      // rejecting poison the pipeline already knows is unanchored. WITHHOLD web from the bundle when the search was
+      // name-only (no company_name/GSTIN anchor) OR the engine self-reported match_confidence=none; emit ONE honest line.
+      const wq = _obj(wv.query); const anchored = !!_s(wq.company_name) || !!_s(wq.gst_number);
+      const mc = _s(wv.match_confidence).toLowerCase();
+      if (!anchored || mc === 'none') { push(src, 'web_withheld', `Web/OSINT WITHHELD from this profile — ${anchored ? 'the web engine self-reported NO CONFIRMED MATCH (match_confidence=none)' : 'the search was UNANCHORED (no verified company_name / GSTIN to disambiguate)'}, so any returned firm is a likely NAMESAKE and is NOT used for any attribute. Absence of web data carries NO penalty.`); continue; }
+      if (composeWebOsint(summary, basis, wv, src, push)) continue;
+    }
     if (src === 'udyam' && composeUdyam(summary, src, push)) continue;
     flattenInto(summary, src, '', push);
+  }
+  // v26 (re-audit EMPTY-KYB-VERBOSE fix): a KYB/registry source that returned NOTHING used to leak 3–4 scaffolding lines
+  // (_meta/__health/count:0 — now stripped). Replace that silence with ONE honest absence line per empty registry so the
+  // LLM knows the triangulation rung is genuinely empty (not fetched-and-hidden) — absence, not error, no penalty.
+  const KYB_ABSENCE: Record<string, string> = { gst_detail_union: 'GST 3-vendor consensus (Sign3⊕IDfy⊕Befisc)', gstin_union: 'GSTIN union', gst_cert_idfy: 'IDfy GST certificate', pan_gst_idfy: 'IDfy PAN→GST registrations', epfo: 'IDfy EPFO employer record', udyam: 'Udyam / MSME registration' };
+  for (const [k, label] of Object.entries(KYB_ABSENCE)) {
+    if (sources[k] && !superseded.has(k) && !(perSource[k] > 0)) push(k, 'absent', `No ${label} found for this buyer — the registry returned nothing this run (ABSENCE of a record, not a fetch error). Do not treat as disqualifying; absence carries no penalty.`);
   }
   const catalog = Object.keys(perSource).map((src) => ({ node: SRC_LABEL[src] || src, api: 'bi-user-insights_my', transform: 'llm' as const, rawCount: perSource[src], roles: { available: perSource[src] } }));
   return { catalog, evidence, arithmeticPrior: [] };
@@ -517,9 +601,16 @@ export const EXTRACT_BUYER_PROFILE_SYSTEM = [
   'do NOT editorialize, do NOT rank beyond what a question asks. Answer ONLY from the supplied evidence ids, and prefer',
   'sources per the priority order stated for each question. Every answer = value + confidence + grounded reasoning citing real fN.',
   'SIMPLE INDIA-B2B ENGLISH (MANDATORY — every VALUE and every reasoning_step): write in clear, professional Indian-B2B English — the plain business terms a procurement / sourcing reader uses (manufacturer, wholesaler, distributor, trader, retailer, importer, OEM). Keep it SIMPLE but PROFESSIONAL — not casual or tacky, and NEVER Hindi. NO jargon-stacking, NO parenthetical qualifiers, NO slash-separated synonyms. e.g. write "early-stage manufacturer in paper & notebooks" — NOT the verbose "Early-stage / aspiring Manufacturer (individual proprietor) · Paper & Notebook Manufacturing", and NOT the over-casual "early-stage maker". Each answer = ONE short professional phrase. (The KEY/question name is fixed — only the value and reasoning get this wording.)',
+  'GLOSSARY — IndiaMART terms (each defined here, BEFORE first use below):',
+  '- GLID = the buyer\'s unique IndiaMART user id · MCAT = product micro-category (a numeric id already resolved to a category NAME) · ISQ = the category spec questions a buyer answers on a BuyLead (spec name + value) · RFQ / BuyLead = a posted buyer requirement / enquiry.',
+  '- KYB = Know-Your-Business (registry-verified business identity) · GSTIN = 15-char GST id (2-digit prefix = state; 5th char = entity type) · PAN = 10-char tax id (4th char: P Individual · C Company · F Firm/LLP · H HUF · T Trust) · Udyam = government MSME registration (authoritative SIZE band).',
+  '- CSL = the buyer\'s on-site click / search browse log · PNS = IndiaMART cloud-telephony (masked-number seller calls + AI-distilled / transcribed insights) · telecom circle = the SIM\'s region (a LOW-weight location hint) · "buyer turns" = the buyer\'s own messages / actions (SIGNAL) vs "our turns" = our outbound offers / prompts (CONTEXT only, never the buyer\'s intent).',
+  '',
   'TIMELINE / TIME-PROXIMITY (v23): the evidence carries dated events (requirement posted-dates, call dates, WhatsApp turn timestamps, the CSL browse window). When you reason about the CURRENT / most-recent requirement, the calls · WhatsApp turns · CSL browsing CLOSEST IN TIME to that requirement are the relevant context AROUND it — weight them highest; distant activity is background history. When explaining offer-relevant intent, prefer citing the dated fN nearest the requirement.',
   'NUMBERS = SIGNAL vs NOISE (v23): a number is MEANINGFUL only when it is a phone number, a spec / quantity / rate / price / dimension, a date or timeline value, account tenure (years / member-since), a pincode, a PAN / GSTIN, or a vendor-agreement count. Any OTHER bare number in the evidence (internal ids, weights, status codes, byte-lengths, preference codes) is NOISE — ignore it; never surface it in a value or reasoning_step. Category / city / product NAMES have already been resolved from their ids — always use the NAME, never a raw numeric id.',
   'SELLER-GLID (v23): if the evidence shows this GLID is ALSO a listed seller (custtype empFCP / FCP · listing_status LST · also_a_seller), state it — a seller sourcing on IndiaMART may be buying raw material for its own resale / manufacture, or doing competitor research. Factor that into persona / intent rather than reading it as a pure end-buyer.',
+  'SYNTHESIZE — do NOT ECHO (mandatory): you are an intelligence engine, not a copy machine. When two or more sources bear on the SAME attribute, RECONCILE them instead of restating a single field verbatim. If they AGREE, state the conclusion ONCE and NAME the agreeing sources (that agreement is what raises confidence). If they CONFLICT, surface BOTH values and CHOOSE one with an explicit reason (per the PRIORITY order + real buyer-behaviour evidence). Every multi-source attribute\'s reasoning_steps MUST show this cross-source reconciliation (which sources agreed or disagreed, and why) — never a bare "source X says Y".',
+  'NAME THE VENDOR (mandatory): the paid identity layer is TWO distinct vendors — Befisc (KYB identity: income band, PAN, address, DOB, gender) and Sign3 (digital-footprint / trust: social presence, telecom circle, breaches, bank-verified name). When you cite an identity-layer fact, name the SPECIFIC vendor ("Sign3 bank-verified name…", "Befisc income band…") — NEVER the generic word "external". The evidence lines are already vendor-tagged; carry that vendor name into your reasoning and the sources array.',
   '',
   'SOURCE DEFINITIONS (each evidence id is tagged with its source — what the data IS, and how to trust it):',
   '- PNS · sales calls = AI-distilled insights from IndiaMART cloud-telephony recordings of seller↔buyer phone calls — the buyer SPOKE → HIGHEST trust for intent / requirement / location.',
@@ -538,7 +629,7 @@ export const EXTRACT_BUYER_PROFILE_SYSTEM = [
   '- PAN union (V16) = the buyer PAN(s) from Sign3 phone_to_pan + Befisc, deduped + source-tagged, PLUS Sign3 pan_advance (NSDL-authoritative pan_type: Individual / Company / Firm / HUF / Trust, and sole-proprietor / director flags). ENTITY AUTHORITY: for b2b_b2c, PREFER pan_advance.pan_type OVER the PAN 4th-char heuristic; use the 4th char only as a fallback when pan_type is absent. A PAN found by >=2 vendors is higher-trust.',
   '- GSTIN union (V16) = every GSTIN for the buyer from Sign3 pan_gst_search + IDfy pan_gst_link + Befisc + Profile, deduped with found_by tags. Multi-state count ⇒ scale / B2B. A GSTIN discovered by MULTIPLE vendors is higher-confidence than a single-vendor hit.',
   '- GST detail · 3-vendor consensus (V16, PRIMARY KYB) = per FIELD (legal_name · constitution · taxpayer_type · status · nature_of_business/HSN · registration date) a canonical value + which vendors AGREE across Sign3 gst_validate ∥ IDfy ind_gst_certificate ∥ Befisc FFFQ. AGREEMENT → CONFIDENCE: >=3 vendors agree ⇒ 90-95; 2 agree ⇒ 75-85 (cite the majority, note any dissent); single-source ⇒ 50-70; all disagree ⇒ 40-60 (surface ALL values, do NOT silently pick one — arbitrate ONLY from agreement_count + real buyer-behaviour evidence, NEVER invent a vendor-reliability / recency reason). Use >=2-vendor-AGREED fields as the PRIMARY basis for business_persona / sub_industry / b2b_b2c / retail_wholesale. HSN / nature → industry: when >=2 vendors carry the same nature-of-business / HSN family, treat the industry deduction as CORROBORATED and raise confidence per the rubric. This consensus source OUTRANKS any single KYB source (Befisc-Advanced / IDfy-cert alone) when they agree.',
-  '- Web OSINT (Parallel.ai web scraper) = LOW-CONFIDENCE data scraped from public directories (JustDial, TradeIndia, DnB, importer lists, KnowYourGST, etc.). Scrapers routinely CONFLATE similarly-named firms/people and carry stale or unverified entries, so treat EVERY web field as a WEAK, unverified claim by default. STRICT CORROBORATION GATE — use a web fact ONLY when it independently CORROBORATES a HIGH-CONFIDENCE anchor for THIS buyer: (a) the GST/Udyam/PAN-verified COMPANY NAME matches the web entity, OR (b) the PERSON↔COMPANY relation matches (web proprietor/owner name == GST legal_name / PAN holder / verified name), OR (c) the LOCATION/address matches the GST/Udyam/profile city/address, OR (d) the INDUSTRY matches the GST nature / Udyam NIC. When web AGREES with one of these anchors, you MAY cite it to ADD DETAIL (e.g. refine GST "electronics" → web "CCTV / access-control security hardware") or a small digital_footprint / scale note — at MODERATE confidence, tagged as web-corroborated. When a web fact does NOT tie to any verified GST/Udyam/PAN/name/location anchor, IGNORE it entirely — do NOT let the scraper introduce a business_type, industry, size, turnover, employee-count, or "other business" that no authoritative source supports (it is most likely a namesake or a bad scrape). Web ALONE never sets an attribute, and web NEVER overrides KYB (legal_name / entity / GSTIN / PAN / registered address stay canonical; on address/type conflict, keep KYB and merely note the web discrepancy). Web-only claims cap at ~45 confidence. Absent / timed-out web = NO penalty (simply no web colour). In short: the scraper is a corroboration lens on verified identity, never a source of new "truth".',
+  '- Web OSINT (Parallel.ai web search) = public web data (JustDial, TradeIndia, DnB, importer lists, KnowYourGST, company directories, news, socials) and, per field, the SOURCE URL(s) + the exact quoted EXCERPT + the engine\'s own confidence. It is RAW and MAY CONTAIN GARBAGE — web results can conflate similarly-named firms/people or carry stale entries — so do NOT trust it blindly, but do NOT ignore it either. REASON + VERIFY EACH web field against a HARD ANCHOR for THIS buyer before using it. ANCHORS = the GST / Udyam / PAN legal or trade NAME · the PAN holder / GST-verified PERSON · the GST / profile CITY + registered ADDRESS · the GST nature / Udyam NIC INDUSTRY. VERDICT per web field: (1) CLEARLY MATCHES an anchor (same firm / person / city / industry, or the cited excerpt names the verified GSTIN / PAN / address) → USE it, and let it ADD DETAIL (e.g. refine GST "electronics" → "CCTV / access-control security hardware", add a website / social / Google-Business presence, corroborate a turnover band or founding year) at a confidence set by how strong the match + the citation are; (2) CLEARLY MISMATCHES (a different city / industry / person with no tie to any anchor) → DISCARD as a namesake / bad result, do not surface it; (3) CAN\'T TELL (no anchor to test against) → treat as an UNVERIFIED LEAD only — mention it as "unverified, from web" at low confidence, never as fact. Prefer HIGHER-AUTHORITY citations (a firm\'s IndiaMART / GST-lookup / TradeIndia listing that quotes the verified GSTIN outweighs a random directory). ALWAYS STATE YOUR VERIFY-VERDICT in the reasoning (which anchor it matched or failed, citing the web fN + its source URL). Web NEVER overrides KYB — legal_name / entity / GSTIN / PAN / registered address stay canonical; on a conflict keep KYB and note the web discrepancy. Absent / timed-out web = NO penalty.',
   '- Udyam / MSME (V16.2.1, Sign3 pan_to_udyam → udyam_verification) = the buyer\'s government MSME registration. enterprise_type is the AUTHORITATIVE SIZE band — Micro / Small / Medium (use it DIRECTLY for buyer_maturity / scale, outranking web employee_count guesses). major_activity (Trading / Manufacturing / Service) + NIC industry codes & descriptions drive sub_industry and retail_wholesale; organization_type (Proprietary / Partnership / Pvt Ltd) corroborates the KYB constitution + b2b_b2c; date_of_incorporation = vintage; official_address triangulates the GST / web address (agreement ⇒ raise identity_confidence). A present Udyam = a REGISTERED MSME (B2B-leaning, formal). HIGH trust (govt registry). Absent is NOT disqualifying (not every business registers for Udyam).',
   '- Call recordings (transcribed) = the buyer\'s SALES-CALL transcripts (date · topic · translated-to-English text). SPOKEN buyer intent — HIGH authority (treat like PNS). Use for buyer_intent, business_persona, intended application, products, and any explicit payment/delivery/quantity the buyer says. The call NEAREST a requirement\'s posted date is the strongest enrichment signal for THAT requirement (also date-matched into UC2 downstream). Cite the call date.',
   '- PNS calls = the buyer\'s masked-number calls TO SELLERS. Each carries rich metadata EVEN without a transcript: the PRODUCT called about (like a mini order/BuyLead title), the CATEGORY (mcat/sub), the caller TELECOM CIRCLE, an OFFER_ID (links the call to a BuyLead requirement), and the date. (a) The set of products/categories across calls = the buyer\'s SOURCING BASKET → business_persona + sub_industry + intended application; a buyer calling about BOTH raw material AND the MACHINES to make it is a MANUFACTURER/producer, not a trader — weight this heavily. (b) The telecom CIRCLE is a LOW-weight regional location hint only (a circle spans many cities) — it may corroborate a region but NEVER overrides an agreeing city (verified-address lock still governs). (c) The transcript (when present) is SPOKEN intent — same HIGH authority as call recordings; the call matching a requirement\'s offer_id (else nearest date/category) enriches THAT requirement (date-matched into UC2). Cite the product + date.',

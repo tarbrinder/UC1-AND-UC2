@@ -36,7 +36,9 @@ export function isAbsent(value: string | null | undefined): boolean {
   if (!value) return true;
   const v = String(value).trim();
   if (!v) return true;
-  return /no\s+(account|company|official website|google business rating|website|record|data|listing)[^.]*found|not\s+found\s+in\s+(the\s+)?supplied\s+records|no\s+.*found\s+in\s+the\s+supplied|^n\/?a$|^-+$|^none$|^null$|^unknown$|not available|no\s+pan\s+on\s+file|^skipped$/i.test(v);
+  // v20 audit fix: broadened — (a) "provided sources" as well as "supplied records" (Parallel says the former),
+  // (b) embedded \bundefined\b (a malformed scrape slug like ".../jaiveer-...-undefined-0192663b3" must be rejected, not link-ified).
+  return /no\s+(account|company|official website|google business rating|website|record|data|listing)[^.]*found|not\s+found\s+in\s+(the\s+)?(supplied|provided)\s+(records?|sources?)|no\s+.*found\s+in\s+the\s+(supplied|provided)|\bundefined\b|^n\/?a$|^-+$|^none$|^null$|^unknown$|not available|no\s+pan\s+on\s+file|^skipped$/i.test(v);
 }
 // clean a possibly-absent web string → real value or null
 const webVal = (v: unknown): string | null => { const s = str(v); return (!s || isAbsent(s)) ? null : s; };
@@ -107,6 +109,10 @@ export interface PanBlock { primary: Field | null; alternates: { value: string; 
 export interface MobileRow { value: string; foundBy: string[]; agreementCount: number; primary: boolean }
 export interface UdyamBlock { present: boolean; regNo: Field; enterpriseType: Field; organizationType: Field; majorActivity: Field; nicIndustries: string[]; incorporation: Field; officialAddress: Field }
 export interface MonthBar { month: string; count: number }
+// #11 — a web citation behind an inferred field (source URL + quoted excerpt + engine confidence), from web_osint basis[]/proofs[].
+export interface ProofRow { field: string; url: string; excerpt: string; confidence: string }
+// #4 — the most-recent requirement's BuyLead-page fields, surfaced on the 1-pager (consistent with the BuyLead-details view).
+export interface ReqDetail { title: string; orderValue: Field; requirementType: Field; category: Field; posted: string; specs: { k: string; v: string }[] }
 export interface BuyerProfileModel {
   glid: string;
   available: boolean;                       // false → no rich payload pulled yet
@@ -123,6 +129,8 @@ export interface BuyerProfileModel {
   social: { website: Field; facebook: Field; instagram: Field; linkedin: Field; twitter: Field };
   products: string[];
   productsOffered: string[];
+  latestRequirement: ReqDetail | null;      // #4 — BuyLead order value / type / specs of the most-recent requirement
+  proofs: ProofRow[];                       // #11 — web citations (URL + excerpt + confidence) behind inferred fields
   googleBusiness: { exists: boolean; rating: string | null } | null;
   plan: null;                               // omitted — no source field (see comment in parseBuyerProfile)
   health: Record<string, { ok: boolean; status: string }>;
@@ -146,6 +154,17 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const wa = nodeOk(rich, 'whatsapp') ? waFromMerged(rich) : null;
   const reqs = nodeOk(rich, 'requirement') ? requirementsFromMerged(rich) : [];
   const web = summaryOf(rich, 'web_osint');            // {} when web node failed/absent
+  // v20 audit fix (P0 — namesake pollution): the card renders web fields off the RAW pull, bypassing the extract-LLM's
+  // verify-gate. A NAME-ONLY Parallel query (no company_name/gst sent) reliably returns a namesake (a switchgear
+  // "Jaiveer" for a notebook buyer). So surface web website/socials/address ONLY when the search was anchored to a real
+  // firm (company_name or gst_number was actually sent); otherwise treat web as unverified and suppress it on the card.
+  const webQuery = obj(obj(sources.web_osint).query);
+  // v20: the fast-mode web engine is Gemini 2.5 Flash + Google Search grounding, which SELF-REPORTS a match_confidence
+  // (the Jaiveer namesake test returned match_confidence:'none' + refused to fabricate). Carry that honesty into the
+  // gate end-to-end: a web fact is trusted only when the search was anchored to a real firm AND the engine did not
+  // itself flag "no confirmed match" (Parallel-only pulls carry no match_confidence → fall back to the anchor test).
+  const webMc = str(obj(sources.web_osint).match_confidence).toLowerCase();
+  const webVerified = (!!str(webQuery.company_name) || !!str(webQuery.gst_number)) && webMc !== 'none';
   const certs = arr(summaryOf(rich, 'gst_cert_idfy').certificates).map(obj);
   const cert0 = certs[0] || {};
   const gdDetails = arr(summaryOf(rich, 'gst_detail_union').gst_details).map(obj);
@@ -170,9 +189,12 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   ];
 
   // ── business overview ───────────────────────────────────────────────────────────────────────────────────────
-  const businessType = webVal(web.business_type);
-  const turnover = webVal(web.turnover_estimate);
-  const industry = webVal(web.industry);
+  // v20 audit fix (P0): business_type / turnover / industry are WEB-derived (Parallel) — gate them on webVerified too,
+  // exactly like sf()/google_business. Otherwise a name-only namesake (e.g. "Jaiveer Controls & Switchgears" → trader)
+  // renders as the buyer's Business Type whenever there's no verified GST role to override it.
+  const businessType = webVerified ? webVal(web.business_type) : null;
+  const turnover = webVerified ? webVal(web.turnover_estimate) : null;
+  const industry = webVerified ? webVal(web.industry) : null;
   const stageDesc = tenureYears == null ? null : tenureYears < 1 ? 'Recently Established' : tenureYears < 4 ? 'Growing' : 'Established';
   const webConf = bandConfidence(web.confidence) ?? 60;
   // ROLE from VERIFIED GST nature_of_business — registry-grade, needs NO web. Fixes "Business Type = Not available when
@@ -229,7 +251,7 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
 
   // ── company details ─────────────────────────────────────────────────────────────────────────────────────────
   const gstAddr = gdDetails.length ? str(obj(obj(gdDetails[0].fields).address).canonical) : '';
-  const principalAddress = triangulateAddress(gstAddr || null, webVal(web.official_address));
+  const principalAddress = triangulateAddress(gstAddr || null, webVerified ? webVal(web.official_address) : null);
 
   // Identity Signals (Conflict A) — registered business contact vs phone-linked bank identity. NEVER auto-resolved.
   const registeredName = idn?.name || '';
@@ -301,9 +323,54 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   };
 
   // ── social — every value guarded by isAbsent (web strings like "no account found" → dash, never link-ified) ─────
-  const sf = (v: unknown, label: string): Field => { const s = webVal(v); return s ? { value: s, present: true, provenance: 'inferred', source: `web_osint (LLM) · ${label}`, inferred: true, confidence: webConf } : absentField('web_osint'); };
+  const sf = (v: unknown, label: string): Field => { if (!webVerified) return absentField('web unverified — name-only search, possible namesake'); const s = webVal(v); return s ? { value: s, present: true, provenance: 'inferred', source: `web_osint (LLM) · ${label}`, inferred: true, confidence: webConf } : absentField('web_osint'); };
   const gb = obj(web.google_business);
-  const googleBusiness = ('google_business' in web) ? { exists: gb.exists === true, rating: gb.exists === true ? (webVal(gb.rating) || null) : null } : null;
+  // Prefer web_osint google_business (only when the web search was anchored); else fall back to the Sign3 Google-Maps
+  // contributor profile on external (#12) — that's a real per-buyer signal, not a web namesake, so it's not gated.
+  let googleBusiness: BuyerProfileModel['googleBusiness'] = null;
+  if (webVerified && 'google_business' in web && Object.keys(gb).length) {
+    googleBusiness = { exists: gb.exists === true, rating: gb.exists === true ? (webVal(gb.rating) || null) : null };
+  } else {
+    const extGmb = obj(summaryOf(rich, 'external').google_business);
+    if (Object.keys(extGmb).length) {
+      const r = str(extGmb.ratings); const rev = str(extGmb.reviews);
+      const rating = r ? `${r} ratings${rev ? ` · ${rev} reviews` : ''} (Google Maps)` : (rev ? `${rev} reviews (Google Maps)` : null);
+      if (rating) googleBusiness = { exists: true, rating };
+    }
+  }
+
+  // #3 — Products of Interest: aggregate requirement titles (BuyLead) + WhatsApp products_enquired, deduped
+  // (case-insensitive, first-occurrence order) → consistent with the BuyLead-details page (was WhatsApp-only → blank).
+  const dedupeStr = (xs: string[]): string[] => { const seen = new Set<string>(); const out: string[] = []; for (const x of xs) { const v = x.trim(); const k = v.toLowerCase(); if (!v || seen.has(k)) continue; seen.add(k); out.push(v); } return out; };
+  const products = dedupeStr([...reqs.map((r) => str(r.title)), ...(wa?.meta?.productsEnquired || []).map(str)].filter(Boolean));
+
+  // #4 — most-recent requirement's BuyLead-page fields (order value / requirement type / category / specs). Prefer the
+  // first requirement carrying order-value or specs, else the recency-spine head. orderValue/requirementType are
+  // platform-deduced (Probable *) → provenance 'derived'; category is MCAT-resolved (registry); specs are buyer-filled.
+  const rd = reqs.find((r) => str(r.orderValue) || (r.specs && r.specs.length)) || reqs[0] || null;
+  const latestRequirement: ReqDetail | null = rd ? {
+    title: str(rd.title),
+    orderValue: str(rd.orderValue) ? { value: str(rd.orderValue), present: true, provenance: 'derived', source: 'BuyLead ISQ · Probable Order Value (platform-deduced)', note: 'platform-deduced, not buyer-stated' } : absentField('BuyLead ISQ'),
+    requirementType: str(rd.requirementType) ? { value: str(rd.requirementType), present: true, provenance: 'derived', source: 'BuyLead ISQ · Probable Requirement Type (platform-deduced)', note: 'platform-deduced, not buyer-stated' } : absentField('BuyLead ISQ'),
+    category: field(str(rd.category), 'registry', 'BuyLead category (MCAT-resolved)'),
+    posted: str(rd.posted),
+    specs: (rd.specs || []).map((s) => ({ k: str(s.k), v: str(s.v) })).filter((s) => s.k && s.v).slice(0, 6),
+  } : null;
+
+  // #11 — proofs behind the inferred (web) fields: web_osint proofs[] (P3-distilled) else basis[] (raw) → {field, url,
+  // excerpt, confidence}, excerpt cleaned of the "(last verified: …)" prefix. Rendered as clickable citations on the card.
+  const webNode = obj(sources.web_osint);
+  const webProofsRaw = arr(webNode.proofs).length ? arr(webNode.proofs) : arr(webNode.basis);
+  // v20 audit fix (P0): when the web search was NOT anchored (name-only → possible namesake) every proof is about the
+  // namesake, so suppress the whole block; and defensively drop any proof still carrying a "…-undefined-…" slug or a
+  // "not found in supplied/provided records" artifact from the scraper (the switchgear-LinkedIn leak).
+  const badProof = (s: string) => /\bundefined\b|not\s+found\s+in\s+(the\s+)?(supplied|provided)/i.test(s);
+  const proofs: ProofRow[] = (!webVerified ? [] : webProofsRaw.map(obj).map((b) => {
+    let url = str(b.url); let ex = str(b.excerpt);
+    if (!url && !ex) { const c0 = obj(arr(b.citations)[0]); url = str(c0.url); ex = arr(c0.excerpts).map(str).filter(Boolean)[0] || ''; }
+    ex = ex.replace(/^\(last verified:[^)]*\)\s*/i, '').replace(/\s+/g, ' ').trim();
+    return { field: str(b.field), url, excerpt: ex, confidence: str(b.confidence) };
+  }).filter((p) => p.field && (p.url || p.excerpt) && !badProof(p.url) && !badProof(p.excerpt)));
 
   return {
     glid: str(obj(rich).glid),
@@ -326,8 +393,10 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
       linkedin: sf(web.linkedin, 'linkedin'),
       twitter: sf(web.twitter_x ?? web.twitter, 'twitter'),
     },
-    products: wa?.meta?.productsEnquired || [],
+    products,
     productsOffered: arr(summaryOf(rich, 'whatsapp').products_offered).map(str).filter(Boolean),   // available if the spec wants both; not shown by default
+    latestRequirement,
+    proofs,
     googleBusiness,
     plan: null,   // §2 — no plan_type / activated_on field anywhere in the pipeline → card omits the TrustSEAL Plan tile entirely (never fabricated)
     health: Object.fromEntries(Object.keys(sources).map((k) => { const n = obj(sources[k]); const h = obj('__health' in n ? n.__health : obj(n.summary).__health); return [k, { ok: h.ok !== false, status: str(h.status) }]; })),

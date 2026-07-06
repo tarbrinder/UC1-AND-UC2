@@ -128,3 +128,43 @@ export function downloadProfileHtml(rich: unknown, glid: string): void {
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
+
+// ─── FULLY-INTERACTIVE offline download (P4) ──────────────────────────────────────────────────────────────────
+// Fetches the pre-built single-file app shell (public/offline-shell.html, made by `npm run build:offline`), injects
+// this GLID's snapshot as window.__EMBEDDED_PULL in the <head> (so it's set BEFORE the app's module boots), and
+// downloads it. Opening that file offline boots the SAME app from the baked-in data → every band/JSON-tree/expander/
+// scroll works exactly like live (no network, no LLM). If the shell isn't built yet, falls back to the static digest.
+function triggerDownload(html: string, name: string): void {
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+export async function downloadInteractiveHtml(snapshot: { glid?: string; stampIso?: string }, opts?: { fallbackRich?: unknown }): Promise<void> {
+  const glid = snapshot.glid || 'snapshot';
+  const stampIso = snapshot.stampIso || new Date().toISOString();
+  const day = stampIso.slice(0, 10);
+  // safe embed: escape </script> and any < so the JSON can't break out of the <script> tag
+  const inject = `\n<script>window.__EMBEDDED_PULL = ${JSON.stringify(snapshot).replace(/</g, '\\u003c')};</script>\n`;
+  try {
+    const res = await fetch(`/offline-shell.html?ts=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('offline-shell.html ' + res.status);
+    let shell = await res.text();
+    if (!/id="root"/.test(shell) || !/<script/i.test(shell)) throw new Error('offline-shell.html is not a built app bundle');
+    // Inject a REGULAR (non-deferred) script right after <head> so window.__EMBEDDED_PULL is set DURING parse — before
+    // the app's deferred module bundle executes. (Injecting at </head> would land AFTER the module script → too late.)
+    shell = /<head[^>]*>/i.test(shell) ? shell.replace(/<head[^>]*>/i, (m) => m + inject) : (inject + shell);
+    triggerDownload(shell, `buyer-${glid}-${day}.html`);
+    return;
+  } catch (e) {
+    // shell not generated yet → static digest so the button still yields a file, + a clear how-to.
+    try {
+      const extras = { llmRaw: getLLMRaw() as Record<string, unknown>, serverTrace: getServerTrace() };
+      triggerDownload(buildProfileHtml(opts?.fallbackRich, glid, stampIso, extras), `buyer-profile-${glid}-${day}.html`);
+    } catch { /* noop */ }
+    try { console.warn('[downloadInteractiveHtml] /offline-shell.html unavailable — run `npm run build:offline` to enable the fully-interactive download. Downloaded the static digest instead.', e); } catch { /* noop */ }
+    try { window.alert('Downloaded the static digest.\n\nFor the FULLY-INTERACTIVE offline copy (all bands & expanders, exactly like live), run `npm run build:offline` once to generate the app shell, then click Download again.'); } catch { /* noop */ }
+  }
+}

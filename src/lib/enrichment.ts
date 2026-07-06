@@ -683,6 +683,15 @@ export function extractServerTrace(raw: unknown): ServerTrace | null {
 export interface HealthNode { node: string; ok: boolean; source?: string; latency_ms?: number; output_count?: number; keys?: number; status?: string; version?: string; fetched_at?: string; error_msg?: string; requested?: number }
 let lastHealth: HealthNode[] = [];
 export function getEnrichmentHealth(): HealthNode[] { return lastHealth; }
+
+// OFFLINE HYDRATION (P4) — seed the module state from a captured snapshot so the dashboard renders WITHOUT a network
+// pull (the downloaded self-contained HTML). No fetch, no LLM; consumers read these getters exactly as on a live pull.
+export function seedEnrichment(snap: { rich?: unknown; raw?: unknown; serverTrace?: ServerTrace | null; health?: HealthNode[] }): void {
+  if (snap.rich !== undefined) lastRich = snap.rich;
+  if (snap.raw !== undefined) lastRaw = snap.raw;
+  if (snap.serverTrace !== undefined) lastServerTrace = snap.serverTrace ?? null;
+  if (Array.isArray(snap.health)) lastHealth = snap.health;
+}
 export function extractHealth(raw: unknown): HealthNode[] {
   const h = raw && typeof raw === 'object' ? (raw as { __health?: unknown }).__health : undefined;
   if (!Array.isArray(h)) return [];
@@ -758,11 +767,13 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean }): 
   try { return await _run; } finally { enrichInFlight.delete(_key); }
 }
 
-// ── B · independent server-side-LLM buyer-profile endpoint (bi-buyer-profile) ──────────────────────────────────
-// Calls the SEPARATE n8n workflow (unique path — never fires bi-user-insights-v10x). That workflow = v16.4 pipeline +
-// a final LLM node → returns { glid, sources, derived_anchors, llm_profile (the TrustSEAL card attributes), __health }.
-// The alternate UI (BuyerProfileCard / BuyerProfileStandalone) renders this directly — no client-side extract. Same
-// dev-proxy (/api/imworkflow → imworkflow.intermesh.net), just a different webhook path. Deduped like fetchEnrichment.
+// ── B · independent server-side-LLM buyer-profile endpoint (bi-buyer-profile-CARD) ────────────────────────────
+// Calls the SEPARATE, self-contained "Buyer Profile Card" workflow on its OWN unique path `bi-buyer-profile-card`
+// (never fires bi-user-insights-v10x, and distinct from the teammate's older `bi-buyer-profile` so we never call that).
+// That workflow = the v17 pipeline + a DEDICATED profile-llm node → returns { glid, sources, derived_anchors,
+// llm_profile (the card's reasoned attributes: business_type/stage/turnover/sourcing/…/story, each {value,confidence,
+// reason,inferred}), __health }. The alternate UI (BuyerProfileCard / BuyerProfileStandalone) renders this directly —
+// no client-side extract. Same dev-proxy (/api/imworkflow → imworkflow.intermesh.net), just a different webhook path.
 const profileInFlight = new Map<string, Promise<unknown>>();
 export async function fetchBuyerProfileLLM(glid: string): Promise<unknown> {
   if (!glid?.trim()) return null;
@@ -771,7 +782,7 @@ export async function fetchBuyerProfileLLM(glid: string): Promise<unknown> {
   if (hit) return hit;
   const run = (async (): Promise<unknown> => {
     try {
-      const res = await fetch(api(`/api/imworkflow/webhook/bi-buyer-profile?glid=${encodeURIComponent(key)}`), { signal: AbortSignal.timeout(660000) });
+      const res = await fetch(api(`/api/imworkflow/webhook/bi-buyer-profile-card?glid=${encodeURIComponent(key)}`), { signal: AbortSignal.timeout(660000) });
       if (!res.ok) return null;
       const resp = await res.json();
       // n8n Respond may wrap the single item in an array — unwrap to the object carrying sources/llm_profile

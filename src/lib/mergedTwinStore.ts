@@ -24,6 +24,24 @@ export interface MergedTwinEntry {
 }
 
 const cache = new Map<string, MergedTwinEntry>();
+// upgrade-on-web bookkeeping (P1b): the fast pull gates web_osint OFF and builds the twin first; the later full pull
+// carries web. Without this, ensureMergedTwin's idempotency makes the full pull a no-op → web NEVER reaches the extract
+// LLM in the dashboard. We rebuild ONCE when a web-bearing pull follows a web-less twin. runToken drops any stale
+// completion (the in-flight fast run) so it can't overwrite the newer web-aware result.
+const builtWithWeb = new Set<string>();
+const upgradedOnce = new Set<string>();
+const runToken = new Map<string, number>();
+// "web ran with content" — a non-empty web_osint summary OR any citation/proof row (fast pull → absent/empty → false).
+function hasWebContent(raw: unknown): boolean {
+  const s = (raw && typeof raw === 'object') ? (raw as { sources?: Record<string, unknown> }).sources : undefined;
+  const w = (s && typeof s === 'object') ? (s as Record<string, unknown>).web_osint : undefined;
+  if (!w || typeof w !== 'object') return false;
+  const wo = w as Record<string, unknown>;
+  const sum = (wo.summary && typeof wo.summary === 'object') ? wo.summary as Record<string, unknown> : {};
+  const basis = Array.isArray(wo.basis) ? wo.basis : (Array.isArray(wo.proofs) ? wo.proofs : []);
+  const sumKeys = Object.keys(sum).filter((k) => { const v = sum[k]; return v != null && v !== '' && !(Array.isArray(v) && v.length === 0); });
+  return sumKeys.length > 0 || basis.length > 0;
+}
 export function getMergedTwin(glid: string): MergedTwinEntry | undefined { return cache.get(String(glid || '')); }
 // Poll the cache until the eager extract/merged synthesis SETTLES (done/error/no-key) or the deadline passes —
 // lets the P1 cutover read the finished twin without HARD-blocking the form (caller renders progressively + falls
@@ -67,12 +85,28 @@ function runExtractPath(key: string, raw: unknown, put: Put): void {
 }
 
 // Fire the eager extract for this GLID. Non-blocking, idempotent, cached. Safe to call on every pull.
+// UPGRADE-ON-WEB (P1b): normally one call per GLID (retry only on error). EXCEPTION — when a web-bearing pull follows a
+// twin that was built WITHOUT web, rebuild ONCE so web_osint reaches the extract LLM. The upgrade keeps the existing
+// good twin visible (swallows loading/error) and only commits if the web-aware rebuild actually succeeds.
 export function ensureMergedTwin(glid: string, raw: unknown): void {
   const key = String(glid || '').trim();
   if (!key || !raw) return;
+  const webNow = hasWebContent(raw);
   const existing = cache.get(key);
-  if (existing && existing.status !== 'error') return; // already done/loading — one call per GLID (retry on error)
-  const put: Put = (e) => { cache.set(key, e); try { (window as unknown as { __mergedTwin?: MergedTwinEntry }).__mergedTwin = e; } catch { /* noop */ } };
+  if (existing && existing.status !== 'error') {
+    const canUpgrade = webNow && existing.status === 'done' && !builtWithWeb.has(key) && !upgradedOnce.has(key);
+    if (!canUpgrade) return; // already done/loading with equal-or-better web coverage — true no-op
+    upgradedOnce.add(key);   // rebuild ONCE (never loop)
+  }
+  const isUpgrade = !!(existing && existing.status === 'done');
+  const token = (runToken.get(key) || 0) + 1; runToken.set(key, token);
+  const put: Put = (e) => {
+    if (runToken.get(key) !== token) return;              // a newer run superseded this one — drop the stale completion
+    if (isUpgrade && e.status !== 'done') return;         // during an upgrade keep the existing good twin unless the rebuild succeeds
+    cache.set(key, e);
+    if (webNow && e.status === 'done') builtWithWeb.add(key);
+    try { (window as unknown as { __mergedTwin?: MergedTwinEntry }).__mergedTwin = e; } catch { /* noop */ }
+  };
 
   if (!hasGeminiKey()) { put(empty(key, 'no-key')); return; }      // no LLM → honest no-key (no arithmetic)
   if (!isRichShape(raw)) { put(empty(key, 'error')); return; }     // legacy non-rich shape → no extract possible (no arithmetic)

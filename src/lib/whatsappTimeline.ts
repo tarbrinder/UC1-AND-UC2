@@ -85,11 +85,14 @@ export function buildWhatsAppTimeline(raw: unknown): WAConversation {
 // band renders (one unified thread → the `inbound` channel; outbound stays empty). Returns null when the merged
 // source is absent (caller falls back to buildWhatsAppTimeline on the legacy whatsapp_inbound/whatsapp_data keys).
 export function waFromMerged(rich: unknown): WAConversation | null {
-  const wa = asObj(asObj(asObj(asObj(rich).sources).whatsapp).summary);
-  const timeline = asArr(wa.timeline);
+  const node = asObj(asObj(asObj(rich).sources).whatsapp);
+  const wa = asObj(node.summary);
+  // v20 audit fix (P0): the full 49-turn thread lives at whatsapp.raw.timeline (turns keyed by `sender`), NOT
+  // summary.timeline — so the L2 band used to render blank. Fall back to raw.timeline and accept `sender`.
+  const timeline = asArr(wa.timeline).length ? asArr(wa.timeline) : asArr(asObj(node.raw).timeline);
   if (!timeline.length) return null;
   // map kind faithfully (enquiry stays distinct from a templated offer) — DO NOT re-classify side (it's pre-tagged upstream: sender=user→buyer, bot/api→ours)
-  const msgs: WAMsg[] = timeline.map((t) => { const o = asObj(t); const side: WAMsg['side'] = nrm(o.side) === 'buyer' ? 'buyer' : 'platform'; const k = nrm(o.kind); const kind: WAMsg['kind'] = k === 'enquiry' ? 'enquiry' : k === 'offer' ? 'template' : k === 'clicked' || k === 'tap' ? 'clicked' : 'typed'; return { side, text: String(o.text ?? '').trim(), ts: o.ts ? String(o.ts) : undefined, kind }; }).filter((m) => m.text);
+  const msgs: WAMsg[] = timeline.map((t) => { const o = asObj(t); const who = nrm(o.side) || nrm(o.sender); const side: WAMsg['side'] = (who === 'buyer' || who === 'user') ? 'buyer' : 'platform'; const k = nrm(o.kind); const kind: WAMsg['kind'] = k === 'enquiry' ? 'enquiry' : k === 'offer' ? 'template' : k === 'clicked' || k === 'tap' ? 'clicked' : 'typed'; return { side, text: String(o.text ?? '').trim(), ts: o.ts ? String(o.ts) : undefined, kind }; }).filter((m) => m.text);
   const inbound = channelOf('WhatsApp (merged)', msgs);
   const empty: WAChannel = { name: '', messages: [], buyerMsgs: 0, platformMsgs: 0, total: 0 };
   const signals = mineSignals(msgs.filter((m) => m.side === 'buyer').map((m) => m.text));

@@ -7,6 +7,13 @@
       "runtimeArgs": ["--port", "5173"],
       "cwd": "/Users/tarbrinder/Desktop/rfq-form",
       "port": 5173
+    },
+    {
+      "name": "demo-snapshot",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8899"],
+      "cwd": "/private/tmp/claude-501/-Users-tarbrinder/631d80b8-cf91-415d-8a9b-943d90d0fdbf/scratchpad/demo",
+      "port": 8899
     }
   ]
 }

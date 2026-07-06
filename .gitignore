@@ -27,3 +27,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# build artifact — vite inlines VITE_ env (incl. VITE_LLM_KEY); regenerate via: npm run build:offline
+public/offline-shell.html
+public/icons.svg
+public/favicon.svg
