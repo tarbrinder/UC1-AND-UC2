@@ -12,6 +12,8 @@ import { buildExternalCard } from '../lib/externalCard';
 import { N8N_HOOK } from '../lib/api';
 import { buildUC2Enrichment, buildUC2Prompt, mergeUC2LLM, UC2_PROMPT_VERSION, type UC2Context, type UC2LLMOut, type UC2EditFull } from '../lib/uc2Enrichment';
 import { nodeCard } from '../lib/nodeCards';
+import { rulebookFor } from '../lib/attributeRulebook';
+import { buildSourceConsumptionMatrix, consumptionSummary, deriveConsumption } from '../lib/sourceConsumption';
 import { synthMeta } from '../lib/profileSynth';
 import { pruneTwinLLM, offerEnrichLLM, enrichRequirementLLM, extractBuyerProfileLLM, hasGeminiKey, type SynthLLMOut, type SynthUsage } from '../lib/gemini';
 import { readSet, completenessCritic } from '../lib/personaRegistry';
@@ -20,7 +22,7 @@ import { buildPnsCards } from '../lib/pnsCards';
 import { buildRequirements, requirementsFromMerged } from '../lib/requirements';
 import { buildOfferSkeleton, buildOfferEnrichPrompt, mergeOfferLLM, type OfferLLMOut } from '../lib/offerEnrich';
 import { buildPrunePrompt, applyPrune, synthEval, type FinalAttr } from '../lib/synthesisEngine';
-import { bundleFromResponse, buildExtractPrompt, extractedToFinals, type RichResponse } from '../lib/buyerProfileExtract';
+import { bundleFromResponse, buildExtractPrompt, extractedToFinals, finalsToBuyerBlock, extractNeedsInput, type RichResponse } from '../lib/buyerProfileExtract';
 import { fetchEnrichment, getEnrichmentRich, getServerTrace, getEnrichmentHealth } from '../lib/enrichment';
 import { runExternal } from '../lib/externalRun';
 import { getLLMRaw, getLLMHealth } from '../lib/gemini';
@@ -31,8 +33,8 @@ import { parseRequirementBrain, resolveRequirement } from '../lib/requirementBra
 import { stateFromFrequency } from '../lib/brains/threeBrainRegistry';
 import { L0Band, L1Band, L3Band, L4Band, L5Band, L6Band, UC2DebugBand, CrawlerBand, L7Band, UC3Band, confidenceChip, type SignalChannel, type OutAttr, type EvalRow, type CatalogRow, type OfferFieldRow, type L6Availability, type L6ProfileRow, type ReqRow, type L1NodeRow } from './bands/ledgerBands';
 import BuyerProfileCard from './BuyerProfileCard';
-import { downloadProfileHtml, downloadInteractiveHtml } from '../lib/downloadProfile';
-import { getOfflineSnapshot, type OfflineSnapshot } from '../lib/offlineSnapshot';
+import { downloadInteractiveHtml } from '../lib/downloadProfile';
+import { getOfflineSnapshot } from '../lib/offlineSnapshot';
 import { Band, StatePill } from './bands/Band';
 
 // UI declutter (owner): L6 sits on top; everything else folds under ONE "Debug" container in 4 grouped sections.
@@ -150,6 +152,16 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const [readZoom, setReadZoom] = useState<number>(() => { try { const v = Number(localStorage.getItem('rfqDbgZoom')); return v >= 0.9 && v <= 1.6 ? v : 1.1; } catch { return 1.1; } });
   const bumpZoom = (d: number) => setReadZoom((z) => { const n = Math.min(1.6, Math.max(0.9, Math.round((z + d) * 100) / 100)); try { localStorage.setItem('rfqDbgZoom', String(n)); } catch { /* noop */ } return n; });
 
+  // WEB-EPOCH (2026-07-08 UC1-reset fix): the FULL / Parallel pull bumps this INSTEAD of setRaw'ing a fresh legacy shape.
+  // The legacy `raw` is content-identical between fast & full (web enters ONLY via getEnrichmentRich), so setRaw'ing it
+  // minted a NEW ledger identity that tore down msynth/prune/cardMode/uc2Map and collapsed the UC1 card. Bumping webEpoch
+  // re-runs ONLY the extract (reading the now-web-bearing rich) without rebuilding the ledger, so the card + the user's
+  // open tab + every per-requirement enrichment survive. runToken kills the fast-extract-clobbers-full-extract race.
+  const [webEpoch, setWebEpoch] = useState(0);
+  const runTokenRef = useRef(0);
+  const lastPromptRef = useRef('');
+  const lastBuyerBlockRef = useRef<Record<string, { value: string; confidence: number; reason: string; grounded: boolean; sources: string[] }>>({});
+
   useEffect(() => {
     if (presetLedger) return; // a pre-built ledger (e.g. RFQ ledger) — no pull needed
     const demo = (window as unknown as { __ledgerDemoRaw?: unknown }).__ledgerDemoRaw;
@@ -163,8 +175,19 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     // full upgrades with web_osint/udyam when it lands (~480s) → fullPending flips false → the ⏳ badge clears + Download
     // unlocks. On a pre-v16.5 endpoint the fast call just returns the full pull (fast=1 ignored) — still correct.
     let fullArrived = false;
-    fetchEnrichment(glid, { fast: true }).then(({ raw }) => { if (raw && !fullArrived) { setRaw(raw); setLoading(false); } }).catch(() => undefined);
-    fetchEnrichment(glid).then(({ raw }) => { if (raw) { fullArrived = true; setRaw(raw); } }).catch(() => undefined).finally(() => { setLoading(false); setFullPending(false); });
+    // NOTE: fetchEnrichment resolves `raw` = the LEGACY-normalized shape (no top-level `.sources`); the rich-with-sources
+    // lives in getEnrichmentRich()/lastRich. So a valid `raw` is simply TRUTHY (a failed/empty pull resolves raw:null).
+    // Do NOT gate setRaw on `raw.sources` — that rejects every good pull (blank card / stuck loader). [fixed]
+    // v20 FAST MODE: when the user asked for ?fast=1, the fast pull ALREADY includes the Gemini grounded web engine — do
+    // NOT also fire the slow (~480s) full-upgrade pull (it re-runs the branches fast mode skips and its late response was
+    // overwriting the good fast result). Non-fast keeps the fast-paints-first → full-upgrades-when-it-lands flow.
+    const fastMode = (() => { try { return new URLSearchParams(window.location.search).get('fast') === '1'; } catch { return false; } })();
+    fetchEnrichment(glid, { fast: true }).then(({ raw }) => { if (raw && !fullArrived) { setRaw(raw); setLoading(false); } }).catch(() => undefined).finally(() => { if (fastMode) { setLoading(false); setFullPending(false); } });
+    if (!fastMode) {
+      fetchEnrichment(glid).then(({ raw }) => { if (raw) { fullArrived = true; setRaw((prev: unknown) => prev || raw); setWebEpoch((e) => e + 1); } }).catch(() => undefined).finally(() => { setLoading(false); setFullPending(false); });
+    } else {
+      setFullPending(false);
+    }
   }, [glid]);
 
   const [ledger, setLedger] = useState<Ledger | null>(null);
@@ -244,31 +267,40 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
       let anchors: Record<string, unknown> | null = rr.derived_anchors || null;
       try { const pe = decodeIdentityDocs(identityFromMerged(rich), externalFromMerged(rich)).entityType; if (pe && pe !== 'Unknown') anchors = { ...(anchors || {}), pan_entity: pe }; } catch { /* noop */ }
       const p = buildExtractPrompt(bundle, anchors, { source_registry: rr.source_registry || null, source_priority: rr.source_priority || null }); return { bundle, prompt: { system: p.system, user: p.user }, evidenceIds: p.evidenceIds }; } catch { return null; }
-  }, [extractOn, ledger]);
+  }, [extractOn, ledger, webEpoch]); // webEpoch: re-bundle with web when the full pull lands (no ledger rebuild)
   // V10 (owner-locked #1/#2/#8): EXTRACT is the ONLY twin authority — "n8n → one LLM → display, nothing inbetween".
   // The merged/arithmetic path is retired as an authority (its symbols survive only in dead ternary branches below,
   // physically removed in the P-B cleanup). synthCtx is the extract context ONLY — never the flash-lite merged fallback,
   // so the same GLID can no longer flip extract↔merged by entry-path timing (the #1 non-determinism in the audit).
   const synthCtx = extractSynth;
   const [msynth, setMsynth] = useState<{ status: 'idle' | 'loading' | 'done' | 'error' | 'no-key'; out: SynthLLMOut | null; ms: number; usage: SynthUsage | null }>({ status: 'idle', out: null, ms: 0, usage: null });
-  useEffect(() => { setMsynth({ status: 'idle', out: null, ms: 0, usage: null }); }, [ledger]);
+  useEffect(() => { setMsynth({ status: 'idle', out: null, ms: 0, usage: null }); }, [glid]); // reset ONLY on a new buyer (not on a same-GLID web upgrade)
   useEffect(() => {
-    if (!synthCtx || msynth.status !== 'idle') return; // L1–L7 Ledger needs the extract twin for L5/L6/L7
+    if (!synthCtx || msynth.status === 'loading') return; // one extract in flight at a time
     const _off = getOfflineSnapshot(); // OFFLINE (P4): use the CAPTURED extract output — never call the LLM
-    if (_off) { setMsynth(_off.extractOut ? { status: 'done', out: _off.extractOut as SynthLLMOut, ms: _off.extractMs || 0, usage: (_off.extractUsage as SynthUsage) || null } : { status: 'no-key', out: null, ms: 0, usage: null }); return; }
-    if (!hasGeminiKey()) { setMsynth({ status: 'no-key', out: null, ms: 0, usage: null }); return; }
-    setMsynth({ status: 'loading', out: null, ms: 0, usage: null });
+    if (_off) { if (msynth.status === 'idle') setMsynth(_off.extractOut ? { status: 'done', out: _off.extractOut as SynthLLMOut, ms: _off.extractMs || 0, usage: (_off.extractUsage as SynthUsage) || null } : { status: 'no-key', out: null, ms: 0, usage: null }); return; }
+    if (!hasGeminiKey()) { if (msynth.status === 'idle') setMsynth({ status: 'no-key', out: null, ms: 0, usage: null }); return; }
+    // Re-run when the PROMPT changes (a new ledger from external, or web arriving via webEpoch) — never when unchanged.
+    // RETAIN the previous `out` while re-extracting so rawFinals/finals never empty → the UC1 card never blanks (hook 4).
+    // runToken drops a stale (fast) completion that would otherwise clobber the newer (web) extract (hook 3).
+    const promptSig = `${synthCtx.prompt.system.length}:${synthCtx.prompt.user.length}:${synthCtx.prompt.user.slice(0, 240)}`;
+    // Stop after a terminal result for THIS prompt — done OR error. (Without the 'error' case a failed extract
+    // re-fired the SAME prompt every render → an infinite error→loading→error loop = the "continuous loader".)
+    // A genuinely NEW prompt (webEpoch / ledger change → different promptSig) still re-runs.
+    if ((msynth.status === 'done' || msynth.status === 'error') && lastPromptRef.current === promptSig) return;
+    lastPromptRef.current = promptSig;
+    const tok = ++runTokenRef.current;
     const t0 = performance.now();
-    const call = extractBuyerProfileLLM(synthCtx.prompt.system, synthCtx.prompt.user); // V10: the ONE extract call — no arithmetic synth
-    call
-      .then(({ out, usage }) => setMsynth(out ? { status: 'done', out, ms: Math.round(performance.now() - t0), usage } : { status: 'error', out: null, ms: Math.round(performance.now() - t0), usage }))
-      .catch(() => setMsynth({ status: 'error', out: null, ms: Math.round(performance.now() - t0), usage: null }));
+    setMsynth((m) => ({ ...m, status: 'loading' })); // keep prev out — no blank
+    extractBuyerProfileLLM(synthCtx.prompt.system, synthCtx.prompt.user)
+      .then(({ out, usage }) => { if (runTokenRef.current !== tok) return; setMsynth((m) => out ? { status: 'done', out, ms: Math.round(performance.now() - t0), usage } : { ...m, status: 'error' }); })
+      .catch(() => { if (runTokenRef.current !== tok) return; setMsynth((m) => ({ ...m, status: 'error' })); });
   }, [synthCtx, msynth.status]);
   const rawFinals = useMemo<FinalAttr[]>(() => { if (!synthCtx) return []; return extractedToFinals(msynth.out, synthCtx.evidenceIds); }, [synthCtx, msynth.out]); // V10: extract is the ONLY twin builder — no arithmetic merge
   // CRITIC / PRUNE pass — after the synthesis, a fast 2nd LLM call returns the keep-set; non-kept attrs are flagged
   // pruned → held. Pure LLM judgment (no per-category gate). finals = the pruned set the rest of the screen renders.
   const [prune, setPrune] = useState<{ status: 'idle' | 'loading' | 'done' | 'skip'; keep: string[] | null }>({ status: 'idle', keep: null });
-  useEffect(() => { setPrune({ status: 'idle', keep: null }); }, [ledger]);
+  useEffect(() => { setPrune({ status: 'idle', keep: null }); }, [glid]); // reset only on a new buyer (survives the web upgrade)
   useEffect(() => {
     if (msynth.status !== 'done' || !rawFinals.length || prune.status !== 'idle') return;
     const _off = getOfflineSnapshot(); if (_off) { setPrune({ status: 'done', keep: _off.pruneKeep ?? null }); return; } // OFFLINE (P4): captured keep-set
@@ -284,7 +316,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const offerIdx = Math.min(sampleOfferIdx, Math.max(0, requirements.length - 1));
   const offerSkeleton = useMemo(() => (ledger && requirements.length ? buildOfferSkeleton(requirements[offerIdx], ledger) : null), [ledger, requirements, offerIdx]);
   const [offerLLM, setOfferLLM] = useState<{ status: 'idle' | 'loading' | 'done' | 'skip'; out: OfferLLMOut | null }>({ status: 'idle', out: null });
-  useEffect(() => { setOfferLLM({ status: 'idle', out: null }); }, [ledger, offerIdx]);
+  useEffect(() => { setOfferLLM({ status: 'idle', out: null }); }, [glid, offerIdx]);
   useEffect(() => {
     if (enrichMode !== 'offer' || !offerSkeleton || offerLLM.status !== 'idle') return;
     if (getOfflineSnapshot()) { setOfferLLM({ status: 'skip', out: null }); return; } // OFFLINE (P4): no LLM → deterministic skeleton stands
@@ -341,12 +373,12 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // L6 card 3-way view: Original (frozen) · Buyer Profile (default, AI profile + drills) · Requirement (UC2-enriched).
   // The requirement-enrichment LLM is LAZY — fires ONLY on the Requirement tab, so profile vs requirement calls are distinct.
   const [cardMode, setCardMode] = useState<'original' | 'profile' | 'requirement'>('profile');
-  useEffect(() => { setCardMode('profile'); }, [ledger]);
+  useEffect(() => { setCardMode('profile'); }, [glid]); // keep the user's open tab across a same-GLID web upgrade
   // UC2 is PER-REQUIREMENT (owner): a MAP keyed by offer index keeps a debug block for EVERY requirement enriched this
   // pull. The lazy effect writes map[offerIdx]; per-call cost is captured from the LLM health ring right after the call.
   type Uc2Entry = { status: 'idle' | 'loading' | 'done' | 'no-key'; out: UC2LLMOut | null; usage: SynthUsage | null; costUsd?: number; rawOutput?: string };
   const [uc2Map, setUc2Map] = useState<Record<number, Uc2Entry>>(() => (getOfflineSnapshot()?.uc2Map as Record<number, Uc2Entry>) || {});
-  useEffect(() => { setUc2Map((getOfflineSnapshot()?.uc2Map as Record<number, Uc2Entry>) || {}); }, [ledger]);   // reset each pull; OFFLINE (P4) → seed captured per-offer enrichment
+  useEffect(() => { setUc2Map((getOfflineSnapshot()?.uc2Map as Record<number, Uc2Entry>) || {}); }, [glid]);   // reset on new buyer (not the web upgrade — keeps per-requirement enrichment); OFFLINE (P4) → seed captured per-offer enrichment
   const uc2LLM: Uc2Entry = uc2Map[offerIdx] || { status: 'idle', out: null, usage: null };
   // ONE enrichment in flight at a time — so the per-call cost + raw output we read from the global LLM ring in .then
   // belong to THIS call (no cross-attribution when the user switches requirement mid-enrich). anyUc2Loading also re-runs
@@ -584,6 +616,8 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // wall-of-text. Tier 1 = value · confidence% · provenance badge. Lineage strip = why THIS won (winner ·
   // supports · ruled-out). Tier 2 = concise WHY lines + clickable evidence chips. Tier 3 = raw decision chain.
   const shortNode = (id: string): string => { const e = evMapAll.get(id); const n = e ? (SOURCE_LABEL[e.node as SourceNode] || e.node) : ''; return String(n).split(/[·(⊕]/)[0].trim(); };
+  // source KEYS present in THIS pull — feeds the deterministic per-attribute consumption derivation (deriveConsumption)
+  const presentSourceKeys = useMemo(() => new Set(buildSourceConsumptionMatrix(getEnrichmentRich()).filter((r) => r.present).map((r) => r.key)), [ledger, webEpoch]);
   const finalAttrDetail = (f: FinalAttr): ReactNode => {
     const dec = f.arithmetic?.decisionId && ledger ? ledger.decisions.find((x) => x.id === f.arithmetic!.decisionId) : null;
     const steps = f.llm?.reasoning || [];
@@ -597,6 +631,44 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           <span className={`text-[8px] uppercase font-bold tracking-wide px-1 py-px rounded border ${f.llm ? 'text-violet-700 bg-violet-50 border-violet-200' : 'text-emerald-700 bg-emerald-50 border-emerald-200'}`}>{f.llm ? 'LLM' : 'deterministic'}</span>
           {f.llm && f.llm.grounded === false && <span className="text-[9px] text-rose-500" title="no matching evidence">⚠ ungrounded</span>}
         </div>
+        {/* RULEBOOK — the EXPECTED source-priority (what the LLM SHOULD have chosen, verbatim from the prompt).
+            Shown above the LLM's actual reasoning so a reviewer can match "should" vs "did". LLM attrs only. */}
+        {f.llm && (() => { const rb = rulebookFor(f.key); if (!rb) return null; const usedPolicy = f.llm?.policy; const policyMismatch = !!(usedPolicy && rb.policyId && String(usedPolicy).toUpperCase() !== rb.policyId); return (
+          <div className="rounded border border-indigo-200 bg-indigo-50/50 px-2 py-1 text-[9.5px] leading-snug space-y-0.5">
+            {/* the EXPECTED policy + chain (auto-synced from the frozen rulebook) vs the policy the LLM said it applied */}
+            <div className="flex items-baseline gap-1 flex-wrap">
+              <span className="shrink-0 font-bold uppercase tracking-wide text-indigo-500">policy</span>
+              <span className="font-semibold text-indigo-900">{rb.policyId}</span>
+              <span className="text-indigo-700/70">· {rb.policy}</span>
+              {policyMismatch && <span className="text-[8px] font-semibold text-amber-600" title={`the LLM self-reported policy "${usedPolicy}", but this attribute is defined under "${rb.policyId}"`}>⚠ LLM used {usedPolicy}</span>}
+            </div>
+            <div className="text-indigo-900/80"><span className="font-semibold">order:</span> {rb.priority}</div>
+            {rb.note && <div className="text-indigo-700/60"><span className="font-semibold">rule:</span> {rb.note}</div>}
+          </div>
+        ); })()}
+        {/* PROVENANCE PANEL — Confidence breakdown · Available → Used → Ignored(+reason) · Roles · Agreement ·
+            Contradictions. THE answer to a reviewer's "we had this data — why didn't we use it?". LLM-reported; renders
+            only what is present (old snapshots without the fields simply show nothing here). */}
+        {f.llm && (() => { const l = f.llm!; const cb = l.confidenceBreakdown; const dc = deriveConsumption(rulebookFor(f.key)?.policyId, l.sources, presentSourceKeys); const avail = dc?.available || []; const used = dc?.used || []; const ign = dc?.ignored || []; const roles = dc?.roles || []; const ag = cb ? { score: Math.round(cb.agreement), agreeing: used, conflicting: [] as string[] } : undefined; const contra = (l.reasoning || []).map((r) => r.rejected).filter(Boolean) as string[];
+          if (!cb && !avail.length && !used.length && !ign.length && !roles.length && !ag && !contra.length) return null;
+          const chip = (t: string, cls: string, title?: string) => <span title={title} className={`inline-block rounded px-1 py-px text-[8.5px] ${cls}`}>{t}</span>;
+          return (
+          <div className="rounded border border-gray-200 bg-gray-50/70 px-2 py-1 text-[9.5px] leading-snug space-y-1">
+            {cb && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-bold uppercase tracking-wide text-gray-500">confidence</span>
+                <span className="font-semibold text-gray-800 tabular-nums">{Math.round(cb.final)}</span>
+                <span className="text-gray-400">= quality {Math.round(cb.source_quality)} × agreement {Math.round(cb.agreement)} × freshness {Math.round(cb.freshness)}{cb.conflict_penalty ? ` − conflict ${Math.round(cb.conflict_penalty)}` : ''}</span>
+              </div>
+            )}
+            {avail.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="font-semibold text-gray-500 mr-0.5">available:</span>{avail.map((s, i) => <span key={i}>{chip(s, used.includes(s) ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-200 text-gray-500', used.includes(s) ? 'used' : 'available but not used')}</span>)}</div>}
+            {used.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="font-semibold text-emerald-600 mr-0.5">used:</span>{used.map((s, i) => <span key={i}>{chip(s, 'bg-emerald-100 text-emerald-700')}</span>)}</div>}
+            {ign.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="font-semibold text-amber-600 mr-0.5">ignored:</span>{ign.map((o, i) => <span key={i}>{chip(o.source, 'bg-amber-100 text-amber-700', o.reason)}</span>)}</div>}
+            {roles.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="font-semibold text-gray-500 mr-0.5">roles:</span>{roles.map((r, i) => <span key={i}>{chip(`${r.source} · ${r.role}`, 'bg-indigo-100 text-indigo-700')}</span>)}</div>}
+            {ag && <div className="text-gray-500"><span className="font-semibold">agreement:</span> {Math.round(ag.score)}{ag.agreeing && ag.agreeing.length ? ` · agree ${ag.agreeing.join(', ')}` : ''}{ag.conflicting && ag.conflicting.length ? <span className="text-rose-500"> · conflict {ag.conflicting.join(', ')}</span> : null}</div>}
+            {contra.length > 0 && <div className="text-rose-600"><span className="font-semibold">contradictions:</span> {contra.join(' · ')}</div>}
+          </div>
+        ); })()}
         {/* LINEAGE STRIP — why this answer won (Attribute Lineage) */}
         {f.llm && (
           <div className="text-[9.5px] text-gray-500 flex flex-wrap items-center gap-x-1.5">
@@ -885,7 +957,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         </div>) });
         if (requirements.length) { const activeCt = requirements.filter((r) => !r.isExpired).length; channels.push({ key: 'rfq', label: `📑 Prev Requirements / BLs (${activeCt} active · ${requirements.length - activeCt} expired)`, count: requirements.length, tone: 'emerald', sample: requirements.map((r) => r.title).slice(0, 3).join(' · '), body: (<div className="space-y-1">{requirements.map((r, i) => { const rState = r.isExpired ? 'Stale' : (r.recencyDays != null ? (r.recencyDays <= 15 ? 'Fresh' : r.recencyDays <= 45 ? 'Moderate' : 'Stale') : null); return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="flex items-start gap-2"><span className="flex-1 min-w-0 text-[10.5px] font-semibold text-gray-700 break-words">{r.title}</span>{rState && <StatePill state={rState} />}{r.isExpired && <span className="text-[8.5px] px-1 rounded border bg-rose-50 text-rose-600 border-rose-200 shrink-0">EXPIRED</span>}</div>{(r.category || r.posted || r.expiry || r.recencyDays != null) && <div className="text-[9.5px] text-gray-400 flex flex-wrap gap-x-2 mt-0.5">{r.category && <span>{r.category}</span>}{r.posted && <span>· posted {r.posted}</span>}{r.expiry && <span>· exp {r.expiry}</span>}{r.recencyDays != null && <span>· {r.recencyDays}d old</span>}</div>}{r.specs.length > 0 && <div className="flex flex-wrap gap-1 mt-1">{r.specs.map((s, j) => (<span key={j} className="text-[9px] px-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">{s.k}: {s.v}</span>))}</div>}{r.description && <div className="text-[10px] text-gray-500 mt-0.5 italic">“{r.description}”</div>}{r.buyerNotes.filter((n) => n !== r.description).map((n, j) => (<div key={j} className="text-[10px] text-gray-500 mt-0.5 italic">“{n}”</div>))}</div>); })}</div>) }); }
         // §C — Befisc and Sign3 as SEPARATE readable channels (never a combined ambiguous "External").
-        const extRows = (rows: typeof external.befisc) => (<div className="space-y-0.5">{rows.map((f, i) => (<div key={i} className="flex justify-between gap-2 text-[10.5px]"><span className="text-gray-400">{f.label} <span className="text-gray-300">· {f.source}</span></span><span className="text-gray-700">{f.value}</span></div>))}</div>);
+        const extRows = (rows: NonNullable<typeof external>['befisc']) => (<div className="space-y-0.5">{rows.map((f, i) => (<div key={i} className="flex justify-between gap-2 text-[10.5px]"><span className="text-gray-400">{f.label} <span className="text-gray-300">· {f.source}</span></span><span className="text-gray-700">{f.value}</span></div>))}</div>);
         if (external?.befisc?.length) channels.push({ key: 'befisc', label: '🛡 Befisc · external identity', count: external.befisc.length, tone: 'amber', body: extRows(external.befisc) });
         if (external?.sign3?.length) channels.push({ key: 'sign3', label: '🛡 Sign3 · digital footprint', count: external.sign3.length, tone: 'amber', body: extRows(external.sign3) });
         // L3 · LLM input (the ONE extract call — system + user are two parts of it)
@@ -999,7 +1071,11 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         // strike the recorded and show the operating city — the recorded value was really a sourcing/registration city.
         const recordedLoc = idn ? ([idn.city, idn.state].filter(Boolean).join(', ') || '') : '';
         const operatingCity = (locAttr?.value.match(/operates in\s+([^·|]+)/i)?.[1] || '').trim().replace(/[.;]+$/, '');
-        const locationCorrected = (operatingCity && recordedLoc && norm(operatingCity) !== norm(recordedLoc) && !norm(operatingCity).includes(norm(idn?.city || ' ')))
+        // P0 backstop (owner): NEVER strike the registered city to a city that is ALSO listed as a SOURCING city — that is
+        // a sourcing signal misread as operating (the "Operates in X · Sources from X" self-contradiction / PAN-only flip).
+        const sourcingCities = (locAttr?.value.match(/sources? from\s+(.+)$/i)?.[1] || '').split(/[,·|]/).map((c) => norm(c)).filter(Boolean);
+        const opIsSourcing = !!operatingCity && sourcingCities.includes(norm(operatingCity));
+        const locationCorrected = (operatingCity && recordedLoc && norm(operatingCity) !== norm(recordedLoc) && !norm(operatingCity).includes(norm(idn?.city || ' ')) && !opIsSourcing)
           ? { from: recordedLoc, to: operatingCity } : undefined;
         const titleDrill = selReq ? (<div className="text-[10.5px] text-gray-600 space-y-0.5">{selReq.offerId && <div>offer id: <span className="font-mono">{selReq.offerId}</span></div>}{selReq.status && <div>status: {selReq.status}{selReq.isExpired ? ' (expired)' : ''}</div>}{selReq.posted && <div>posted: {selReq.posted}</div>}{selReq.expiry && <div>expiry: {selReq.expiry}</div>}{selReq.recencyDays != null && <div>age: {selReq.recencyDays}d</div>}{selReq.category && <div>category: {selReq.category}{selReq.categoryId ? ` (#${selReq.categoryId})` : ''}</div>}{selReq.orderValue && <div>probable order value: {selReq.orderValue} <span className="text-gray-400">(system-deduced)</span></div>}{selReq.requirementType && <div>requirement type: {selReq.requirementType} <span className="text-gray-400">(system-deduced)</span></div>}{selReq.productOrService && <div>type: {selReq.productOrService}</div>}{selReq.verified != null && selReq.verified !== '' && <div>verified flag: {selReq.verified}</div>}{selReq.queryId && <div>query id: <span className="font-mono">{selReq.queryId}</span></div>}</div>) : undefined;
         // V11 — LLM-derived (>1 source) buyer-profile rows. Headline is the VALUE ONLY; confidence% + LLM badge show
@@ -1041,11 +1117,12 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         // Q76 — "still ask": frozen buyer questions NOT deduced (LLM omitted = couldn't ground) or below-confidence → ask the buyer.
         const ASK_LABELS: Record<string, string> = { business_persona: 'Buyer Persona', buyer_maturity: 'Buyer Maturity', buyer_intent: 'Buyer Intent', procurement_model: 'Procurement Model', purchase_frequency: 'Purchase Frequency', price_vs_quality: 'Price vs Quality', communication: 'Communication', delivery_timeline: 'Delivery Timeline', payment_mode: 'Payment Mode', location_sourcing_preference: 'Location & Sourcing' };
         const stillAsk = Object.keys(ASK_LABELS).filter((k) => { if (k === 'delivery_timeline') return !finals.some((f) => f.key === 'delivery_timeline' || f.key === 'urgency'); const f = finals.find((x) => x.key === k); return !f || (f.confidence ?? 0) < 60; }).map((k) => ASK_LABELS[k]);
+        const needsInput = extractNeedsInput(msynth.out);   // LLM-driven needs-input (label + reason + the question to ask); falls back to stillAsk
         // DETERMINISTIC profile rows on the right (NOT identity anchors). §A: each carries a 100% deterministic chip.
         const company = resolveCompany(idn, ext, gstAdv?.legalName);   // §B company anchor — cross-slot incl. GST legal name
         const device = resolveDevice(richResp);               // §F device chip
         const repeat = repeatSegment(richResp);               // §J1 repeat segment (unique-week count)
-        const companyDrill = company ? (<div className="text-[10.5px] text-gray-600 space-y-1"><div>{confidenceChip(100, false)}</div><div className="font-semibold text-gray-800">{company.value}</div><div className="text-gray-400">matched across: {company.source}{company.verified ? ' — agrees across ≥2 slots → cross-source confirmed ✓✓' : ' — only one slot carries it (single ✓)'}</div></div>) : undefined;
+        const companyDrill = company ? (<div className="text-[10.5px] text-gray-600 space-y-1"><div>{confidenceChip(100, false)}</div><div className="font-semibold text-gray-800">{company.company}</div><div className="text-gray-400">matched across: {company.source}{company.verified ? ' — agrees across ≥2 slots → cross-source confirmed ✓✓' : ' — only one slot carries it (single ✓)'}</div></div>) : undefined;
         const memberSinceDrill = idn?.memberSince ? (<div className="text-[10.5px] text-gray-600 space-y-1"><div>{confidenceChip(100, false)}</div><div>deterministic — IndiaMART / GLUSR tenure (member-since), passed through as-is. A registered fact, never "new".</div></div>) : undefined;
         const detRows: L6ProfileRow[] = [];
         // §D rename "Purchasing power" → "Income"
@@ -1185,14 +1262,37 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
             <div className="max-w-6xl mx-auto space-y-2.5" style={{ zoom: readZoom } as React.CSSProperties}>
               {/* TrustSEAL Buyer Profile — the polished buyer-facing view on TOP (owner-requested), data-driven from the
                   same rich pull. Reads parseBuyerProfile(rich); zero fabricated data; provenance-badged. Debug bands below. */}
-              <BuyerProfileCard rich={getEnrichmentRich()} glid={glid} pending={fullPending} />
+              <BuyerProfileCard rich={(() => { const _r = getEnrichmentRich(); const _b = finalsToBuyerBlock(finals); if (Object.keys(_b).length) lastBuyerBlockRef.current = _b; const _bb = Object.keys(_b).length ? _b : lastBuyerBlockRef.current; return (_r && typeof _r === 'object' && Object.keys(_bb).length) ? { ...(_r as object), buyer: _bb } : _r; })()} glid={glid} pending={fullPending} persona={finals.find((f) => f.key === 'business_persona')?.value} />
               {/* L6 — the Buylead / Buyer card on TOP (the product). Everything else is the debug pipeline behind it. */}
-              <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} reqFrequency={reqFrequency} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} locationCorrected={locationCorrected} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} stillAsk={stillAsk} mode={cardMode} onMode={setCardMode} defaultOpen />
+              <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} reqFrequency={reqFrequency} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} locationCorrected={locationCorrected} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} stillAsk={stillAsk} needsInput={needsInput} mode={cardMode} onMode={setCardMode} defaultOpen />
               {/* Debug ABOVE (owner) — everything else folds under ONE collapsed Debug container, in 4 clearly-grouped sections */}
               <Band code="Debug" title="Debug — how the profile & each requirement were built" subtitle="nodes · the buyer-profile LLM · per-requirement enrichment · web verify" tone="slate" defaultOpen={false}>
                 <div className="space-y-2.5">
                   <div className="text-[11px] text-gray-400">The pipeline behind the card above — every step expands to its last raw line.</div>
                   <DebugGroup n="1" label="Nodes & Health — shared: every source raw · what the LLM saw · our readable view" />
+                  {/* SOURCE-CONSUMPTION MATRIX (#8) — every source: present → fed to the LLM → on the card → in debug.
+                      The top-level answer to "we had this data, why didn't we use it?" (per-attribute answer is in L5's drill). */}
+                  {(() => { const rows = buildSourceConsumptionMatrix(getEnrichmentRich()); const sm = consumptionSummary(rows); const badge = (r: string) => { const m: Record<string, [string, string]> = { yes: ['✓', 'text-emerald-600'], 'via-llm': ['~', 'text-amber-600'], partial: ['~', 'text-amber-600'], no: ['✗', 'text-rose-500'] }; const [g, c] = m[r] || ['·', 'text-gray-400']; return <span className={`font-bold ${c}`} title={r}>{g}</span>; }; return (
+                    <details className="rounded-lg border border-slate-200 bg-white">
+                      <summary className="cursor-pointer list-none px-2 py-1.5 text-[11px] font-semibold text-slate-700 flex items-center gap-2 flex-wrap">🔌 Source-consumption matrix <span className="text-[10px] font-normal text-gray-400">— {sm.present}/{sm.total} present · {sm.consumedByLLM} fed to the LLM · {sm.gaps} noted gaps · answers “we had this data — why not used?”</span></summary>
+                      <div className="px-2 pb-2 overflow-x-auto">
+                        <table className="w-full text-[10px] border-collapse">
+                          <thead><tr className="text-gray-400 text-left"><th className="py-0.5 pr-2 font-medium">source</th><th className="px-1 font-medium">present</th><th className="px-1 font-medium">LLM</th><th className="px-1 font-medium">card</th><th className="px-1 font-medium">debug</th><th className="pl-2 font-medium">note</th></tr></thead>
+                          <tbody>{rows.map((r) => (
+                            <tr key={r.key} className={`border-t border-gray-100 ${r.present ? '' : 'opacity-40'}`}>
+                              <td className="py-0.5 pr-2 text-gray-700 whitespace-nowrap">{r.label}</td>
+                              <td className="px-1 text-center">{r.present ? <span className="text-emerald-600 font-bold">✓</span> : <span className="text-gray-300">—</span>}</td>
+                              <td className="px-1 text-center">{badge(r.llm)}</td>
+                              <td className="px-1 text-center">{badge(r.card)}</td>
+                              <td className="px-1 text-center">{badge(r.debug)}</td>
+                              <td className="pl-2 text-gray-400">{r.gap || ''}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                        <div className="text-[9px] text-gray-400 mt-1">✓ direct · ~ via-LLM-overlay / partial / raw-only · ✗ not consumed. A source outside its authority is Corroborative at best — that is BY DESIGN, not a miss.</div>
+                      </div>
+                    </details>
+                  ); })()}
                   <L1Band nodes={nodeRows} cov={covLLM} endpoint={endpoint} defaultOpen drill={SHOW_EVIDENCE_GRAPH ? <details className="mt-1"><summary className="cursor-pointer list-none text-[10.5px] text-slate-600">＋ evidence graph — every node → its facts (role · used/ignored · ladder)</summary><div className="mt-1 space-y-2">{evidenceRail()}</div></details> : undefined} />
                   <DebugGroup n="2" label="Buyer Profile (one-time) — the ONE extract: sent · raw prompt · output · run cost · grounding" />
                   <L3Band model={io?.model || 'google/gemini-2.5-flash'} maxTokens={io?.maxTokens ?? 16000} temperature={io?.temperature ?? 0} promptVersion={io?.promptVersion} catalog={catalog} sources={sources} signalCount={synthCtx?.bundle.evidence.length || 0} usage={msynth.usage ? { inputTokens: msynth.usage.promptTokens, outputTokens: msynth.usage.completionTokens, reasoningTokens: msynth.usage.reasoningTokens, ms: msynth.ms, costUsd: extractCost } : null} sourceGuide={sourceGuideNode} defaultOpen />

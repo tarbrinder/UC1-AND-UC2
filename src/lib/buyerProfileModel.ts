@@ -112,11 +112,15 @@ export interface MonthBar { month: string; count: number }
 // #11 — a web citation behind an inferred field (source URL + quoted excerpt + engine confidence), from web_osint basis[]/proofs[].
 export interface ProofRow { field: string; url: string; excerpt: string; confidence: string }
 // #4 — the most-recent requirement's BuyLead-page fields, surfaced on the 1-pager (consistent with the BuyLead-details view).
-export interface ReqDetail { title: string; orderValue: Field; requirementType: Field; category: Field; posted: string; specs: { k: string; v: string }[] }
+export interface ReqDetail { title: string; orderValue: Field; requirementType: Field; category: Field; posted: string; specs: { k: string; v: string }[]; isExpired: boolean; status: string; expiry: string; recencyDays: number | null }
 export interface BuyerProfileModel {
   glid: string;
   available: boolean;                       // false → no rich payload pulled yet
-  header: { company: Field; contactName: Field; memberSince: Field; tenureYears: number | null; tiles: StatTile[] };
+  header: { company: Field; contactName: Field; memberSince: Field; registeredLocation: Field; tenureYears: number | null; tiles: StatTile[] };
+  // Amit (demo): the plain-language "what does this buyer do / kis cheez ka dhandha hai" — the ONE line a CXO reads first.
+  headline: string | null;
+  // IndiaMART verified-business-buyer flag → TS status. 6-9 = TrustSEAL buyer; 4/5 = GST-verified; else partial/unverified.
+  verifiedBuyer: { flag: number; tier: 'trustseal' | 'gst_verified' | 'partial' | 'unverified'; label: string } | null;
   businessStory: { text: string; inferredParts: string[] } | null;   // templated, NOT literal
   overview: LabeledField[];
   procurement: LabeledField[];              // all "Not available" in current data
@@ -130,8 +134,9 @@ export interface BuyerProfileModel {
   products: string[];
   productsOffered: string[];
   latestRequirement: ReqDetail | null;      // #4 — BuyLead order value / type / specs of the most-recent requirement
+  hasActiveRequirement: boolean;            // N1 — any live (non-expired) BuyLead? false ⇒ latest requirement is expired / buyer is browse-only
   proofs: ProofRow[];                       // #11 — web citations (URL + excerpt + confidence) behind inferred fields
-  googleBusiness: { exists: boolean; rating: string | null } | null;
+  googleBusiness: { exists: boolean; rating: string | null; kind: 'gmb' | 'maps_contributor' } | null;
   plan: null;                               // omitted — no source field (see comment in parseBuyerProfile)
   health: Record<string, { ok: boolean; status: string }>;
 }
@@ -224,13 +229,27 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // its inferred narrative fields REPLACE the deterministic "Not available"/web fallbacks (this is what fills the
   // Procurement Profile / Market Focus / stage / type / turnover / story that no raw source can). Absent → deterministic
   // values above stand. Each is tagged inferred (server LLM) with its confidence + reason. ─────────────────────────────
-  const llm = obj(obj(rich).llm_profile);
-  const lf = (k: string): Field | null => { const o = obj(llm[k]); const v = str(o.value); if (!v || /^(null|n\/?a|none|unknown|not available)$/i.test(v)) return null; return { value: v, present: true, provenance: 'inferred', source: 'server LLM (bi-buyer-profile)', inferred: true, confidence: Number(o.confidence) || undefined, note: str(o.reason) || undefined }; };
+  // bi-buyer-unified: prefer the unified buyer.* superset (by key-match); fall back to workflow-B llm_profile so a
+  // pre-cutover response still renders; absent both → the deterministic absentField floor below stands.
+  const buyerBlk = obj(obj(rich).buyer);
+  const llm = Object.keys(buyerBlk).length ? buyerBlk : obj(obj(rich).llm_profile);
+  const llmSrc = Object.keys(buyerBlk).length ? 'buyer-profile extract (LLM)' : 'server LLM (bi-buyer-profile-card)';  // neutral — dashboard feeds this from the frontend extract; standalone from bi-buyer-unified
+  const lf = (k: string): Field | null => { const o = obj(llm[k]); const v = str(o.value); if (!v || /^(null|n\/?a|none|unknown|not available)$/i.test(v)) return null; return { value: v, present: true, provenance: 'inferred', source: llmSrc, inferred: true, confidence: Number(o.confidence) || undefined, note: str(o.reason) || undefined }; };
   if (Object.keys(llm).length) {
     const setL = (a: LabeledField[], i: number, k: string) => { const f = lf(k); if (f) a[i] = { label: a[i].label, field: f }; };
     setL(overview, 0, 'business_type'); setL(overview, 1, 'business_stage'); setL(overview, 3, 'annual_turnover');
     setL(procurement, 0, 'sourcing_channel'); setL(procurement, 1, 'preferred_suppliers'); setL(procurement, 2, 'procurement_approach');
     setL(market, 0, 'target_customers'); setL(market, 1, 'selling_channel'); setL(market, 2, 'sales_geography');
+  }
+  // Deterministic Selling-Channel fallback (audit ⑤): a GLID that is ALSO a listed IndiaMART seller has a real selling
+  // channel even without the server-LLM overlay — surface its own storefront rather than leaving the slot blank.
+  {
+    const idS = obj(summaryOf(rich, 'identity')); const cslS = obj(summaryOf(rich, 'csl'));
+    const paidurl = str(idS.paidurl); const alsoSeller = cslS.also_a_seller === true || /listed seller/i.test(str(cslS.account_status));
+    if (!market[1].field.present && (paidurl || alsoSeller)) {
+      const store = paidurl ? paidurl.replace(/^https?:\/\/(www\.)?/, '').replace(/\/+$/, '') : '';
+      market[1] = { label: 'Selling Channel', field: { value: store ? `Sells on IndiaMART · ${store}` : 'Listed seller on IndiaMART', present: true, provenance: 'derived', source: 'IndiaMART listing (paidurl · also_a_seller)', note: 'this GLID is also a listed IndiaMART seller' } };
+    }
   }
 
   // ── business story — TEMPLATED (composed client-side from fields we already have; NOT an LLM call, NOT literal API
@@ -243,7 +262,9 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     // prefer the verified GST role over the web industry; fall back to the buyer's own requirement category
     const rolePart = gstRole ? `${gstRole.toLowerCase()} ` : (industry ? `${industry} ` : (reqIndustry ? `${reqIndustry} ` : ''));
     const prodPart = topProducts.length ? ` dealing in ${topProducts.join(' and ')}` : '';
-    businessStory = { text: `${company} is a ${stagePart}${rolePart}business${prodPart}.`.replace(/\s+/g, ' ').trim(), inferredParts: gstRole ? [] : (industry ? ['industry (web)'] : []) };
+    const afterArticle = `${stagePart}${rolePart}`.trim() || 'business';   // N3 — article must agree with the next word's sound ("an established", not "a established")
+    const article = /^[aeiou]/i.test(afterArticle) ? 'an' : 'a';
+    businessStory = { text: `${company} is ${article} ${stagePart}${rolePart}business${prodPart}.`.replace(/\s+/g, ' ').trim(), inferredParts: gstRole ? [] : (industry ? ['industry (web)'] : []) };
   }
   // server-LLM story (if B provided one) supersedes the templated one — it's a fuller narrative from the evidence
   const llmStory = str(obj(llm.business_story).value);
@@ -295,13 +316,27 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     officialAddress: field(str(udy0.official_address), 'registry', 'Udyam MSME registry'),
   };
 
-  const gstStatusVal = str(cert0.gstin_status);
+  // v29 (demo · "we are not filling fields"): the Company Details block read ONLY cert0 = gst_cert_idfy, which is often
+  // ABSENT — yet the 3-vendor consensus (gst_detail_union) + GSTIN union carry the GSTIN, legal/trade name, constitution,
+  // registration date and status. Fall back to those so a GST-verified buyer's registry fields actually render.
+  const gd0 = obj(gdDetails[0]);
+  const gd0f = obj(gd0.fields);
+  const gdVal = (k: string): string => { const f = obj(gd0f[k]); const c = f.canonical; if (typeof c === 'string') return c; if (Array.isArray(c)) return c.map(str).filter(Boolean).join(', '); return c != null ? str(c) : ''; };
+  // GSTIN: cert → consensus gstin → GSTIN-union primary
+  const gstinUnion = obj(summaryOf(rich, 'gstin_union'));
+  const gstinVal = str(cert0.gstin) || str(gd0.gstin) || str(gstinUnion.primary) || str(arr(gstinUnion.gstins).map(obj).map((g) => str(g.gstin)).filter(Boolean)[0]);
+  const gstSrc = str(cert0.gstin) ? 'IDfy GST certificate' : (str(gd0.gstin) ? 'GST 3-vendor consensus (Sign3⊕IDfy⊕Befisc)' : 'GSTIN union');
+  const gstStatusVal = str(cert0.gstin_status) || gdVal('gstin_status');
+  const tradeNameVal = str(cert0.trade_name) || str(cert0.legal_name) || gdVal('trade_name') || gdVal('legal_name');
+  const constitutionVal = str(cert0.constitution_of_business) || gdVal('constitution_of_business');
+  const regDateVal = str(cert0.date_of_registration) || gdVal('date_of_registration');
+  const kybSrc = str(cert0.gstin) ? 'IDfy GST certificate' : 'GST 3-vendor consensus (Sign3⊕IDfy⊕Befisc)';
   const cmp = {
-    gst: field(str(cert0.gstin), 'registry', 'IDfy GST certificate'),
-    gstStatus: gstStatusVal ? { value: gstStatusVal, present: true, provenance: 'registry' as Provenance, source: 'IDfy GST certificate', note: 'literal gstin_status (not a hardcoded label)' } : absentField('IDfy GST certificate'),
-    tradeName: field(str(cert0.trade_name) || str(cert0.legal_name), 'registry', 'IDfy GST certificate'),
-    constitution: field(str(cert0.constitution_of_business), 'registry', 'IDfy GST certificate'),
-    regDate: field(str(cert0.date_of_registration), 'registry', 'IDfy GST certificate'),
+    gst: gstinVal ? field(gstinVal, 'registry', gstSrc) : absentField('no GSTIN discovered across IDfy / consensus / union'),
+    gstStatus: gstStatusVal ? { value: gstStatusVal, present: true, provenance: 'registry' as Provenance, source: kybSrc, note: 'literal gstin_status (not a hardcoded label)' } : absentField('GST cert / consensus'),
+    tradeName: tradeNameVal ? field(tradeNameVal, 'registry', kybSrc) : absentField('GST cert / consensus'),
+    constitution: constitutionVal ? field(constitutionVal, 'registry', kybSrc) : absentField('GST cert / consensus'),
+    regDate: regDateVal ? field(regDateVal, 'registry', kybSrc) : absentField('GST cert / consensus'),
     principalAddress,
     identity,
     pans,
@@ -323,31 +358,55 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   };
 
   // ── social — every value guarded by isAbsent (web strings like "no account found" → dash, never link-ified) ─────
-  const sf = (v: unknown, label: string): Field => { if (!webVerified) return absentField('web unverified — name-only search, possible namesake'); const s = webVal(v); return s ? { value: s, present: true, provenance: 'inferred', source: `web_osint (LLM) · ${label}`, inferred: true, confidence: webConf } : absentField('web_osint'); };
+  // Sign3 phone-linked social presence (["FACEBOOK","INSTAGRAM",…]) — a real per-buyer signal (not a web namesake), so it
+  // fills a slot as presence-only when web_osint has nothing. No handle/URL is fabricated.
+  const sign3Socials = new Set(arr(summaryOf(rich, 'external').social_platforms).map((p) => str(p).toUpperCase()));
+  const sf = (v: unknown, label: string): Field => {
+    const s = webVerified ? webVal(v) : '';
+    if (s) return { value: s, present: true, provenance: 'inferred', source: `web_osint (LLM) · ${label}`, inferred: true, confidence: webConf };
+    if (sign3Socials.has(label.toUpperCase())) return { value: 'Present', present: true, provenance: 'inferred', source: 'Sign3 · phone-linked account', inferred: true, note: 'account exists per Sign3 — presence only, profile URL not captured' };
+    return absentField(webVerified ? 'web_osint / Sign3' : 'no web/social account on file (Sign3 checked)');
+  };
   const gb = obj(web.google_business);
   // Prefer web_osint google_business (only when the web search was anchored); else fall back to the Sign3 Google-Maps
   // contributor profile on external (#12) — that's a real per-buyer signal, not a web namesake, so it's not gated.
   let googleBusiness: BuyerProfileModel['googleBusiness'] = null;
   if (webVerified && 'google_business' in web && Object.keys(gb).length) {
-    googleBusiness = { exists: gb.exists === true, rating: gb.exists === true ? (webVal(gb.rating) || null) : null };
+    googleBusiness = { exists: gb.exists === true, rating: gb.exists === true ? (webVal(gb.rating) || null) : null, kind: 'gmb' };
   } else {
     const extGmb = obj(summaryOf(rich, 'external').google_business);
     if (Object.keys(extGmb).length) {
       const r = str(extGmb.ratings); const rev = str(extGmb.reviews);
       const rating = r ? `${r} ratings${rev ? ` · ${rev} reviews` : ''} (Google Maps)` : (rev ? `${rev} reviews (Google Maps)` : null);
-      if (rating) googleBusiness = { exists: true, rating };
+      // N7 — this is a personal Google-Maps CONTRIBUTOR profile (Sign3 phone-linked), NOT the firm's verified GMB; its pin
+      // can sit in a different city than the registered address, so it must NEVER be read as the operating location.
+      if (rating) googleBusiness = { exists: true, rating, kind: 'maps_contributor' };
     }
   }
 
   // #3 — Products of Interest: aggregate requirement titles (BuyLead) + WhatsApp products_enquired, deduped
   // (case-insensitive, first-occurrence order) → consistent with the BuyLead-details page (was WhatsApp-only → blank).
   const dedupeStr = (xs: string[]): string[] => { const seen = new Set<string>(); const out: string[] = []; for (const x of xs) { const v = x.trim(); const k = v.toLowerCase(); if (!v || seen.has(k)) continue; seen.add(k); out.push(v); } return out; };
-  const products = dedupeStr([...reqs.map((r) => str(r.title)), ...(wa?.meta?.productsEnquired || []).map(str)].filter(Boolean));
+  // N6 — collapse near-duplicate product-line variants ("Electronic Piezo Buzzer 12 V" ⊂ "Plastic Electronic Piezo Buzzer"):
+  // reduce each name to its SIGNIFICANT tokens (drop pure numbers, 1-char tokens, generic units/fillers — NO category
+  // hardcoding) and drop any name whose token-set is a STRICT subset of a longer kept name (keep the richer descriptor).
+  const FILLER = new Set(['the', 'for', 'and', 'of', 'with', 'in', 'type', 'size', 'set', 'pcs', 'pc', 'piece', 'pieces', 'mm', 'cm', 'volt', 'volts', 'watt', 'watts', 'kg', 'gm', 'nos', 'unit', 'units']);
+  const sigTokens = (name: string): Set<string> => new Set(name.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && t.length > 1 && !/^\d+$/.test(t) && !FILLER.has(t)));
+  const dedupeProducts = (xs: string[]): string[] => {
+    const list = dedupeStr(xs).map((name) => ({ name, tk: sigTokens(name) }));
+    return list.filter((p, i) => p.tk.size === 0 || !list.some((q, j) => j !== i && q.tk.size > p.tk.size && [...p.tk].every((t) => q.tk.has(t)))).map((p) => p.name);
+  };
+  const products = dedupeProducts([...reqs.map((r) => str(r.title)), ...(wa?.meta?.productsEnquired || []).map(str)].filter(Boolean));
 
   // #4 — most-recent requirement's BuyLead-page fields (order value / requirement type / category / specs). Prefer the
   // first requirement carrying order-value or specs, else the recency-spine head. orderValue/requirementType are
   // platform-deduced (Probable *) → provenance 'derived'; category is MCAT-resolved (registry); specs are buyer-filled.
-  const rd = reqs.find((r) => str(r.orderValue) || (r.specs && r.specs.length)) || reqs[0] || null;
+  // N1 — prefer a LIVE lead when one exists (non-expired w/ order-value/specs → any non-expired → any w/ value/specs →
+  // recency head). reqs is sorted active-first, so a fully-expired buyer surfaces the freshest EXPIRED lead — flagged as such.
+  const hasActiveRequirement = reqs.some((r) => r.hasBL && !r.isExpired);
+  const rd = reqs.find((r) => !r.isExpired && (str(r.orderValue) || (r.specs && r.specs.length)))
+    || reqs.find((r) => !r.isExpired)
+    || reqs.find((r) => str(r.orderValue) || (r.specs && r.specs.length)) || reqs[0] || null;
   const latestRequirement: ReqDetail | null = rd ? {
     title: str(rd.title),
     orderValue: str(rd.orderValue) ? { value: str(rd.orderValue), present: true, provenance: 'derived', source: 'BuyLead ISQ · Probable Order Value (platform-deduced)', note: 'platform-deduced, not buyer-stated' } : absentField('BuyLead ISQ'),
@@ -355,6 +414,10 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     category: field(str(rd.category), 'registry', 'BuyLead category (MCAT-resolved)'),
     posted: str(rd.posted),
     specs: (rd.specs || []).map((s) => ({ k: str(s.k), v: str(s.v) })).filter((s) => s.k && s.v).slice(0, 6),
+    isExpired: rd.isExpired === true,
+    status: str(rd.status),
+    expiry: str(rd.expiry),
+    recencyDays: rd.recencyDays != null && !isNaN(Number(rd.recencyDays)) ? Number(rd.recencyDays) : null,
   } : null;
 
   // #11 — proofs behind the inferred (web) fields: web_osint proofs[] (P3-distilled) else basis[] (raw) → {field, url,
@@ -372,6 +435,27 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     return { field: str(b.field), url, excerpt: ex, confidence: str(b.confidence) };
   }).filter((p) => p.field && (p.url || p.excerpt) && !badProof(p.url) && !badProof(p.excerpt)));
 
+  // ── Amit (demo): verified-business (TS) flag + the prominent plain-language "what does this buyer do" headline ──────
+  const idSum = obj(summaryOf(rich, 'identity'));
+  const vbbRaw = idSum.verified_business_buyer_flag; const vbbN = Number(vbbRaw);
+  const verifiedBuyer: BuyerProfileModel['verifiedBuyer'] = (vbbRaw != null && vbbRaw !== '' && !isNaN(vbbN))
+    ? (vbbN >= 6 ? { flag: vbbN, tier: 'trustseal', label: 'TrustSEAL Verified Business Buyer' }
+      : (vbbN === 4 || vbbN === 5) ? { flag: vbbN, tier: 'gst_verified', label: 'GST-Verified Business' }
+      : vbbN > 0 ? { flag: vbbN, tier: 'partial', label: 'Partially-Verified Account' }
+      : { flag: vbbN, tier: 'unverified', label: 'Unverified Account' })
+    : null;
+  // "kis cheez ka dhandha hai" — one plain line: designation · role · what they deal in. Deterministic (no LLM needed);
+  // the server-LLM business_persona (if present) supersedes it for a richer phrasing.
+  const desigStr = str(idSum.designation);
+  // role slot = a real ROLE word only (Manufacturer/Trader/Wholesaler…), NEVER a product category — else the headline
+  // reads "Trader · Non Stick Dosa Tawa". Prefer verified GST role; else a non-web businessType; else let designation carry it.
+  const roleStr = gstRole || (businessTypeField.present && !/web/i.test(String(businessTypeField.source || '')) ? businessType : '') || '';
+  const headlineProds = [...new Set([...(products || []), ...topProducts])].filter(Boolean).slice(0, 3).join(', ');
+  const llmPersona = str(obj(llm.business_persona).value) || str(obj(llm.business_type).value);
+  const headline = (llmPersona && !/^(null|n\/?a|none)$/i.test(llmPersona))
+    ? llmPersona
+    : (() => { const lead = [desigStr, roleStr].filter(Boolean).join(' · '); const s = [lead, headlineProds && `deals in ${headlineProds}`].filter(Boolean).join(' — '); return s.trim() || null; })();
+
   return {
     glid: str(obj(rich).glid),
     available,
@@ -379,9 +463,12 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
       company: field(company, company === idn?.company ? 'registry' : 'inferred', company === idn?.company ? 'IndiaMART profile' : 'GST certificate'),
       contactName: field(idn?.name || '', 'registry', 'IndiaMART profile'),
       memberSince: field(memberSince, 'registry', 'GLUSR usersince'),
+      registeredLocation: (() => { const loc = [idn?.city, idn?.state].filter(Boolean).join(', '); return loc ? field(loc, 'registry', 'IndiaMART profile · registered city (glusr) — the ORIGINAL operating location; sourcing cities are separate') : absentField('profile city'); })(),
       tenureYears,
       tiles,
     },
+    headline,
+    verifiedBuyer,
     businessStory,
     overview, procurement, market,
     company: cmp,
@@ -396,6 +483,7 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     products,
     productsOffered: arr(summaryOf(rich, 'whatsapp').products_offered).map(str).filter(Boolean),   // available if the spec wants both; not shown by default
     latestRequirement,
+    hasActiveRequirement,
     proofs,
     googleBusiness,
     plan: null,   // §2 — no plan_type / activated_on field anywhere in the pipeline → card omits the TrustSEAL Plan tile entirely (never fabricated)

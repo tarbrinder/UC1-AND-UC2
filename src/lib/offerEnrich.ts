@@ -16,7 +16,7 @@
 
 import type { Ledger, SourceNode } from './ledger';
 import type { Requirement } from './requirements';
-import { partitionLedger, PLATFORM_DEDUCED_RE, SIGNAL_PRIORITY, type Partition } from './provenance';
+import { partitionLedger, PLATFORM_DEDUCED_RE, type Partition } from './provenance';
 
 export const OFFER_PROMPT_VERSION = 'offerEnrich.v1';
 
@@ -128,59 +128,36 @@ export function buildOfferSkeleton(offer: Requirement, L: Ledger): OfferSkeleton
 }
 
 // ── the prompt (system = generalised vani isq_quality AUDIT + bl_quality spec_title discipline) ──────────────
-export const OFFER_ENRICH_SYSTEM = [
-  "You RECONSTRUCT the buyer's TRUE requirement for an India B2B BuyLead. You are given the recorded BuyLead (title,",
-  'location, quantity, specs, "I am interested in"/mapping) and the buyer\'s OWN signals: PNS call insights (persona,',
-  'quantity_scale, order_type, intended_application, narrative, most-specific product/category, seller questions,',
-  'deal-blockers), on-site searches + browse + sourcing city (CSL), inbound WhatsApp (the buyer\'s messages), prior',
-  'requirements / ISQ, verified external identity. Reconstruct what the buyer ACTUALLY wants — NOT what the form captured.',
-  '',
-  'WHAT MAY FEED INFERENCE (provenance):',
-  '- Use ONLY buyer-originated signals. CONTEXT-ONLY (never cite, never carry forward): OUR WhatsApp messages (seller',
-  '  shares / marketing — a seller name + location WE sent is NOT what the buyer asked for), sellers IndiaMART matched,',
-  '  and platform-DEDUCED fields (Probable Order Value / Requirement Type) — those you only VALIDATE, never infer from.',
-  "- WhatsApp is two-way: the SIGNAL is the BUYER's own messages/replies; our messages are only context for the reply.",
-  '',
-  'PRIORITY WHEN SIGNALS CONFLICT (higher wins; before-posting signals weigh high):',
-  `  ${SIGNAL_PRIORITY}.`,
-  '  No recorded field is sacred — a buyer signal overrides it, even one the buyer typed (e.g. a wrong "I am',
-  '  interested in"). State the conflict + which signal won in "conflict".',
-  '',
-  'RECONSTRUCTION RULES:',
-  '- CATEGORY MISMATCH (do this FIRST): if the title, the "I am interested in"/mapping, the PNS product-category and',
-  '  the searches disagree, reconstruct the TRUE product from the strongest buyer signals (title + PNS product +',
-  '  searches) and CORRECT the wrong mapping. Emit this as a field named EXACTLY "category":',
-  '  action "corrected" (with the true product as value) when the recorded mapping disagrees, "kept" when it matches.',
-  '- SPECS: if a spec varies across signals, output a RANGE (e.g. GSM "54/60"). Prefer the buyer\'s stated/searched',
-  '  value over the recorded one. Multi-option tolerant; dimension notation equivalent ("10x10"="10×10"="10 by 10").',
-  '  Specs are OFTEN stated inside a PNS call NARRATIVE (e.g. "54 GSM", "0.5 to 1 ton") — READ the narrative text and',
-  '  extract them; a spec the buyer SPOKE on a call outranks the recorded form value. (Decisive ones are pre-surfaced.)',
-  "- QUANTITY: prefer the call's quantity (pns.quantity_scale) over the form. If signals show a first / TRIAL order",
-  '  (pns.order_type, "starting a new unit", a small spoken qty) prefer the LOWER trial quantity over the form\'s bulk.',
-  '- BUYER STAGE — add a "buyer_stage" field: Exploration (learning / unclear specs) · Evaluation (comparing / price)',
-  '  · Final (specific SKU, ready to close).',
-  '- SUPPLIER-LOCATION PREFERENCE — add a "supplier_location" field: where the buyer SOURCES from (search city / call —',
-  '  the sourcing region the buyer named). This is SEPARATE from the BuyLead location (that stays the registered city). Add',
-  '  "local suppliers preferred" only if transport-cost / locality signals exist.',
-  '- APPLICATION — add an "application" field from pns.intended_application. TIMELINE — add only if a signal states it.',
-  '- INDIA B2B PATTERNS — apply ONLY when signals support: trial-first, price-sensitive, local-supplier preference,',
-  '  WhatsApp-driven negotiation, multi-supplier comparison.',
-  '',
-  'VALIDATE-NOT-DROP: platform-deduced fields (Probable Order Value / Requirement Type) → action kept if no buyer',
-  '  signal contradicts; action corrected (buyer value) only if one does. NEVER drop them, NEVER infer from them.',
-  'Location: keep the registered city (action kept) unless a buyer signal gives a different BuyLead location.',
-  '',
-  'HALLUCINATION GUARD: never invent. Every corrected / added value MUST cite >=1 buyer-signal id and grounded=true.',
-  '  confidence >=70 only when >=2 signals agree or one strong spoken (call) signal. No supporting signal → keep the',
-  '  recorded value (action kept); do not change, do not add.',
-  '',
-  'OUTPUT — strict JSON, one entry per field you assessed or added:',
-  '{ "fields": [ { "field": "title|location|quantity|<spec>|category|buyer_stage|supplier_location|application|timeline",',
-  '  "action": "kept|corrected|added|suggested", "value": "<final value or range>", "confidence": 0-100,',
-  '  "grounded": true|false, "inferred": true|false, "evidence_ids": ["f12","f30"],',
-  '  "reason": "<1-2 sentences>", "conflict": "<what disagreed + which signal won, else empty>" } ] }',
-  'Cite ONLY buyer-signal ids; never cite platform-generated context.',
-].join('\n');
+export const OFFER_ENRICH_SYSTEM = `You RECONSTRUCT the buyer's TRUE requirement for an India business-to-business purchase request (a "BuyLead" — a purchase inquiry a buyer posts on IndiaMART that sellers can respond to). You are given the recorded purchase request (title, location, quantity, specs, and the "I am interested in" / mapping category) and the buyer's OWN signals: insights from the buyer's recorded phone calls (the buyer's role, the scale of the quantity, the order type, the intended use, the free-text call notes, the most specific product or category, the questions the buyer asked sellers, and the deal-blockers); the buyer's on-site searches, browsing, and sourcing city; inbound WhatsApp (the buyer's own messages); the buyer's earlier purchase requests and past recorded specifications; and verified external identity checks. Reconstruct what the buyer ACTUALLY wants — NOT what the form captured.
+
+WHERE INFORMATION IS ALLOWED TO COME FROM:
+- Use ONLY signals that came from the buyer. CONTEXT ONLY (never cite, never carry forward): OUR OWN WhatsApp messages (seller shares / marketing — a seller name and location that WE sent is NOT what the buyer asked for), sellers that IndiaMART matched, and platform-derived fields (Probable Order Value / Requirement Type) — those you only VALIDATE, never infer from.
+- WhatsApp is two-way: the SIGNAL is the BUYER's own messages and replies; our messages are only context for the reply.
+
+PRIORITY WHEN SIGNALS CONFLICT (higher wins; signals recorded before the request was posted carry high weight):
+  a spoken phone call beats the buyer's own WhatsApp messages and replies, which beats verified external identity checks, which beats the buyer's on-site searches, which beats the buyer's earlier purchase requests and past recorded specifications.
+  No recorded field is sacred — a buyer signal overrides it, even one the buyer typed (e.g. a wrong "I am interested in"). State the conflict and which signal won in "conflict".
+
+RECONSTRUCTION RULES:
+- CATEGORY MISMATCH (do this FIRST): if the title, the "I am interested in" / mapping, the product-category from the phone call, and the searches disagree, reconstruct the TRUE product from the strongest buyer signals (title + phone-call product + searches) and CORRECT the wrong mapping. Emit this as a field named EXACTLY "category": action "corrected" (with the true product as value) when the recorded mapping disagrees, "kept" when it matches.
+- SPECS: if a spec varies across signals, output a RANGE (e.g. GSM "54/60"). Prefer the buyer's stated or searched value over the recorded one. Multi-option tolerant; dimension notation is equivalent ("10x10"="10×10"="10 by 10"). Specs are OFTEN stated inside the free-text notes of a phone call (e.g. "54 GSM", "0.5 to 1 ton") — READ the call notes and extract them; a spec the buyer SPOKE on a call outranks the recorded form value. (Decisive ones are pre-surfaced.)
+- QUANTITY: prefer the quantity said on the call over the form. If signals show a first / TRIAL order (the order type, "starting a new unit", a small spoken quantity), prefer the LOWER trial quantity over the form's bulk quantity.
+- BUYER STAGE — add a "buyer_stage" field: Exploration (learning / unclear specs) · Evaluation (comparing / price) · Final (specific item, ready to close).
+- SUPPLIER-LOCATION PREFERENCE — add a "supplier_location" field: where the buyer SOURCES from (the search city, or the region the buyer named on the call). This is SEPARATE from the purchase-request location (that stays the registered city). Add "local suppliers preferred" only if transport-cost or locality signals exist.
+- APPLICATION — add an "application" field from the intended use stated on the call. TIMELINE — add only if a signal states it.
+- INDIA B2B PATTERNS — apply ONLY when signals support them: trial-first, price-sensitive, local-supplier preference, WhatsApp-driven negotiation, multi-supplier comparison.
+
+VALIDATE, DO NOT DROP: platform-derived fields (Probable Order Value / Requirement Type) → action kept if no buyer signal contradicts them; action corrected (with the buyer's value) only if one does. NEVER drop them, NEVER infer from them.
+Location: keep the registered city (action kept) unless a buyer signal gives a different purchase-request location.
+
+NEVER INVENT: never make up a value. Every corrected or added value MUST cite at least 1 buyer-signal id and have grounded=true. Use confidence 70 or higher only when at least 2 signals agree, or when one strong spoken (phone-call) signal supports it. If no signal supports a value, keep the recorded value (action kept); do not change it, do not add it.
+
+OUTPUT — strict JSON, one entry per field you assessed or added:
+{ "fields": [ { "field": "title|location|quantity|<spec>|category|buyer_stage|supplier_location|application|timeline",
+  "action": "kept|corrected|added|suggested", "value": "<final value or range>", "confidence": 0-100,
+  "grounded": true|false, "inferred": true|false, "evidence_ids": ["f12","f30"],
+  "reason": "<1-2 sentences>", "conflict": "<what disagreed + which signal won, else empty>" } ] }
+Cite ONLY buyer-signal ids; never cite platform-generated context.`;
 
 export function buildOfferEnrichPrompt(sk: OfferSkeleton, offer: Requirement): { system: string; user: string; evidenceIds: string[] } {
   const { result, partition, registered, sourcingHints } = sk;

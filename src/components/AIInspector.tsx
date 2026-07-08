@@ -81,6 +81,15 @@ export default function AIInspector({ payload, payloadB, summary, observatory, s
             <span className="text-[10px] text-gray-400">{live ? 'hover · click to pin · click 2nd to compare' : 'hover an element →'}</span>
           )}
         </div>
+        {/* Amit (demo): "what does this buyer do" — front & centre on UC2 too. Reads the live buyer twin; guarded. */}
+        {(() => {
+          const t = (window as unknown as { __buyerTwin?: { persona?: { type?: string; domains?: string[] }; business_type?: string } }).__buyerTwin;
+          const role = t?.persona?.type || t?.business_type || '';
+          const doms = (t?.persona?.domains || []).slice(0, 3).join(', ');
+          const what = [role, doms].filter(Boolean).join(' · ');
+          if (!what) return null;
+          return <div className="rounded-md bg-indigo-50 border border-indigo-100 px-2.5 py-1.5"><span className="text-[10px] font-bold uppercase tracking-wide text-indigo-500">What this buyer does</span><div className="text-[12.5px] font-semibold text-indigo-900 leading-snug">{what}</div></div>;
+        })()}
         <div className="relative">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder='Trace search — "site ready", "power", "credit"' className="w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-[12px] outline-none focus:ring-2 focus:ring-teal-200 focus:border-teal-300" />
           {query.length >= 2 && <button onClick={() => setQ('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs">✕ clear</button>}

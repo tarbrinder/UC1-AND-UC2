@@ -102,7 +102,14 @@ export function requirementsFromMerged(rich: unknown): Requirement[] {
     }
     // freshest first (active before expired, then by recency) so hot leads lead the picker
     out.sort((a, b) => (Number(a.isExpired) - Number(b.isExpired)) || ((a.recencyDays ?? 1e9) - (b.recencyDays ?? 1e9)));
-    return out;
+    // Amit (demo): "two leads at the same time = the same lead" — collapse exact duplicates so the BuyLeads count + list
+    // aren't inflated. Dedupe by offer_id (a true unique BuyLead id); else by same posted-timestamp + same title.
+    const seenReq = new Set<string>();
+    const deduped = out.filter((r) => {
+      const key = r.offerId ? `oid:${r.offerId}` : `pt:${str(r.posted)}|${str(r.title).toLowerCase().replace(/\s+/g, ' ').trim()}`;
+      if (seenReq.has(key)) return false; seenReq.add(key); return true;
+    });
+    return deduped;
   }
   // FALLBACK · v9.5 items + answered_specs
   const items = arr(sum.items); const pool = arr(sum.answered_specs);

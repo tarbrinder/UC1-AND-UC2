@@ -7,6 +7,7 @@
 import { parseBuyerProfile, type Field } from './buyerProfileModel';
 import { getLLMRaw } from './gemini';
 import { getServerTrace } from './enrichment';
+import type { OfflineSnapshot } from './offlineSnapshot';
 
 const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 const fv = (f: Field): string => (f && f.present && f.value != null ? esc(f.value) : '<i class="na">Not available</i>');
@@ -142,7 +143,7 @@ function triggerDownload(html: string, name: string): void {
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
-export async function downloadInteractiveHtml(snapshot: { glid?: string; stampIso?: string }, opts?: { fallbackRich?: unknown }): Promise<void> {
+export async function downloadInteractiveHtml(snapshot: OfflineSnapshot, opts?: { fallbackRich?: unknown }): Promise<void> {
   const glid = snapshot.glid || 'snapshot';
   const stampIso = snapshot.stampIso || new Date().toISOString();
   const day = stampIso.slice(0, 10);

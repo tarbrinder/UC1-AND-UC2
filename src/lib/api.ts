@@ -17,6 +17,11 @@ export const api = (path: string): string => `${API_BASE}${path}`;
 // 2026-06-25). EVERY n8n reference (buyer pull · requirement_brain · category modes) hits
 // this one path; change it in this one place to re-point them all.
 export const N8N_HOOK = 'bi-user-insights-v10x';
+// Dedicated hook for the STANDALONE buyer-unified endpoint (pure-backend replica —
+// one server LLM fills UC1 + the card; fast/full modes). Consumed by
+// enrichment.ts fetchBuyerUnified. Kept separate from N8N_HOOK so the dashboard
+// (frontend-LLM) and the standalone (backend-LLM) never collide on one path.
+export const BUYER_UNIFIED_HOOK = 'bi-buyer-unified';
 
 export class ApiError extends Error {
   status: number;

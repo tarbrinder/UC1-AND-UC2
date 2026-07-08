@@ -4320,20 +4320,6 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     const cur = w.__conciergeStat || { yes: 0, total: 0 };
     w.__conciergeStat = { yes: cur.yes + (accepted ? 1 : 0), total: cur.total + 1 };
   };
-  const onConciergeYes = () => {
-    setConciergeState('accepted');
-    bumpConciergeStat(true);
-    // Fix #1: the buyer just CONFIRMED the Twin's business type — set it + record it, so the
-    // wizard's "Which best describes you?" role card is SKIPPED (no double-ask of what they
-    // just confirmed). Recorded as a User-authority fact (they accepted it).
-    const bt = liveTwin()?.layer_a_identity?.business_type;
-    if (bt && !form.buyerType) {
-      setField('buyerType', bt);
-      setBuyerTypeDeducedFrom('concierge (Twin-confirmed)');
-      coverage.current.record('Buyer type', bt, 'User', 100);
-    }
-    track('rfq_concierge_confirm', { accepted: true, glid: enrichment?.glid || glidInput });
-  };
   const onConciergeChanged = () => {
     setConciergeState('changed');
     twinMuted.current = true; // mute the Twin for THIS session → discovery
@@ -4345,37 +4331,7 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
     dynGenSig.current = '';
     ensureReqPlan(isqSpecs);
   };
-  const renderConciergeConfirm = () => {
-    const t = liveTwin();
-    const traits = t ? conciergeTraits(t) : [];
-    if (!traits.length) return null;
-    return (
-      <div className="rounded-2xl border border-teal-200 bg-gradient-to-br from-teal-50 to-emerald-50 p-4 space-y-3 animate-field-in">
-        <div className="flex items-center gap-2">
-          <span className="text-lg" aria-hidden>👋</span>
-          <p className="text-sm font-semibold text-gray-800">Welcome back — we remember you</p>
-        </div>
-        <p className="text-xs text-gray-600">We found these likely details from your previous requirements:</p>
-        <ul className="space-y-1.5">
-          {traits.map((tr) => (
-            <li key={tr} className="flex items-center gap-2 text-sm text-gray-800">
-              <CheckCircle2 size={15} className="text-teal-600 shrink-0" /> {tr}
-            </li>
-          ))}
-        </ul>
-        <p className="text-xs text-gray-600">Are these still correct for this requirement?</p>
-        <div className="flex gap-2 pt-1">
-          <button onClick={onConciergeYes} className="flex-1 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-xl py-2.5 transition-colors">
-            Yes, continue
-          </button>
-          <button onClick={onConciergeChanged} className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-semibold rounded-xl py-2.5 transition-colors">
-            Something changed
-          </button>
-        </div>
-        {debug && <p className="text-[10px] text-teal-500">P5c concierge · twinMode=fast_track · {traits.length} traits bundled</p>}
-      </div>
-    );
-  };
+  // (concierge-confirm block removed — it was orphaned/unrendered dead code flagged by tsc noUnusedLocals)
 
   // ── Debug: internal pull broken down by n8n source (PNS/CSL/WA in+out/BL/ISQ/profile) ──
   // ── P0: Pipeline Health — "did the data even arrive, and where did it break?" ──

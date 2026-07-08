@@ -23,6 +23,7 @@ import type { Persona } from './personaRegistry';
 import { assembleBundle, type SynthBundle } from './profileSynth';
 import type { SynthLLMOut } from './gemini';
 import { SIGNAL_PRIORITY } from './provenance';
+import type { ConfidenceBreakdown, SourceIgnored, EvidenceRoleTag, AgreementInfo } from './sourcePolicies';
 
 // one unified arithmetic attribute (4 legacy decisions ∪ all persona candidates, deduped by key)
 export interface MergedAttr {
@@ -44,7 +45,19 @@ export interface FinalAttr {
   arithmetic?: { value: string; confidence: number; explanation: string; decisionId?: string };
   // the LLM is the decider; EACH attribute carries its own reasoning — every step a claim + the evidence id(s)
   // it cites (a raw line, or it may reference the arithmetic in the claim text). The UI resolves ids → raw text.
-  llm?: { value: string; confidence: number; reasoning: Array<{ claim: string; evidence: string[]; rejected?: string }>; grounded: boolean; confidenceReason?: string; to100?: string };
+  llm?: {
+    value: string; confidence: number; reasoning: Array<{ claim: string; evidence: string[]; rejected?: string }>; grounded: boolean; confidenceReason?: string; to100?: string;
+    // FROZEN 2026-07-08 — the policy/role/structured-confidence layer (all optional; only the extract path sets them).
+    confidenceBreakdown?: ConfidenceBreakdown;   // {source_quality, agreement, freshness, conflict_penalty, final}
+    policy?: string;                             // the Source Policy the LLM applied (IDENTITY/PROCUREMENT/…)
+    sources?: string[];                          // the LLM's cited sources (= used) → deriveConsumption expands to available/ignored/roles
+    sourcesAvailable?: string[];
+    sourcesUsed?: string[];
+    sourcesIgnored?: SourceIgnored[];
+    evidenceRoles?: EvidenceRoleTag[];
+    agreement?: AgreementInfo;
+    contradictions?: string[];
+  };
   pruned?: boolean;            // set by the critic/prune pass — the LLM judged it not worth surfacing (→ held)
   state?: 'Confirmed' | 'Likely' | 'Conflicted' | 'Unknown'; // set ONLY by the LLM extract path (buyerProfileExtract); old merged path leaves it undefined
 }

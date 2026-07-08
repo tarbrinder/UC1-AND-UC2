@@ -9,7 +9,7 @@
 
 import { buildPrunePrompt, applyPrune, synthEval, type FinalAttr, type SynthEval } from './synthesisEngine';
 import { pruneTwinLLM, extractBuyerProfileLLM, hasGeminiKey } from './gemini';
-import { bundleFromResponse, buildExtractPrompt, extractedToFinals, type RichResponse } from './buyerProfileExtract';
+import { bundleFromResponse, buildExtractPrompt, extractedToFinals, buyerBlockToExtractOut, type RichResponse } from './buyerProfileExtract';
 
 // rich bi-user-insights shape detector (inlined to avoid a static import cycle with enrichment.ts)
 const isRichShape = (raw: unknown): boolean => !!raw && typeof raw === 'object' && !Array.isArray(raw) && 'sources' in (raw as Record<string, unknown>) && typeof (raw as { sources?: unknown }).sources === 'object';
@@ -40,6 +40,10 @@ function hasWebContent(raw: unknown): boolean {
   const sum = (wo.summary && typeof wo.summary === 'object') ? wo.summary as Record<string, unknown> : {};
   const basis = Array.isArray(wo.basis) ? wo.basis : (Array.isArray(wo.proofs) ? wo.proofs : []);
   const sumKeys = Object.keys(sum).filter((k) => { const v = sum[k]; return v != null && v !== '' && !(Array.isArray(v) && v.length === 0); });
+  // P1: a namesake / unconfirmed web result is NOT "built with web" — otherwise the fast-tier Gemini stub sets builtWithWeb
+  // and the later full-tier Parallel result is treated as a no-op rebuild. Only VERIFIED web (match_confidence not none/low) counts.
+  const mc = String((sum.match_confidence ?? wo.match_confidence ?? '')).toLowerCase();
+  if (mc === 'none' || mc === 'low') return false;
   return sumKeys.length > 0 || basis.length > 0;
 }
 export function getMergedTwin(glid: string): MergedTwinEntry | undefined { return cache.get(String(glid || '')); }
@@ -94,8 +98,10 @@ export function ensureMergedTwin(glid: string, raw: unknown): void {
   const webNow = hasWebContent(raw);
   const existing = cache.get(key);
   if (existing && existing.status !== 'error') {
-    const canUpgrade = webNow && existing.status === 'done' && !builtWithWeb.has(key) && !upgradedOnce.has(key);
-    if (!canUpgrade) return; // already done/loading with equal-or-better web coverage — true no-op
+    // 2026-07-08: also upgrade when the fast extract is still LOADING (not only 'done') so a web-bearing full pull
+    // that lands mid-flight is NOT dropped — the runToken bump below supersedes the in-flight fast run safely.
+    const canUpgrade = webNow && (existing.status === 'done' || existing.status === 'loading') && !builtWithWeb.has(key) && !upgradedOnce.has(key);
+    if (!canUpgrade) return; // already built-with-web (or a non-web pull over an existing twin) — true no-op
     upgradedOnce.add(key);   // rebuild ONCE (never loop)
   }
   const isUpgrade = !!(existing && existing.status === 'done');
@@ -111,4 +117,19 @@ export function ensureMergedTwin(glid: string, raw: unknown): void {
   if (!hasGeminiKey()) { put(empty(key, 'no-key')); return; }      // no LLM → honest no-key (no arithmetic)
   if (!isRichShape(raw)) { put(empty(key, 'error')); return; }     // legacy non-rich shape → no extract possible (no arithmetic)
   runExtractPath(key, raw, put);                                   // the ONE path
+}
+
+// bi-buyer-unified — seed the twin cache DIRECTLY from the endpoint's buyer{} object (no local LLM call). The unified
+// endpoint runs at FULL tier (Parallel web + Udyam already in), so mark builtWithWeb to block the upgrade-on-web rebuild.
+// Empty buyer → early return so the ensureMergedTwin fallback (local extract-v30) stands untouched.
+export function seedMergedTwin(glid: string, buyerBlock: unknown): void {
+  const key = String(glid || '').trim();
+  const b = (buyerBlock && typeof buyerBlock === 'object') ? buyerBlock as Record<string, unknown> : null;
+  if (!key || !b || !Object.keys(b).length) return;
+  const finals = extractedToFinals(buyerBlockToExtractOut(b), new Set<string>());   // empty evidenceIds → grounded uses the server self-report
+  if (!finals.length) return;
+  const token = (runToken.get(key) || 0) + 1; runToken.set(key, token);             // supersede any in-flight local extract
+  cache.set(key, { glid: key, status: 'done', finals, evalSummary: synthEval(finals), ms: 0, ts: Date.now() });
+  builtWithWeb.add(key);
+  try { (window as unknown as { __mergedTwin?: MergedTwinEntry }).__mergedTwin = cache.get(key); } catch { /* noop */ }
 }

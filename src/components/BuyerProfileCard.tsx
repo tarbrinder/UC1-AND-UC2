@@ -21,8 +21,12 @@ function Marker({ f }: { f: Field }) {
 
 // value or the explicit muted empty-state — NEVER a fake-looking placeholder
 function Val({ f, link }: { f: Field; link?: boolean }) {
-  if (!f.present || f.value == null) return <span className="text-gray-300 italic">Not available</span>;
-  const body = link
+  // Amit (demo): never a silent blank — every "Not available" carries WHY (hover), so nothing looks unexplained.
+  if (!f.present || f.value == null) return <span title={f.source && f.source !== '—' ? `Not available — could not enrich: ${f.source}` : 'Not available — no source for this field in the pipeline yet'} className="text-gray-300 italic cursor-help decoration-dotted underline-offset-2 underline">Not available</span>;
+  // link-ify only a real URL/domain — a presence-only value like "Present" (Sign3 social) must render as plain text,
+  // never href="https://Present".
+  const looksUrl = link && /^https?:\/\/|^[\w-]+(\.[\w-]+)+/.test(f.value);
+  const body = looksUrl
     ? <a href={/^https?:\/\//.test(f.value) ? f.value : `https://${f.value}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">{f.value}</a>
     : <span className="text-gray-800">{f.value}</span>;
   return <span className="break-words">{body}<Marker f={f} /></span>;
@@ -171,7 +175,7 @@ function ProofsSection({ proofs }: { proofs: BuyerProfileModel['proofs'] }) {
 }
 
 // ── main card ────────────────────────────────────────────────────────────────────────────────────────────────
-export default function BuyerProfileCard({ rich, glid, pending }: { rich: unknown; glid: string; pending?: boolean }) {
+export default function BuyerProfileCard({ rich, glid, pending, persona }: { rich: unknown; glid: string; pending?: boolean; persona?: string }) {
   const m: BuyerProfileModel = useMemo(() => parseBuyerProfile(rich), [rich]);
   if (!m.available) {
     return <div className="rounded-xl border border-gray-200 bg-white p-6 text-center text-[12px] text-gray-400">TrustSEAL Buyer Profile — pull a GLID to populate.</div>;
@@ -206,13 +210,26 @@ export default function BuyerProfileCard({ rich, glid, pending }: { rich: unknow
 
       {/* business name row */}
       <div className="px-4 pt-2 pb-2 border-b border-gray-100">
-        <h2 className="text-2xl font-bold text-gray-900 leading-tight">{m.header.company.present ? m.header.company.value : <span className="text-gray-300 italic text-xl">Company not available</span>}<Marker f={m.header.company} /></h2>
+        <div className="flex items-center flex-wrap gap-2">
+          <h2 className="text-2xl font-bold text-gray-900 leading-tight">{m.header.company.present ? m.header.company.value : <span className="text-gray-300 italic text-xl">Company not available</span>}<Marker f={m.header.company} /></h2>
+          {m.verifiedBuyer && m.verifiedBuyer.tier !== 'unverified' && (
+            <span
+              title={`IndiaMART verified-business-buyer flag = ${m.verifiedBuyer.flag} (6–9 = TrustSEAL buyer · 4/5 = GST-verified)`}
+              className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full border ${m.verifiedBuyer.tier === 'trustseal' ? 'bg-amber-50 text-amber-700 border-amber-300' : m.verifiedBuyer.tier === 'gst_verified' ? 'bg-emerald-50 text-emerald-700 border-emerald-300' : 'bg-gray-100 text-gray-600 border-gray-300'}`}>
+              {m.verifiedBuyer.tier === 'trustseal' ? '🛡 TrustSEAL Buyer' : m.verifiedBuyer.tier === 'gst_verified' ? '✓ GST-Verified Business' : m.verifiedBuyer.label}
+            </span>
+          )}
+        </div>
+        {/* Amit (demo): "kis cheez ka dhandha hai" — the ONE plain-language line, front & centre. Prefer the extract-LLM
+            business_persona (richest phrasing) when the debug view passes it; else the deterministic headline. */}
+        {((persona && persona.trim()) || m.headline) && <p className="mt-1 text-[15px] font-semibold text-indigo-900 leading-snug">{(persona && persona.trim()) || m.headline}</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[12px] text-gray-600">
           <span className="inline-flex items-center gap-1"><Icon Ic={User} />{m.header.contactName.present ? m.header.contactName.value : <span className="text-gray-300 italic">—</span>}</span>
           <span className="text-gray-300">|</span>
           <span className="inline-flex items-center gap-1"><Icon Ic={Calendar} />Member Since: <b className="text-gray-700">{tenure != null ? `${tenure} Year${tenure === 1 ? '' : 's'}` : (m.header.memberSince.present ? m.header.memberSince.value : '—')}</b></span>
           <span className="text-gray-300">|</span>
           <span className="inline-flex items-center gap-1">GLID: <span className="text-blue-600 font-semibold">{glid || m.glid}</span></span>
+          {m.header.registeredLocation.present && <><span className="text-gray-300">|</span><span className="inline-flex items-center gap-1" title="Registered operating location (glusr) — the buyer's original city; sourcing cities are listed separately on the requirement"><Icon Ic={MapPin} />{m.header.registeredLocation.value}</span></>}
         </div>
       </div>
 
@@ -290,7 +307,7 @@ export default function BuyerProfileCard({ rich, glid, pending }: { rich: unknow
           <SocialKV Brand={LinkedinI} label="LinkedIn" f={m.social.linkedin} />
           <SocialKV Brand={TwitterI} label="Twitter / X" f={m.social.twitter} />
           {m.googleBusiness?.exists && m.googleBusiness.rating && (
-            <KV Ic={Star} label="Google Business" f={{ value: m.googleBusiness.rating, present: true, provenance: 'inferred', source: 'web_osint', inferred: true }} />
+            <KV Ic={Star} label={m.googleBusiness.kind === 'maps_contributor' ? 'Google Maps profile' : 'Google Business'} f={{ value: m.googleBusiness.rating, present: true, provenance: 'inferred', source: m.googleBusiness.kind === 'maps_contributor' ? 'Sign3 · Google-Maps contributor profile' : 'web_osint', inferred: true, note: m.googleBusiness.kind === 'maps_contributor' ? 'personal Google-Maps contributor profile (phone-linked) — its pin may sit in a different city than the registered address; not the firm\'s verified Google Business listing' : undefined }} />
           )}
 
           <SectionTitle>Products of Interest</SectionTitle>
@@ -304,14 +321,16 @@ export default function BuyerProfileCard({ rich, glid, pending }: { rich: unknow
           {/* Latest requirement — BuyLead-page fields (order value / type / specs), consistent with the BuyLead view (#4) */}
           {lr && (
             <>
-              <SectionTitle>Latest Requirement</SectionTitle>
+              {/* N1 — a fully-expired buyer must NOT read as having a live lead: reframe the title + show an Expired pill + a browse-only note */}
+              <SectionTitle>{lr.isExpired ? 'Last Requirement (expired)' : 'Latest Requirement'}</SectionTitle>
               <div className="rounded-lg border border-gray-100 bg-gray-50/50 p-2 text-[11px] text-gray-700 space-y-0.5">
-                <div className="font-semibold text-gray-800 break-words flex items-start gap-1"><ShoppingBag className="w-3.5 h-3.5 shrink-0 text-gray-400 mt-px" />{lr.title || '—'}</div>
+                <div className="font-semibold text-gray-800 break-words flex items-start gap-1"><ShoppingBag className="w-3.5 h-3.5 shrink-0 text-gray-400 mt-px" /><span className="flex-1">{lr.title || '—'}</span>{lr.isExpired && <span className="shrink-0 rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide bg-red-50 text-red-600 border border-red-100" title={`This BuyLead is expired${lr.expiry ? ` (expiry ${lr.expiry})` : ''} — it is not a live requirement`}>Expired{lr.expiry ? ` · ${lr.expiry}` : ''}</span>}</div>
                 {lr.category.present && <div className="text-gray-500 ml-5">Category: {lr.category.value}</div>}
                 <div className="flex items-center gap-1"><span className="text-gray-500">Order value:</span> <Val f={lr.orderValue} /></div>
                 <div className="flex items-center gap-1"><span className="text-gray-500">Requirement type:</span> <Val f={lr.requirementType} /></div>
                 {lr.specs.length > 0 && <div className="text-gray-500">Specs: <span className="text-gray-700">{lr.specs.map((s) => `${s.k}: ${s.v}`).join(' · ')}</span></div>}
                 {lr.posted && <div className="text-[9px] text-gray-400">Posted {lr.posted}</div>}
+                {lr.isExpired && !m.hasActiveRequirement && <div className="text-[9px] text-amber-600 mt-0.5">No live BuyLead — the buyer is currently browsing, with no open requirement.</div>}
               </div>
             </>
           )}

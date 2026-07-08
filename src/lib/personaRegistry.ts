@@ -113,7 +113,7 @@ const CANDIDATES: Cand[] = [
 const ATTR_LABEL: Record<string, string> = {
   business_persona: 'Buyer Persona', buyer_maturity: 'Buyer Maturity', delivery_timeline: 'Delivery Timeline',
   payment_mode: 'Payment Mode', purchase_frequency: 'Purchase frequency', location_sourcing_preference: 'Location & Sourcing',
-  digital_footprint: 'Digital footprint', identity_confidence: 'Identity Confidence', products_of_interest: 'Products of Interest',
+  digital_footprint: 'Digital Presence', identity_confidence: 'Identity Confidence', products_of_interest: 'Products of Interest',
   retail_wholesale: 'Retail / Wholesale', b2b_b2c: 'B2B / B2C',
 };
 export function attrMeta(key: string): { label: string; group: string } {

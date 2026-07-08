@@ -9,7 +9,7 @@
 // PROD: move behind a server proxy that strips contact + auths the GLID from the
 // session (the prior PII-safe contract is preserved in git history).
 
-import { api, N8N_HOOK } from './api';
+import { api, N8N_HOOK, BUYER_UNIFIED_HOOK } from './api';
 
 // Debug-only stand-in mobile (key: glusr_usr_ph_mobile) so the mobile→external
 // chain (Befisc identity / GST→HSN) can be EXERCISED on a SPECIFIC test GLID whose
@@ -615,6 +615,8 @@ export function getEnrichmentRaw(): unknown { return lastRaw; }
 // extract path, which reads the per-source summaries. null when on the legacy -advanced endpoint.
 let lastRich: unknown = null;
 export function getEnrichmentRich(): unknown { return lastRich; }
+let lastUnified: unknown = null;                                    // bi-buyer-unified response (last pull) — the buyer{} superset source of truth
+export function getBuyerUnified(): unknown { return lastUnified; }
 
 // ── bi-user-insights adapter (dual-mode) ──────────────────────────────────────────────────────────────────
 // The new flow returns { glid, derived_anchors, sources:{ key:{summary,raw} } }. The legacy regex path (getTop)
@@ -686,16 +688,32 @@ export function getEnrichmentHealth(): HealthNode[] { return lastHealth; }
 
 // OFFLINE HYDRATION (P4) — seed the module state from a captured snapshot so the dashboard renders WITHOUT a network
 // pull (the downloaded self-contained HTML). No fetch, no LLM; consumers read these getters exactly as on a live pull.
-export function seedEnrichment(snap: { rich?: unknown; raw?: unknown; serverTrace?: ServerTrace | null; health?: HealthNode[] }): void {
+export function seedEnrichment(snap: { rich?: unknown; raw?: unknown; serverTrace?: ServerTrace | null; health?: HealthNode[]; unified?: unknown }): void {
   if (snap.rich !== undefined) lastRich = snap.rich;
+  if (snap.unified !== undefined) lastUnified = snap.unified;
   if (snap.raw !== undefined) lastRaw = snap.raw;
   if (snap.serverTrace !== undefined) lastServerTrace = snap.serverTrace ?? null;
   if (Array.isArray(snap.health)) lastHealth = snap.health;
 }
 export function extractHealth(raw: unknown): HealthNode[] {
   const h = raw && typeof raw === 'object' ? (raw as { __health?: unknown }).__health : undefined;
-  if (!Array.isArray(h)) return [];
-  return h.map((n) => { const o = (n && typeof n === 'object') ? (n as Record<string, unknown>) : {}; return { node: String(o.node || ''), ok: o.ok !== false, source: o.source != null ? String(o.source) : undefined, latency_ms: typeof o.latency_ms === 'number' ? o.latency_ms : undefined, output_count: typeof o.output_count === 'number' ? o.output_count : (typeof o.count === 'number' ? o.count : undefined), keys: typeof o.keys === 'number' ? o.keys : undefined, status: o.status != null ? String(o.status) : undefined, version: o.version != null ? String(o.version) : undefined, fetched_at: o.fetched_at != null ? String(o.fetched_at) : undefined, error_msg: o.error_msg != null ? String(o.error_msg) : undefined, requested: typeof o.requested === 'number' ? o.requested : undefined }; });
+  const rows: HealthNode[] = Array.isArray(h) ? h.map((n) => { const o = (n && typeof n === 'object') ? (n as Record<string, unknown>) : {}; return { node: String(o.node || ''), ok: o.ok !== false, source: o.source != null ? String(o.source) : undefined, latency_ms: typeof o.latency_ms === 'number' ? o.latency_ms : undefined, output_count: typeof o.output_count === 'number' ? o.output_count : (typeof o.count === 'number' ? o.count : undefined), keys: typeof o.keys === 'number' ? o.keys : undefined, status: o.status != null ? String(o.status) : undefined, version: o.version != null ? String(o.version) : undefined, fetched_at: o.fetched_at != null ? String(o.fetched_at) : undefined, error_msg: o.error_msg != null ? String(o.error_msg) : undefined, requested: typeof o.requested === 'number' ? o.requested : undefined }; }) : [];
+  // web-OSINT runs TWO engines (Parallel + Gemini-grounded) whose health is nested at sources.web_osint.__health.{parallel,gemini}
+  // and is OMITTED from the top-level array — surface each as its own row so the Gemini engine's status is visible (it runs in
+  // BOTH fast + full; Parallel only on full). Without this the whole web layer shows no health, especially on a fast pull.
+  try {
+    const wo = (raw as { sources?: { web_osint?: { __health?: unknown } } } | null)?.sources?.web_osint?.__health;
+    if (wo && typeof wo === 'object') {
+      for (const eng of ['parallel', 'gemini'] as const) {
+        const e = (wo as Record<string, unknown>)[eng];
+        if (e && typeof e === 'object') {
+          const o = e as Record<string, unknown>;
+          rows.push({ node: `web_osint · ${eng}`, ok: o.ok !== false, status: o.status != null ? String(o.status) : undefined, version: o.version != null ? String(o.version) : undefined, output_count: typeof o.proofs_count === 'number' ? o.proofs_count : (typeof o.basis_count === 'number' ? o.basis_count : undefined), fetched_at: o.fetched_at != null ? String(o.fetched_at) : undefined });
+        }
+      }
+    }
+  } catch { /* noop */ }
+  return rows;
 }
 // (v11) pickRequirementBrain removed with the dual-fetch — requirement_brain now rides the single response's
 // top-level field, recovered in normalizeNewUserInsights (lines ~666-670). One webhook, one call.
@@ -751,6 +769,8 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean }): 
     lastServerTrace = extractServerTrace(legacy); // capture n8n E1 `_trace` if present (null otherwise)
     lastHealth = extractHealth(rich);              // L1 — per-node __health (BI path only; [] on -advanced)
     // EAGER synthesis — fired here so EVERY real pull (V3/V4/Observatory) builds the twin once, cached per GLID.
+    // Dashboard = purely FRONTEND LLM (owner): the eager extract twin is built client-side from the raw pull. The unified
+    // n8n LLM (bi-buyer-unified) is NOT used here — it powers ONLY the standalone (pure-backend replica).
     try { import('./mergedTwinStore').then((m) => m.ensureMergedTwin(glid.trim(), BI ? rich : legacy)).catch(() => undefined); } catch { /* noop */ }
     // deriveEnrichment is the legacy regex profile (built for the -advanced array shape). The BI-normalized
     // shape can differ per source (e.g. pns_data arrives as an object, not the array it iterates) → guard it so a
@@ -791,6 +811,32 @@ export async function fetchBuyerProfileLLM(glid: string): Promise<unknown> {
   })();
   profileInFlight.set(key, run);
   try { return await run; } finally { profileInFlight.delete(key); }
+}
+
+// ── bi-buyer-unified — ONE endpoint, ONE LLM → buyer{} superset (UC1 profile + dashboard card). UC2 stays a separate call.
+// Returns { glid, sources (DETERMINISTIC passthrough incl __health), derived_anchors, buyer:{ <attr>:{value,confidence,
+// reason,grounded,sources[]} } }. Deduped in-flight (the StrictMode/double-run fix), 660s backstop, array-unwrap — mirrors
+// fetchBuyerProfileLLM. Registry facts (GST/PAN/company/address/tenure/socials) are NEVER in buyer{} — they ride sources.*.
+type BuyerUnified = { glid?: string; sources?: Record<string, unknown>; derived_anchors?: Record<string, unknown>; buyer?: Record<string, { value: string; confidence: number; reason?: string; grounded?: boolean; sources?: string[] }>; __health?: unknown };
+const unifiedInFlight = new Map<string, Promise<BuyerUnified | null>>();
+export async function fetchBuyerUnified(glid: string, opts?: { fast?: boolean }): Promise<BuyerUnified | null> {
+  if (!glid?.trim()) return null;
+  const g = glid.trim();
+  const key = g + (opts?.fast ? ':fast' : '');   // fast tier gates Parallel web + Udyam OFF server-side; deduped separately from full
+  const hit = unifiedInFlight.get(key);
+  if (hit) return hit;
+  const run = (async (): Promise<BuyerUnified | null> => {
+    try {
+      const res = await fetch(api(`/api/imworkflow/webhook/${BUYER_UNIFIED_HOOK}?glid=${encodeURIComponent(g)}${opts?.fast ? '&fast=1' : ''}`), { signal: AbortSignal.timeout(660000) });
+      if (!res.ok) return null;
+      const resp = await res.json();
+      const u = Array.isArray(resp) ? (resp.find((x) => x && typeof x === 'object' && ('buyer' in x || 'sources' in x)) ?? resp[0] ?? resp) : resp;
+      if (u && typeof u === 'object') { lastUnified = u; return u as BuyerUnified; }
+      return null;
+    } catch { return null; }
+  })();
+  unifiedInFlight.set(key, run);
+  try { return await run; } finally { unifiedInFlight.delete(key); }
 }
 
 // ── CATEGORY BRAIN (mcat-keyed, cacheable, channel-agnostic) ──────────────────

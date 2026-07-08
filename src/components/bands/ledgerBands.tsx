@@ -359,14 +359,14 @@ function DrillRow({ label, value, drill }: { label: ReactNode; value: ReactNode;
   );
 }
 
-export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFrequency, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, locationCorrected, fields, offerEval, enrichControl, enrichInput, gstVerified, stillAsk, mode: modeProp, onMode, defaultOpen }: {
+export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFrequency, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, locationCorrected, fields, offerEval, enrichControl, enrichInput, gstVerified, stillAsk, needsInput, mode: modeProp, onMode, defaultOpen }: {
   picker?: ReactNode; selectedReq?: L6Requirement | null; uc2?: UC2Enrichment | null;
   productsOfInterest?: { value: string; changed: boolean; drill?: ReactNode } | null;
   reqFrequency?: { value: string; drill?: ReactNode } | null;
   requirementCount?: number; buyerDetails?: L6BuyerDetails | null; retailLead?: boolean;
   titleDrill?: ReactNode; locationDrill?: ReactNode; locationCorrected?: { from: string; to: string };
   fields: OfferFieldRow[]; offerEval?: { groundedPct: number; hallucinations: number; verdict: string } | null;
-  enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[]; advance?: { legalName?: string; tradeName?: string; constitution?: string; status?: string; taxpayerType?: string; registeredAddress?: string; registrationDate?: string; natureOfBusiness?: string[]; sac?: { code: string; desc: string }[]; signatories?: string[]; turnover?: string; email?: string; mobile?: string; centralJurisdiction?: string; stateJurisdiction?: string; filing?: { latest?: string; types: string[]; count: number } } | null } | null; stillAsk?: string[];
+  enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[]; advance?: { legalName?: string; tradeName?: string; constitution?: string; status?: string; taxpayerType?: string; registeredAddress?: string; registrationDate?: string; natureOfBusiness?: string[]; sac?: { code: string; desc: string }[]; signatories?: string[]; turnover?: string; email?: string; mobile?: string; centralJurisdiction?: string; stateJurisdiction?: string; filing?: { latest?: string; types: string[]; count: number } } | null } | null; stillAsk?: string[]; needsInput?: Array<{ key: string; label: string; reason: string; question: string }>;
   mode?: 'original' | 'profile' | 'requirement'; onMode?: (m: 'original' | 'profile' | 'requirement') => void; defaultOpen?: boolean;
   enrichInput?: unknown;
 }) {
@@ -545,13 +545,26 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
             {/* AI-EXTRACTED rows (Identity Confidence · profile findings · Needs-input) — hidden in Original (raw view); shown in Buyer Profile / Requirement */}
             {!isOriginal && buyerDetails.identityConfidence && <DrillRow label={<span className="text-violet-700">Identity Confidence</span>} value={buyerDetails.identityConfidence.value || '—'} drill={profileClickable ?buyerDetails.identityConfidence.drill : undefined} />}
             {!isOriginal && buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<span className={p.prov === 'det' ? 'text-teal-700' : 'text-violet-700'}>{p.label}</span>} value={p.value || '—'} drill={profileClickable ?p.drill : undefined} />))}
-            {!isOriginal && stillAsk && stillAsk.length > 0 && (
+            {!isOriginal && needsInput && needsInput.length > 0 ? (
+              <div className="mt-3 rounded-md bg-amber-50/70 border border-amber-200 px-2.5 py-1.5">
+                <div className="text-[11px] font-semibold text-amber-800">Needs input — ask the buyer (+{needsInput.length})</div>
+                <div className="mt-1 space-y-1">
+                  {needsInput.map((n, i) => (
+                    <div key={i} className="text-[10.5px] leading-snug" title={n.reason || undefined}>
+                      <span className="font-medium text-amber-800">{n.label}</span>
+                      <span className="text-amber-700"> — “{n.question}”</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="text-[9px] text-amber-600/80 mt-0.5">the AI could not ground these from the evidence — ask the buyer</div>
+              </div>
+            ) : (!isOriginal && stillAsk && stillAsk.length > 0 && (
               <div className="mt-3 rounded-md bg-amber-50/70 border border-amber-200 px-2.5 py-1.5">
                 <div className="text-[11px] font-semibold text-amber-800">Needs input — ask the buyer (+{stillAsk.length})</div>
                 <div className="text-[10.5px] text-amber-700 mt-0.5">{stillAsk.join(' · ')}</div>
                 <div className="text-[9px] text-amber-600/80 mt-0.5">not deduced at high confidence — surface these in the form</div>
               </div>
-            )}
+            ))}
             {retailLead && <div className="mt-3 inline-block rounded-md bg-amber-50 border border-amber-200 px-2.5 py-1 text-[12px] font-semibold text-amber-800">This might be a retail lead</div>}
           </div>
         )}
