@@ -7,7 +7,7 @@
 // Standalone: it does its OWN pull (other-team path) or reuses an existing pull. No V3/V4 disruption.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { buildLedger, evolveLedger, counterfactualFor, derivationTimeline, diffLedgerVersions, weightTree, attentionMap, attentionBySource, ignoredReasonFor, promotionLadder, alternativeTrees, type Ledger, type Decision, type Fact, type SourceNode } from '../lib/ledger';
+import { buildLedger, counterfactualFor, derivationTimeline, weightTree, attentionMap, attentionBySource, ignoredReasonFor, promotionLadder, alternativeTrees, type Ledger, type Decision, type Fact, type SourceNode } from '../lib/ledger';
 import { buildExternalCard } from '../lib/externalCard';
 import { N8N_HOOK } from '../lib/api';
 import { buildUC2Enrichment, buildUC2Prompt, mergeUC2LLM, UC2_PROMPT_VERSION, type UC2Context, type UC2LLMOut, type UC2EditFull } from '../lib/uc2Enrichment';
@@ -144,13 +144,11 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // 📋 L1–L7 Ledger is the headline ("no black box") view for a real buyer pull; the RFQ-state preset opens on the timeline.
   const tab = 'ledger' as const; // V10: L1–L7 Ledger is the sole view (legacy tabs retired)
   const [level, setLevel] = useState<'business' | 'ai' | 'system'>('system');
-  const [prevLedger, setPrevLedger] = useState<Ledger | null>(null); // for Replay (Run A vs Run B diff)
   const [highlightFact, setHighlightFact] = useState<string | null>(null); // an evidence id (fN) clicked in the LLM reasoning → jump + highlight its source line
   const [sampleOfferIdx, setSampleOfferIdx] = useState(0); // #3 enrichment "sample offer" picker — latest (0) auto-selected
   // Readable mode (#8) — the debug bands run dense (text-[9px]…[11px]); a persisted CSS zoom scales the WHOLE view
   // (text + badges together → no overflow/clipping, unlike a per-class bump). Default 1.1 = a modest readable bump.
-  const [readZoom, setReadZoom] = useState<number>(() => { try { const v = Number(localStorage.getItem('rfqDbgZoom')); return v >= 0.9 && v <= 1.6 ? v : 1.1; } catch { return 1.1; } });
-  const bumpZoom = (d: number) => setReadZoom((z) => { const n = Math.min(1.6, Math.max(0.9, Math.round((z + d) * 100) / 100)); try { localStorage.setItem('rfqDbgZoom', String(n)); } catch { /* noop */ } return n; });
+  const [readZoom] = useState<number>(() => { try { const v = Number(localStorage.getItem('rfqDbgZoom')); return v >= 0.9 && v <= 1.6 ? v : 1.1; } catch { return 1.1; } });
 
   // WEB-EPOCH (2026-07-08 UC1-reset fix): the FULL / Parallel pull bumps this INSTEAD of setRaw'ing a fresh legacy shape.
   // The legacy `raw` is content-identical between fast & full (web enters ONLY via getEnrichmentRich), so setRaw'ing it
@@ -160,7 +158,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const [webEpoch, setWebEpoch] = useState(0);
   // CARD ↔ BUYLEAD view toggle (dashboard only). 'card' (default) = the polished 1-pager; 'buylead' = the L6 view
   // (requirement card + UC1 attributes + all use-cases). Standalone never renders this block → stays clean.
-  const [viewMode, setViewMode] = useState<'card' | 'buylead'>('card');
+  const [viewMode, setViewMode] = useState<'card' | 'buylead'>('buylead'); // landing = BuyLead card (owner)
   const runTokenRef = useRef(0);
   const lastPromptRef = useRef('');
   const lastBuyerBlockRef = useRef<Record<string, { value: string; confidence: number; reason: string; grounded: boolean; sources: string[] }>>({});
@@ -168,15 +166,13 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // 3 SPEED TIERS (2026-07-09) — superfast (DEFAULT): registries + PNS-insights + Udyam + gweb; fast: + Redash transcripts;
   // normal: + Parallel.ai. Read from ?tier (back-compat ?fast=1→fast). Changing tier re-pulls (added to the pull deps).
   const TIER_LABEL: Record<'superfast' | 'fast' | 'normal', string> = {
-    superfast: 'Superfast — registries + PNS call-insights + Udyam + Gemini web. NO call transcripts · NO Parallel. Fastest.',
-    fast: 'Fast — Superfast + transcribed call recordings (Redash audio). Adds spoken call intent.',
-    normal: 'Normal — Fast + Parallel.ai deep web-OSINT. Richest, slowest.',
+    superfast: 'Superfast — registries · KYB · PNS call-insights · Udyam · Gemini web. No call transcripts, no deep web. Up to 1 minute.',
+    fast: 'Fast — everything in Superfast PLUS transcribed VANI call recordings & PNS masked-call transcripts (the buyer’s spoken intent). Up to 3 minutes.',
+    normal: 'Normal — everything in Fast PLUS Parallel.ai deep web research (an agent that reads business directories, GST lookups, D&B, news and socials across the open web and returns cited findings). Up to 8 minutes.',
   };
-  // short per-tier tag for the always-visible 3-mode legend (so the modes are self-explaining, not hover-only).
-  const TIER_SHORT: Record<'superfast' | 'fast' | 'normal', string> = {
-    superfast: 'no call transcripts',
-    fast: '+ call transcripts',
-    normal: '+ deep web (Parallel)',
+  // per-tier time budget chip (shown on the tier control so the wait is expected, not a surprise).
+  const TIER_TIME: Record<'superfast' | 'fast' | 'normal', string> = {
+    superfast: '~1 min', fast: '~3 min', normal: '~8 min',
   };
   const [tier, setTier] = useState<'superfast' | 'fast' | 'normal'>(() => {
     try { const p = new URLSearchParams(window.location.search); const t = p.get('tier'); if (t === 'fast' || t === 'normal' || t === 'superfast') return t; return p.get('fast') === '1' ? 'fast' : 'superfast'; } catch { return 'superfast'; }
@@ -790,9 +786,8 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 bg-white shrink-0">
         <div className="flex items-center gap-3">
-          <h2 className="font-bold text-gray-900 text-[15px]">{title || '📊 Profile & Requirement Enrichment Analysis'}</h2>
+          <h2 className="font-bold text-gray-900 text-[15px]">{title || '🪪 GLADMIN Buyer Profile Card'}</h2>
           <span className="text-gray-400">GLID {glid || '—'}</span>
-          {ledger && <span className="text-[11px] text-gray-400">· v{ledger.timeline[ledger.timeline.length - 1]?.version ?? 1} · {ledger.decisions.length} decisions · {ledger.facts.length} facts</span>}
         </div>
         <div className="flex items-center gap-3">
           {/* 3-LEVEL view (Business / AI / System) — vestigial in V10 (gates only the rare decision drill); hidden behind SHOW_LEVEL_TABS, level stays 'system' = full depth */}
@@ -801,69 +796,28 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
               {(['business', 'ai', 'system'] as const).map((lv) => (<button key={lv} onClick={() => setLevel(lv)} className={`rounded-md px-2 py-1 capitalize transition ${level === lv ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>{lv === 'business' ? '👔 Business' : lv === 'ai' ? '🤖 AI' : '⚙️ Raw'}</button>))}
             </div>
           )}
-          {/* 3 speed tiers — superfast (default) · fast (+ call transcripts) · normal (+ Parallel.ai). Switching re-pulls. */}
+          {/* HERO ROW 1 — 3 speed tiers with time budget. While a pull runs, the OTHER tiers grey out (can't switch
+              mid-pull); ✓ = already pulled this session (instant, no re-run until Fresh pull); ⏳ = pulling now. */}
           <div className="flex items-center rounded-lg border border-gray-200 bg-white text-[11px] font-semibold overflow-hidden">
-            {(['superfast', 'fast', 'normal'] as const).map((t) => (
-              <button key={t} onClick={() => setTier(t)} title={TIER_LABEL[t] + ' — ✓ = pulled this session (instant switch-back) · ⏳ = pulling now'} className={'px-2 py-1 capitalize ' + (tier === t ? 'bg-teal-600 text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800')}>
-                {t}{loading && tier === t ? <span className="ml-0.5 animate-pulse">⏳</span> : (glid && hasCachedTier(glid, t)) ? <span className={'ml-0.5 ' + (tier === t ? 'text-teal-100' : 'text-emerald-500')}>✓</span> : null}
+            {(['superfast', 'fast', 'normal'] as const).map((t) => { const disabled = loading && tier !== t; return (
+              <button key={t} disabled={disabled} onClick={() => setTier(t)} title={TIER_LABEL[t] + `  ·  ${TIER_TIME[t]}`} className={'px-2.5 py-1 capitalize flex items-center gap-1 ' + (tier === t ? 'bg-teal-600 text-white' : disabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800')}>
+                {t}<span className={'text-[8.5px] font-normal ' + (tier === t ? 'text-teal-100' : 'text-gray-400')}>{TIER_TIME[t]}</span>{loading && tier === t ? <span className="animate-pulse">⏳</span> : (glid && hasCachedTier(glid, t)) ? <span className={tier === t ? 'text-teal-100' : 'text-emerald-500'}>✓</span> : null}
               </button>
-            ))}
+            ); })}
           </div>
-          {/* Fresh pull — bypass BOTH caches (in-session per-tier + n8n's 24h result-cache via ?nocache=1) and re-hit every source live. */}
-          <button onClick={() => { freshRef.current = true; setRefreshKey((k) => k + 1); }} title="Fresh pull — ignore BOTH caches (this session's per-tier cache + n8n's 24h result-cache) and re-hit every source LIVE. Slower; use when you need the very latest data (or to abandon a stuck pull)." className="text-[12px] rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-700 hover:text-amber-900">↻ Fresh pull</button>
-          {/* Readable mode (#8) — zoom the debug view; persisted. A− smaller · A+ larger. */}
-          <div className="flex items-center rounded-lg border border-gray-200 bg-white text-[13px] font-semibold overflow-hidden" title="Readable mode — zoom the debug view (saved). A− smaller · A+ larger.">
-            <button onClick={() => bumpZoom(-0.15)} className="px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800" aria-label="smaller text">A−</button>
-            <span className="px-1.5 text-gray-400 tabular-nums text-[10px] border-x border-gray-100">{Math.round(readZoom * 100)}%</span>
-            <button onClick={() => bumpZoom(0.15)} className="px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800" aria-label="larger text">A+</button>
-          </div>
-          {glid && <button onClick={() => window.open(`?profile=${encodeURIComponent(glid)}`, '_blank', 'noopener')} title="Open the standalone TrustSEAL card for this GLID (fed by the independent bi-buyer-profile endpoint + server-side LLM) in a new tab" className="text-indigo-700 hover:text-indigo-900 text-[12px] rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1">open standalone ↗</button>}
+          {/* Fresh pull — hero after the tier control. n8n source data is cached ~24h; this forces a fresh backend pull.
+              (The AI profile call is ALWAYS run fresh regardless.) Cache-age chip renders alongside when the pull is cached. */}
+          <button onClick={() => { freshRef.current = true; setRefreshKey((k) => k + 1); }} title="n8n source data is cached for ~24 hours to keep pulls fast. Click for a FRESH backend pull that re-hits every source live. The AI profile call is always run fresh on every view — only the raw n8n data is cached." className="text-[12px] rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-amber-800 hover:bg-amber-100 font-semibold">↻ Fresh pull</button>
+          {(() => { const fa = (getEnrichmentRich() as { fetched_at?: string } | null)?.fetched_at; if (!fa) return null; let t = ''; try { t = new Date(fa).toLocaleString('en-IN', { hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' }); } catch { t = fa; } return <span className="text-[10px] text-gray-400" title="When the underlying n8n source data was fetched. Older than expected? Click ↻ Fresh pull.">data as of {t}</span>; })()}
+          {glid && <button onClick={() => window.open(`?profile=${encodeURIComponent(glid)}`, '_blank', 'noopener')} title="Open the clean standalone buyer card for this GLID (independent bi-buyer-unified endpoint + server-side LLM) in a new tab" className="text-indigo-500 hover:text-indigo-700 text-[11px] underline underline-offset-2">standalone ↗</button>}
           {/* Download is available as soon as THIS tier's pull returns (no waiting for OSINT/Parallel — tiers made that gate obsolete). */}
           {ledger && <button onClick={() => downloadInteractiveHtml({ v: 1, glid, stampIso: new Date().toISOString(), rich: getEnrichmentRich(), legacy: raw, serverTrace: getServerTrace(), health: getEnrichmentHealth() as unknown[], llmRaw: getLLMRaw() as Record<string, unknown>, extractOut: msynth.out, extractUsage: msynth.usage, extractMs: msynth.ms, pruneKeep: prune.keep, uc2Map: uc2Map as Record<string, unknown>, readZoom }, { fallbackRich: getEnrichmentRich() ?? raw })} title="Download a FULLY-INTERACTIVE offline copy — the whole app + this GLID's data baked in. Opens with the network off; every band, JSON tree, expand/collapse and scroll works exactly like live. (Run `npm run build:offline` once to generate the shell.)" className="text-teal-700 hover:text-teal-900 text-[12px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1">⬇ Download</button>}
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm rounded-full border border-gray-200 px-3 py-1">✕ close</button>
         </div>
       </div>
 
-      {/* All-3-modes legend — always visible so the modes are self-explaining (owner: "labels missing, I don't know
-          what these modes are"). Active tier bolded; full description of the active tier on its own line. */}
-      <div className="mb-2 text-[11px] text-gray-600 flex items-center flex-wrap gap-x-2 gap-y-0.5">
-        <span className="text-gray-400">Speed mode:</span>
-        {(['superfast', 'fast', 'normal'] as const).map((t) => (
-          <span key={t} className={tier === t ? 'font-semibold text-teal-700' : 'text-gray-400'}>
-            <span className="capitalize">{t}</span> <span className="font-normal text-gray-400">({TIER_SHORT[t]})</span>
-          </span>
-        ))}
-        <span className="basis-full text-[10px] text-gray-400 mt-0.5">→ {TIER_LABEL[tier]}</span>
-      </div>
-
-      {/* V10: the L1–L7 Ledger is the sole view (legacy Observatory/Twin/System tabs retired — the extract twin is the one authority). */}
-      {ledger && (
-        <div className="flex items-center px-5 py-1.5 border-b border-gray-200 bg-white shrink-0 text-[12px] font-semibold">
-          <span className="rounded-lg px-3 py-1 bg-teal-50 text-teal-700 border border-teal-200">📊 Profile & Requirement Enrichment</span>
-        </div>
-      )}
-
-      {/* Evolution strip (Step 5) — every event = a NEW ledger version; simulate shows "why NOT used" live */}
-      {ledger && (
-        <div className="px-5 py-1.5 border-b border-gray-100 bg-gray-50 flex items-center gap-2 text-[11px] shrink-0 overflow-x-auto">
-          <span className="text-gray-400 shrink-0">🔁 evolution:</span>
-          {ledger.timeline.map((t, i) => (<span key={i} className="text-gray-600 shrink-0">v{t.version} <span className="text-gray-400">({t.trigger})</span>{i < ledger.timeline.length - 1 ? ' →' : ''}</span>))}
-          <span className="flex-1" />
-          <button onClick={() => { if (ledger) { setPrevLedger(ledger); setLedger(evolveLedger(ledger, { type: 'product', value: 'diesel generator', relatedToHistory: false })); } }} className="shrink-0 rounded-full border border-indigo-200 text-indigo-700 px-2 py-0.5 hover:bg-indigo-50">▶ simulate off-profile product</button>
-          <button onClick={() => { setPrevLedger(null); setLedger(raw ? buildLedger(withObservedExternal(raw)) : null); }} className="shrink-0 rounded-full border border-gray-200 text-gray-500 px-2 py-0.5 hover:bg-gray-100">↺ reset</button>
-        </div>
-      )}
-
-      {/* E · REPLAY — Run A vs Run B diff (shown after an evolve) */}
-      {ledger && prevLedger && (() => { const d = diffLedgerVersions(prevLedger, ledger); return (
-        <div className="px-5 py-1.5 border-b border-amber-100 bg-amber-50/60 text-[11px] shrink-0 overflow-x-auto">
-          <b className="text-amber-700">🔁 Replay v{prevLedger.timeline[prevLedger.timeline.length - 1]?.version} → v{ledger.timeline[ledger.timeline.length - 1]?.version}:</b>{' '}
-          {d.changed.map((c, i) => <span key={i} className="text-gray-600">{c.key}.{c.field} {c.from}→{c.to}{i < d.changed.length - 1 ? ' · ' : ''}</span>)}
-          {d.consumptionFlips.map((f, i) => <span key={'f' + i} className="text-rose-600"> · {f.key}→{f.consumer}: {f.from}→{f.to} ({f.reason})</span>)}
-          {!d.changed.length && !d.consumptionFlips.length && <span className="text-gray-400">no change</span>}
-          {(ledger.timeline[ledger.timeline.length - 1]?.because || []).map((b, i) => <div key={'why' + i} className="text-gray-500 mt-0.5">↳ {b}</div>)}
-        </div>
-      ); })()}
+      {/* active-tier one-liner — the modes are self-explaining without the old always-on legend/chip/evolution strips. */}
+      <div className="px-5 py-1 text-[10.5px] text-gray-400 shrink-0 border-b border-gray-100 bg-white">{TIER_LABEL[tier]}</div>
 
       {(loading || pullFinishing) && <StagedLoader glid={glid} complete={!loading} slow={pullSlow} />}
       {!loading && buildError && <div className="flex-1 flex flex-col items-center justify-center gap-2 p-8 text-center"><div className="text-rose-600 font-semibold">⚠ Couldn't build the ledger from this pull</div><div className="text-[12px] text-gray-500 max-w-md">{buildError}</div><div className="text-[11px] text-gray-400">The raw pull is on <code>window.__enrichment</code> / <code>window.__ledgerError</code> for diagnosis — the screen no longer blanks.</div></div>}
@@ -1150,7 +1104,20 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
             {requirements.map((r, i) => (<option key={i} value={i}>{r.title}{r.isExpired ? ' (expired)' : ''}</option>))}
           </select>
         ) : undefined;
-        const enrichControl = enrichMode !== 'offer' ? <button type="button" onClick={() => setEnrichMode('offer')} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-600 text-white hover:bg-amber-700">▶ enrich (LLM)</button> : undefined;
+        // Enrich control + STATE BANNER (owner: "ran-and-fixed" must look different from "ran-nothing-to-fix" AND from
+        // "never ran"). Before run → glowing button + helper. Running → spinner. After → an honest outcome summary.
+        const enrichControl = enrichMode !== 'offer'
+          ? (<div className="flex items-center gap-2">
+              <button type="button" onClick={() => setEnrichMode('offer')} className="text-[11px] px-2.5 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 font-semibold ring-2 ring-amber-300 animate-pulse">▶ enrich (LLM)</button>
+              <span className="text-[9.5px] text-gray-500 max-w-[280px] leading-tight">AI re-checks this requirement against everything the buyer said on calls &amp; WhatsApp — fixes a wrong category/spec, adds target price &amp; sourcing city.</span>
+            </div>)
+          : offerLLM.status === 'loading'
+          ? <span className="text-[10px] text-amber-700 animate-pulse">⏳ enriching — reading calls · WhatsApp · requirement…</span>
+          : (() => { const c = offerFields.filter((f) => f.action === 'corrected').length; const a = offerFields.filter((f) => f.action === 'added').length; const d = offerFields.filter((f) => f.action === 'dropped').length; const k = offerFields.filter((f) => f.action === 'kept').length; const changed = c + a + d; return (
+              <span className={'text-[10px] px-2 py-0.5 rounded-md font-semibold ' + (changed ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-gray-50 text-gray-500 border border-gray-200')}>
+                {changed ? `✓ Enriched · ${c} corrected · ${a} added${d ? ` · ${d} dropped` : ''} · ${k} kept` : `✓ Enriched · nothing to correct — the recorded lead already matches the buyer’s own words (${k} fields verified)`}
+              </span>
+            ); })();
         // L7 · requirement enrichment (requirement_brain → the subtraction math)
         const reqBrain = parseRequirementBrain(raw);
         const isqNames = [...new Set(requirements.flatMap((r) => r.specs.map((s) => s.k)))];
@@ -1452,10 +1419,14 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
               {/* CARD ↔ BUYLEAD toggle (dashboard only — standalone renders neither this block nor the toggle). Default =
                   the polished 1-pager; switch to the L6 "BuyLead" view (requirement card + UC1 attributes + all use-cases).
                   The Debug band stays below in BOTH modes (owner: "debug for both modes"). */}
-              <div className="flex items-center gap-1 rounded-lg bg-gray-100 p-0.5 text-[11px] font-semibold w-fit">
-                <button onClick={() => setViewMode('card')} className={'rounded-md px-3 py-1 transition ' + (viewMode === 'card' ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700')}>🪪 Buyer Card</button>
-                <button onClick={() => setViewMode('buylead')} className={'rounded-md px-3 py-1 transition ' + (viewMode === 'buylead' ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700')}>📑 BuyLead / L6</button>
+              <div className="flex items-center gap-2 rounded-xl bg-gray-100 p-1 text-[13px] font-bold w-fit">
+                <button onClick={() => setViewMode('buylead')} className={'rounded-lg px-4 py-2 transition flex flex-col items-start leading-tight ' + (viewMode === 'buylead' ? 'bg-white text-teal-700 shadow' : 'text-gray-500 hover:text-gray-700')}>📑 BuyLead Card<span className="text-[9px] font-normal text-gray-400">debug mode available here</span></button>
+                <button onClick={() => setViewMode('card')} className={'rounded-lg px-4 py-2 transition flex flex-col items-start leading-tight ' + (viewMode === 'card' ? 'bg-white text-teal-700 shadow ring-2 ring-teal-300 animate-pulse' : 'text-gray-500 hover:text-gray-700')}>🪪 GLADMIN Buyer Profile Card<span className="text-[9px] font-normal text-gray-400">the buyer-facing 1-pager</span></button>
               </div>
+              {/* ZERO-VS-FLAKE honesty banner (owner A2): if this pull returned 0 BuyLeads but the buyer's lifetime
+                  requirement counter is > 0, it's almost certainly a source-API miss (a flaked / stale cached run),
+                  NOT a buyer with no requirements. Say so + point at Fresh pull — never a silent empty chart. */}
+              {(() => { const rich = getEnrichmentRich() as { sources?: Record<string, { summary?: Record<string, unknown>; __health?: Record<string, unknown> }> } | null; const rq = rich?.sources?.requirement; const bp = rich?.sources?.buyerprofile?.summary as Record<string, unknown> | undefined; const pulled = Number((rq?.__health as Record<string, unknown> | undefined)?.buyleads ?? (rq?.summary as Record<string, unknown> | undefined)?.requirement_count ?? 0); const lifetime = Number((bp?.activity as Record<string, unknown> | undefined)?.total_requirement ?? 0); if (pulled === 0 && lifetime > 0) return (<div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">⚠ <b>0 BuyLeads returned this pull</b>, but this account shows <b>{lifetime} lifetime requirements</b> — almost certainly a source-API miss on this run (often a stale cached pull), not a buyer with no demand. Click <b>↻ Fresh pull</b> for live data.</div>); return null; })()}
               {/* TrustSEAL Buyer Profile — the polished buyer-facing 1-pager (default view). parseBuyerProfile(rich); provenance-badged. */}
               {viewMode === 'card' && <BuyerProfileCard rich={(() => { const _r = getEnrichmentRich(); const _b = finalsToBuyerBlock(finals.filter((f) => (f.confidence ?? 0) >= 50)); if (Object.keys(_b).length) lastBuyerBlockRef.current = _b; const _bb = Object.keys(_b).length ? _b : lastBuyerBlockRef.current; return (_r && typeof _r === 'object' && Object.keys(_bb).length) ? { ...(_r as object), buyer: _bb } : _r; })()} glid={glid} pending={fullPending} persona={finals.find((f) => f.key === 'business_persona')?.value} />}
               {/* L6 — the BuyLead / Buyer card + UC1 attributes + all use-cases (the full debug-facing product view). */}

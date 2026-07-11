@@ -11,10 +11,8 @@ import { parseBuyerProfile, type BuyerProfileModel, type Field, type LabeledFiel
 // ── provenance markers ───────────────────────────────────────────────────────────────────────────────────────
 function Marker({ f }: { f: Field }) {
   if (!f.present) return null;
-  if (f.inferred || f.provenance === 'inferred') {
-    return <span title={`Derived from web sources (web_osint · LLM synthesis${f.confidence ? ` · confidence ${f.confidence}` : ''}) — not a registry record`} className="ml-1 inline-flex items-center align-middle text-[8px] px-1 py-px rounded bg-sky-50 text-sky-600 border border-sky-200 cursor-help">inferred</span>;
-  }
-  if (f.provenance === 'derived') return <span title={f.note || 'Encoded rule, not a fetched fact'} className="ml-1 text-[8px] px-1 py-px rounded bg-gray-100 text-gray-500 border border-gray-200 cursor-help">derived</span>;
+  // owner: GLADMIN card shows VALUES ONLY — the inferred/derived/composed provenance chips are removed (they belong in
+  // the BuyLead debug view). The ONLY marker kept is ✓✓ = agreed by ≥2 sources (a trust signal a buyer-facing reader wants).
   if (f.provenance === 'triangulated') return <span title={f.note || 'Confirmed by 2 independent sources'} className="ml-1 text-[9px] text-emerald-600 cursor-help" aria-label="verified by two sources">✓✓</span>;
   return null;
 }
@@ -184,31 +182,6 @@ function PanPanel({ pans }: { pans: PanBlock | null }) {
 }
 
 // ── Proofs / Sources (#11) — the web citations behind the inferred fields (URL + excerpt + engine confidence) ────
-function ProofsSection({ proofs }: { proofs: BuyerProfileModel['proofs'] }) {
-  if (!proofs.length) return null;
-  return (
-    <div className="px-4 pb-2">
-      <details>
-        <summary className="cursor-pointer list-none text-[11px] font-bold text-blue-700 uppercase tracking-wide flex items-center gap-1.5 select-none">
-          <ShieldCheck className="w-3.5 h-3.5 text-blue-600" /> Proofs / Sources <span className="text-gray-400">({proofs.length})</span>
-          <span className="text-[9px] font-normal text-gray-400 normal-case">— web citations behind the inferred fields</span>
-        </summary>
-        <div className="mt-1.5 space-y-1.5">
-          {proofs.map((p, i) => (
-            <div key={`${p.field}-${i}`} className="text-[10px] text-gray-600 border-l-2 border-blue-100 pl-2">
-              <div className="flex items-center flex-wrap gap-1.5">
-                <span className="font-semibold text-gray-700">{p.field.replace(/_/g, ' ')}</span>
-                {p.confidence && <span className="text-[8px] px-1 rounded bg-gray-100 text-gray-500 border border-gray-200">web-conf {p.confidence}</span>}
-                {p.url && <a href={/^https?:\/\//.test(p.url) ? p.url : `https://${p.url}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline inline-flex items-center gap-0.5 truncate max-w-[260px]"><ExternalLink className="w-2.5 h-2.5 shrink-0" />{p.url.replace(/^https?:\/\//, '')}</a>}
-              </div>
-              {p.excerpt && <div className="text-gray-400 italic mt-0.5 line-clamp-2">“{p.excerpt}”</div>}
-            </div>
-          ))}
-        </div>
-      </details>
-    </div>
-  );
-}
 
 // ── main card ────────────────────────────────────────────────────────────────────────────────────────────────
 export default function BuyerProfileCard({ rich, glid, pending, persona }: { rich: unknown; glid: string; pending?: boolean; persona?: string }) {
@@ -230,10 +203,11 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
       {/* header — left navy badge block (not full-bleed) + activity tiles on white (owner §2/§7) */}
       <div className="px-4 pt-4 pb-1 flex flex-col sm:flex-row items-stretch gap-3">
         <div className="bg-gradient-to-br from-[#0b1f4d] to-[#132c63] rounded-xl px-4 py-3 flex items-center gap-2.5 sm:w-[38%] shrink-0">
-          <span className="w-8 h-8 rounded-full bg-amber-400 text-[#0b1f4d] text-[13px] font-black flex items-center justify-center shrink-0">S</span>
+          <span className="w-8 h-8 rounded-full bg-amber-400 text-[#0b1f4d] text-[12px] font-black flex items-center justify-center shrink-0">🪪</span>
           <div className="leading-tight min-w-0">
-            <div className="text-white font-bold text-[15px] tracking-wide truncate">TrustSEAL <span className="text-amber-400">Buyer Profile</span></div>
-            <div className="text-white/60 text-[10px]">Verified buyer intelligence</div>
+            <div className="text-white font-bold text-[14px] tracking-wide truncate">GLADMIN <span className="text-amber-400">Buyer Profile</span></div>
+            {/* verification wording is flag-DRIVEN (never a static "TrustSEAL"): shows the buyer's real tier or "Unverified". */}
+            <div className="text-white/60 text-[10px]">{m.verifiedBuyer ? m.verifiedBuyer.label : 'Buyer intelligence'}</div>
           </div>
         </div>
         <div className="flex-1 min-w-0">
@@ -258,7 +232,7 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
         </div>
         {/* Amit (demo): "kis cheez ka dhandha hai" — the ONE plain-language line, front & centre. Prefer the extract-LLM
             business_persona (richest phrasing) when the debug view passes it; else the deterministic headline. */}
-        {((persona && persona.trim()) || m.headline) && <p className="mt-1 text-[15px] font-semibold text-indigo-900 leading-snug">{(persona && persona.trim()) || m.headline}</p>}
+        {((persona && persona.trim()) || m.headline) && <p className="mt-1.5 text-[15px] font-bold text-indigo-900 leading-snug bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">{(persona && persona.trim()) || m.headline}</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[12px] text-gray-600">
           <span className="inline-flex items-center gap-1"><Icon Ic={User} />{m.header.contactName.present ? m.header.contactName.value : <span className="text-gray-300 italic">—</span>}</span>
           <span className="text-gray-300">|</span>
@@ -278,15 +252,29 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
           <ColTitle>Buyer Details</ColTitle>
           {m.businessStory && (
             <div className="rounded-lg bg-blue-50/70 border border-blue-100 p-2.5 mb-2">
-              <div className="text-[11px] font-bold text-blue-800 mb-0.5 flex items-center gap-1">Business Story <span title="Composed from fields we hold (not a literal API record, not a live LLM call)" className="text-[8px] px-1 rounded bg-white text-blue-500 border border-blue-200 cursor-help font-normal normal-case">composed</span></div>
-              <p className="text-[12px] text-gray-700 leading-snug">{m.businessStory.text}{m.businessStory.inferredParts.length > 0 && <span title={`inferred parts: ${m.businessStory.inferredParts.join(', ')} (web_osint)`} className="ml-1 text-[8px] px-1 rounded bg-sky-50 text-sky-600 border border-sky-200 cursor-help align-middle">inferred: {m.businessStory.inferredParts.join(', ')}</span>}</p>
+              <div className="text-[11px] font-bold text-blue-800 mb-0.5">Business Story</div>
+              <p className="text-[12px] text-gray-700 leading-snug">{m.businessStory.text}</p>
             </div>
           )}
-          {/* Who is the buyer? — inferred snapshot (maturity · intent · deal-readiness · objective · stage). Hide-empty. */}
-          <Section title="Buyer Snapshot" rows={m.buyerDetails} />
-          <Section title="Business Overview" rows={m.overview} extra={m.businessNature.present ? <KV Ic={Factory} label="Business Nature" f={m.businessNature} /> : null} />
-          <Section title="Procurement Profile" rows={m.procurement} />
-          <Section title="Market Focus" rows={m.market} />
+          {/* DEDUP (owner Layer-2, render-time so the model's index-wiring stays intact):
+              · Buyer Snapshot: drop Business Objective (covered by persona/use-case) + Buyer Maturity (== Business Stage; keep Stage, prefer the richer maturity phrasing).
+              · Procurement: drop Sourcing Channel (folds into Sourcing cities), Purchase Frequency + Procurement Challenge (→ requirement side on the BuyLead card), Price vs Quality (already covered); MERGE Procurement Approach into Procurement Model.
+              · Market: drop Sales Geography (sourcing already covers geography). */}
+          {(() => {
+            const snapDrop = new Set(['Business Objective', 'Buyer Maturity']);
+            const maturity = m.buyerDetails.find((r) => r.label === 'Buyer Maturity');
+            const snapRows = m.buyerDetails.filter((r) => !snapDrop.has(r.label)).map((r) => (r.label === 'Business Stage' && maturity?.field.present) ? { label: 'Business Stage', field: maturity.field } : r);
+            const procDrop = new Set(['Sourcing Channel', 'Purchase Frequency', 'Procurement Challenge', 'Price vs Quality', 'Procurement Approach']);
+            const approach = m.procurement.find((r) => r.label === 'Procurement Approach');
+            const procRows = m.procurement.filter((r) => !procDrop.has(r.label)).map((r) => { if (r.label === 'Procurement Model' && r.field.present && approach?.field.present) return { label: 'Procurement Model', field: { ...r.field, value: `${r.field.value} · ${approach.field.value}` } }; return r; });
+            const mktRows = m.market.filter((r) => r.label !== 'Sales Geography');
+            return (<>
+              <Section title="Buyer Snapshot" rows={snapRows} />
+              <Section title="Business Overview" rows={m.overview} extra={m.businessNature.present ? <KV Ic={Factory} label="Business Nature" f={m.businessNature} /> : null} />
+              <Section title="Procurement Profile" rows={procRows} />
+              <Section title="Market Focus" rows={mktRows} />
+            </>);
+          })()}
         </div>
 
         {/* ── COLUMN 2 — COMPANY DETAILS ── */}
@@ -438,10 +426,9 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
         </div>
       </div>
 
-      <ProofsSection proofs={m.proofs} />
-
+      {/* Proofs/Sources REMOVED from the buyer-facing card (owner) — web citations live in the BuyLead card's debug view. */}
       <div className="px-4 pb-2 text-[9px] text-gray-400 border-t border-gray-100 pt-1.5">
-        <span className="text-sky-500">inferred</span> = web_osint / LLM synthesis · <span className="text-gray-500">derived</span> = encoded rule · <span className="text-emerald-600">✓✓</span> = agreed by ≥2 sources · <span className="italic">Not available</span> = no source field (never fabricated) · TrustSEAL Plan tile = placeholder (no plan data in pipeline)
+        <span className="text-emerald-600">✓✓</span> = agreed by ≥2 sources · <span className="italic">Not available</span> = no source field (never fabricated)
       </div>
     </div>
   );
