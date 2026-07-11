@@ -344,7 +344,7 @@ export interface OfferFieldRow { label: string; before?: string; after: string; 
 export interface L6Requirement { title: string; posted?: string; expiry?: string; status?: string; isExpired?: boolean; recencyDays?: number; category?: string; location?: string; specs?: Array<{ k: string; v: string; filledBy?: string }>; specsStatus?: string; buyerInfo?: string; commercials?: string }
 export interface L6Availability { key: string; label: string; present: boolean; verified: boolean; isNew?: boolean; value: string; externalValue?: string; source: string; note: string }
 export interface L6ProfileRow { label: string; value: string; drill?: ReactNode; prov?: 'llm' | 'det' }
-export interface L6BuyerDetails { name?: string; company?: { value: string; verified: boolean; drill?: ReactNode }; memberSince?: string; memberSinceDrill?: ReactNode; device?: { value: string; note: string; source?: string }; responseCalls?: number; responseReplies?: number; ageGender?: string; ageGenderDrill?: ReactNode; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[] }
+export interface L6BuyerDetails { name?: string; company?: { value: string; verified: boolean; drill?: ReactNode }; memberSince?: string; memberSinceDrill?: ReactNode; device?: { value: string; note: string; source?: string }; responseCalls?: number; responseReplies?: number; ageGender?: string; ageGenderDrill?: ReactNode; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[]; pii?: { label: string; value: string }[]; footprint?: { bucket: string; items: string[] }[]; allAttrRows?: { label: string; value: string; conf: number; drill?: ReactNode }[] }
 
 // compact channel icons for the "Available" row (matches the classic Buylead-Details card)
 const AVAIL_ICON: Record<string, string> = { mobile: '📱', email: '✉️', address: '🏢', pan: '🪪', gst: '🧾', whatsapp: '💬', name: '👤', age: '🎂', company: '🏛️' };
@@ -376,6 +376,7 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
   // the AI-built profile with clickable reasoning (default) · Requirement = the AI-corrected/enriched requirement (UC2).
   // Controlled by the parent (mode/onMode) so it can fire the requirement-enrichment LLM only on the Requirement tab.
   const [modeLocal, setModeLocal] = useState<'original' | 'profile' | 'requirement'>('profile');
+  const [showPii, setShowPii] = useState(false);   // BL PII click-to-reveal (owner: full unmasked, gated by a click)
   const mode = modeProp ?? modeLocal;
   const setMode = (m: 'original' | 'profile' | 'requirement') => { setModeLocal(m); onMode?.(m); };
   const on = !!uc2 && mode === 'requirement';   // show the UC2-enriched requirement (corrected/added specs)
@@ -544,7 +545,42 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
             </div>
             {/* AI-EXTRACTED rows (Identity Confidence · profile findings · Needs-input) — hidden in Original (raw view); shown in Buyer Profile / Requirement */}
             {!isOriginal && buyerDetails.identityConfidence && <DrillRow label={<span className="text-violet-700">Identity Confidence</span>} value={buyerDetails.identityConfidence.value || '—'} drill={profileClickable ?buyerDetails.identityConfidence.drill : undefined} />}
+            {buyerDetails.pii && buyerDetails.pii.length > 0 && (
+              <div className="mt-1.5 pt-1.5 border-t border-gray-100">
+                <button type="button" onClick={() => setShowPii((v) => !v)} className="text-[10.5px] font-semibold text-teal-700 inline-flex items-center gap-1 hover:underline">
+                  <span>{showPii ? '🔓' : '🔒'}</span>{showPii ? 'Hide' : 'Reveal'} contact &amp; PII ({buyerDetails.pii.length})
+                </button>
+                {showPii && (
+                  <div className="mt-1 rounded-lg border border-teal-100 bg-teal-50/40 p-2 space-y-0.5">
+                    {buyerDetails.pii.map((p) => (<div key={p.label} className="flex gap-2 text-[10.5px]"><span className="w-24 shrink-0 text-gray-500">{p.label}</span><span className="flex-1 min-w-0 text-gray-800 font-mono break-words">{p.value}</span></div>))}
+                  </div>
+                )}
+              </div>
+            )}
+            {!isOriginal && buyerDetails.footprint && buyerDetails.footprint.length > 0 && (
+              <div className="mt-1.5">
+                <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-0.5">Digital Footprint <span className="normal-case font-normal text-gray-400">· observed presence</span></div>
+                <div className="space-y-1">
+                  {buyerDetails.footprint.map((b) => (
+                    <div key={b.bucket} className="flex items-start gap-1.5 text-[10.5px]">
+                      <span className="w-28 shrink-0 text-gray-400">{b.bucket}</span>
+                      <span className="flex-1 min-w-0 flex flex-wrap gap-1">{b.items.map((it) => <span key={it} className="px-1 rounded bg-sky-50 text-sky-700 border border-sky-200">{it}</span>)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {!isOriginal && buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<span className={p.prov === 'det' ? 'text-teal-700' : 'text-violet-700'}>{p.label}</span>} value={p.value || '—'} drill={profileClickable ?p.drill : undefined} />))}
+            {/* #6/#7/#8 — ALL attributes: every extracted key (incl. confidence <50 that is HIDDEN from the UC1 rows above),
+                each expandable to its last raw line. The complete inspectable set the owner asked for below UC1. */}
+            {!isOriginal && buyerDetails.allAttrRows && buyerDetails.allAttrRows.length > 0 && (
+              <details className="mt-1.5 border-t border-gray-100 pt-1.5">
+                <summary className="cursor-pointer text-[10px] font-semibold text-gray-500 select-none">All attributes ({buyerDetails.allAttrRows.length}) · full set incl. low-confidence (&lt;50 hidden above) — click any to expand to raw</summary>
+                <div className="mt-1 space-y-0.5">
+                  {buyerDetails.allAttrRows.map((a, i) => (<DrillRow key={i} label={<span className="text-gray-600">{a.label} <span className={a.conf < 50 ? 'text-rose-400 text-[8px]' : 'text-gray-400 text-[8px]'}>{a.conf}%</span></span>} value={a.value || '—'} drill={a.drill} />))}
+                </div>
+              </details>
+            )}
             {!isOriginal && needsInput && needsInput.length > 0 ? (
               <div className="mt-3 rounded-md bg-amber-50/70 border border-amber-200 px-2.5 py-1.5">
                 <div className="text-[11px] font-semibold text-amber-800">Needs input — ask the buyer (+{needsInput.length})</div>

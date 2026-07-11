@@ -23,7 +23,7 @@ import { buildRequirements, requirementsFromMerged } from '../lib/requirements';
 import { buildOfferSkeleton, buildOfferEnrichPrompt, mergeOfferLLM, type OfferLLMOut } from '../lib/offerEnrich';
 import { buildPrunePrompt, applyPrune, synthEval, type FinalAttr } from '../lib/synthesisEngine';
 import { bundleFromResponse, buildExtractPrompt, extractedToFinals, finalsToBuyerBlock, extractNeedsInput, type RichResponse } from '../lib/buyerProfileExtract';
-import { fetchEnrichment, getEnrichmentRich, getServerTrace, getEnrichmentHealth } from '../lib/enrichment';
+import { fetchEnrichment, getEnrichmentRich, getServerTrace, getEnrichmentHealth, hasCachedTier } from '../lib/enrichment';
 import { runExternal } from '../lib/externalRun';
 import { getLLMRaw, getLLMHealth } from '../lib/gemini';
 import { getEvalRuns, evalTrend } from '../lib/evalLog';
@@ -116,7 +116,7 @@ function StagedLoader({ glid, complete, slow }: { glid?: string; complete?: bool
         </div>
         {slow && !complete && (
           <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-2.5">
-            <div className="text-[11px] text-amber-800">Taking longer than usual (~6 min). The pull holds a single long HTTP connection — if n8n shows this run <b>Succeeded</b>, the response may not have reached the browser (a proxy can drop the held socket).</div>
+            <div className="text-[11px] text-amber-800">Taking longer than usual (&gt;75s). n8n holds ONE long HTTP socket for the whole run — if a source API is slow/failing, or a proxy drops the held socket, the response may not reach the browser even though n8n <b>Succeeded</b>. Reload to re-pull, or switch to <b>Superfast</b> (fewest sources). A tier you already pulled reopens instantly.</div>
             <button type="button" onClick={() => window.location.reload()} className="mt-1.5 text-[11px] font-semibold text-amber-800 underline hover:text-amber-900">↻ Reload &amp; re-pull</button>
           </div>
         )}
@@ -158,9 +158,33 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // re-runs ONLY the extract (reading the now-web-bearing rich) without rebuilding the ledger, so the card + the user's
   // open tab + every per-requirement enrichment survive. runToken kills the fast-extract-clobbers-full-extract race.
   const [webEpoch, setWebEpoch] = useState(0);
+  // CARD ↔ BUYLEAD view toggle (dashboard only). 'card' (default) = the polished 1-pager; 'buylead' = the L6 view
+  // (requirement card + UC1 attributes + all use-cases). Standalone never renders this block → stays clean.
+  const [viewMode, setViewMode] = useState<'card' | 'buylead'>('card');
   const runTokenRef = useRef(0);
   const lastPromptRef = useRef('');
   const lastBuyerBlockRef = useRef<Record<string, { value: string; confidence: number; reason: string; grounded: boolean; sources: string[] }>>({});
+
+  // 3 SPEED TIERS (2026-07-09) — superfast (DEFAULT): registries + PNS-insights + Udyam + gweb; fast: + Redash transcripts;
+  // normal: + Parallel.ai. Read from ?tier (back-compat ?fast=1→fast). Changing tier re-pulls (added to the pull deps).
+  const TIER_LABEL: Record<'superfast' | 'fast' | 'normal', string> = {
+    superfast: 'Superfast — registries + PNS call-insights + Udyam + Gemini web. NO call transcripts · NO Parallel. Fastest.',
+    fast: 'Fast — Superfast + transcribed call recordings (Redash audio). Adds spoken call intent.',
+    normal: 'Normal — Fast + Parallel.ai deep web-OSINT. Richest, slowest.',
+  };
+  // short per-tier tag for the always-visible 3-mode legend (so the modes are self-explaining, not hover-only).
+  const TIER_SHORT: Record<'superfast' | 'fast' | 'normal', string> = {
+    superfast: 'no call transcripts',
+    fast: '+ call transcripts',
+    normal: '+ deep web (Parallel)',
+  };
+  const [tier, setTier] = useState<'superfast' | 'fast' | 'normal'>(() => {
+    try { const p = new URLSearchParams(window.location.search); const t = p.get('tier'); if (t === 'fast' || t === 'normal' || t === 'superfast') return t; return p.get('fast') === '1' ? 'fast' : 'superfast'; } catch { return 'superfast'; }
+  });
+  // FRESH PULL — force an uncached, all-sources-re-hit pull (bypasses the frontend per-tier cache AND n8n's result-cache
+  // via ?nocache=1). Bumping refreshKey re-runs the pull effect; freshRef flags THAT single run as fresh (one-shot).
+  const [refreshKey, setRefreshKey] = useState(0);
+  const freshRef = useRef(false);
 
   useEffect(() => {
     if (presetLedger) return; // a pre-built ledger (e.g. RFQ ledger) — no pull needed
@@ -169,26 +193,21 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     // V10 (owner-locked #7): NO caching — always pull fresh n8n so the rich extract input is current + matches THIS glid.
     // (Removed the getEnrichmentRaw() reuse that served a prior/stale pull and silently forced the merged fallback.)
     if (!glid.trim()) return;
-    setLoading(true); setFullPending(true);
-    // RESPOND-AFTER-FACTS (v16.5): fire the FAST pull (web_osint/udyam gated off → responds ~164s) AND the FULL pull in
-    // parallel. Fast paints first + clears the loader (enrichment is explorable NOW — UC2 needs requirements/PNS, not web);
-    // full upgrades with web_osint/udyam when it lands (~480s) → fullPending flips false → the ⏳ badge clears + Download
-    // unlocks. On a pre-v16.5 endpoint the fast call just returns the full pull (fast=1 ignored) — still correct.
-    let fullArrived = false;
-    // NOTE: fetchEnrichment resolves `raw` = the LEGACY-normalized shape (no top-level `.sources`); the rich-with-sources
-    // lives in getEnrichmentRich()/lastRich. So a valid `raw` is simply TRUTHY (a failed/empty pull resolves raw:null).
-    // Do NOT gate setRaw on `raw.sources` — that rejects every good pull (blank card / stuck loader). [fixed]
-    // v20 FAST MODE: when the user asked for ?fast=1, the fast pull ALREADY includes the Gemini grounded web engine — do
-    // NOT also fire the slow (~480s) full-upgrade pull (it re-runs the branches fast mode skips and its late response was
-    // overwriting the good fast result). Non-fast keeps the fast-paints-first → full-upgrades-when-it-lands flow.
-    const fastMode = (() => { try { return new URLSearchParams(window.location.search).get('fast') === '1'; } catch { return false; } })();
-    fetchEnrichment(glid, { fast: true }).then(({ raw }) => { if (raw && !fullArrived) { setRaw(raw); setLoading(false); } }).catch(() => undefined).finally(() => { if (fastMode) { setLoading(false); setFullPending(false); } });
-    if (!fastMode) {
-      fetchEnrichment(glid).then(({ raw }) => { if (raw) { fullArrived = true; setRaw((prev: unknown) => prev || raw); setWebEpoch((e) => e + 1); } }).catch(() => undefined).finally(() => { setLoading(false); setFullPending(false); });
-    } else {
-      setFullPending(false);
-    }
-  }, [glid]);
+    setLoading(true); setFullPending(false);
+    // SINGLE TIER PULL (2026-07-09): one pull at the selected `tier`. superfast (default) already includes the Gemini
+    // grounded web engine, so the old fast-paints-then-full-upgrades DUAL pull is obsolete (it re-ran skipped branches and
+    // its late response clobbered the good result). Switching tier (state) re-runs this effect → re-pulls at the new tier.
+    // `raw` is the LEGACY-normalized shape (no top-level .sources — that's in getEnrichmentRich()); a good pull is TRUTHY.
+    // webEpoch bump re-runs ONLY the extract (reads the now-web-bearing rich) without rebuilding the ledger (UC1 survives).
+    // TIER-SWITCH RACE GUARD — deeper tiers are slower, so a normal→superfast switch could let the slow `normal`
+    // response resolve LAST and clobber the fresh superfast result. `alive` (flipped by the cleanup on re-run/unmount)
+    // ensures ONLY the latest tier's pull hydrates; the stale one is dropped (fetch still completes, its setState is
+    // ignored). Mirrors the standalone's guard (BuyerProfileStandalone).
+    let alive = true;
+    const fresh = freshRef.current; freshRef.current = false;   // consume the one-shot fresh flag set by the Fresh-pull button
+    fetchEnrichment(glid, { tier, fresh }).then(({ raw }) => { if (alive && raw) { setRaw(raw); setWebEpoch((e) => e + 1); } }).catch(() => undefined).finally(() => { if (alive) { setLoading(false); setFullPending(false); } });
+    return () => { alive = false; };
+  }, [glid, tier, refreshKey]);
 
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
@@ -206,7 +225,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const [pullSlow, setPullSlow] = useState(false);
   useEffect(() => {
     if (!loading) { setPullSlow(false); return; }
-    const t = setTimeout(() => setPullSlow(true), 360000);
+    const t = setTimeout(() => setPullSlow(true), 75000);   // 75s (was 6min) — surface the actionable "slow / reload" state fast instead of a silent spinner
     return () => clearTimeout(t);
   }, [loading]);
   // fullPending = fast tier is in but the FULL pull (web_osint + udyam) is still running. Drives the ⏱ "still
@@ -407,7 +426,11 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // is HELD (moved to the held drawer), never surfaced as the twin. So groundedPct of the SHOWN twin reflects reality.
   const heldAttr = (f: FinalAttr) => { const v = String(f.value || '').trim(); const unknownVal = !v || /^(unknown|—|-|n\/?a|none|not (known|available|specified)|tbd|\?)$/i.test(v); return unknownVal || f.pruned || (msynth.status === 'done' && f.provenance === 'arithmetic') || (!!f.llm && !f.llm.grounded); };
   // WHY each held attribute is held (for the L5 held drawer — the governance made visible)
-  const heldReason = (f: FinalAttr): string => { const v = String(f.value || '').trim(); const unknownVal = !v || /^(unknown|—|-|n\/?a|none|not (known|available|specified)|tbd|\?)$/i.test(v); if (unknownVal) return 'unknown — no value'; if (f.pruned) return 'pruned by critic'; if (!!f.llm && !f.llm.grounded) return 'ungrounded — citations don\'t entail the value'; if (msynth.status === 'done' && f.provenance === 'arithmetic') return 'arithmetic-only — LLM didn\'t surface it'; return 'held'; };
+  // card-schema keys (buyerProfileModel setL overlay + deterministic slots). When one of these is "held", it is NOT
+  // rejected — it is de-DUPLICATED because it already renders on the fixed card above. Honest label vs "pruned by critic"
+  // (owner confusion: verdict says critic kept 28/28, yet these showed "pruned").
+  const CARD_KEYS = new Set(['business_type', 'business_stage', 'annual_procurements', 'annual_turnover', 'business_objective', 'sourcing_channel', 'preferred_suppliers', 'procurement_approach', 'procurement_challenge', 'target_customers', 'selling_channel', 'sales_geography', 'business_story', 'business_persona', 'buyer_maturity', 'buyer_intent', 'deal_readiness', 'b2b_b2c', 'sub_industry', 'retail_wholesale', 'scale', 'procurement_model', 'purchase_frequency', 'location_sourcing_preference', 'price_vs_quality', 'payment_mode', 'delivery_timeline']);
+  const heldReason = (f: FinalAttr): string => { const v = String(f.value || '').trim(); const unknownVal = !v || /^(unknown|—|-|n\/?a|none|not (known|available|specified)|tbd|\?)$/i.test(v); if (unknownVal) return 'unknown — no value'; if (f.pruned) return CARD_KEYS.has(f.key) ? 'shown on the card above (de-duplicated here · not rejected)' : 'de-prioritised by the critic (twin shows the top set · not rejected)'; if (!!f.llm && !f.llm.grounded) return 'ungrounded — citations don\'t entail the value'; if (msynth.status === 'done' && f.provenance === 'arithmetic') return 'arithmetic-only — LLM didn\'t surface it'; return 'held'; };
   // click an evidence id (fN) in the LLM reasoning → scroll to + flash that exact line in the L3 "evidence sent" list.
   // The line lives nested inside Debug › L3 › node › evidence — all collapsed — so we open EVERY ancestor <details>.
   const jumpToFact = (id: string) => setHighlightFact(id);
@@ -778,6 +801,16 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
               {(['business', 'ai', 'system'] as const).map((lv) => (<button key={lv} onClick={() => setLevel(lv)} className={`rounded-md px-2 py-1 capitalize transition ${level === lv ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>{lv === 'business' ? '👔 Business' : lv === 'ai' ? '🤖 AI' : '⚙️ Raw'}</button>))}
             </div>
           )}
+          {/* 3 speed tiers — superfast (default) · fast (+ call transcripts) · normal (+ Parallel.ai). Switching re-pulls. */}
+          <div className="flex items-center rounded-lg border border-gray-200 bg-white text-[11px] font-semibold overflow-hidden">
+            {(['superfast', 'fast', 'normal'] as const).map((t) => (
+              <button key={t} onClick={() => setTier(t)} title={TIER_LABEL[t] + ' — ✓ = pulled this session (instant switch-back) · ⏳ = pulling now'} className={'px-2 py-1 capitalize ' + (tier === t ? 'bg-teal-600 text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800')}>
+                {t}{loading && tier === t ? <span className="ml-0.5 animate-pulse">⏳</span> : (glid && hasCachedTier(glid, t)) ? <span className={'ml-0.5 ' + (tier === t ? 'text-teal-100' : 'text-emerald-500')}>✓</span> : null}
+              </button>
+            ))}
+          </div>
+          {/* Fresh pull — bypass BOTH caches (in-session per-tier + n8n's 24h result-cache via ?nocache=1) and re-hit every source live. */}
+          <button onClick={() => { freshRef.current = true; setRefreshKey((k) => k + 1); }} title="Fresh pull — ignore BOTH caches (this session's per-tier cache + n8n's 24h result-cache) and re-hit every source LIVE. Slower; use when you need the very latest data (or to abandon a stuck pull)." className="text-[12px] rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-700 hover:text-amber-900">↻ Fresh pull</button>
           {/* Readable mode (#8) — zoom the debug view; persisted. A− smaller · A+ larger. */}
           <div className="flex items-center rounded-lg border border-gray-200 bg-white text-[13px] font-semibold overflow-hidden" title="Readable mode — zoom the debug view (saved). A− smaller · A+ larger.">
             <button onClick={() => bumpZoom(-0.15)} className="px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800" aria-label="smaller text">A−</button>
@@ -785,11 +818,22 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
             <button onClick={() => bumpZoom(0.15)} className="px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800" aria-label="larger text">A+</button>
           </div>
           {glid && <button onClick={() => window.open(`?profile=${encodeURIComponent(glid)}`, '_blank', 'noopener')} title="Open the standalone TrustSEAL card for this GLID (fed by the independent bi-buyer-profile endpoint + server-side LLM) in a new tab" className="text-indigo-700 hover:text-indigo-900 text-[12px] rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1">open standalone ↗</button>}
-          {ledger && (fullPending
-            ? <span title="Download unlocks once the FULL pull (web OSINT + Udyam) completes and the profile is ready" className="text-gray-400 text-[12px] rounded-full border border-gray-200 bg-gray-50 px-3 py-1 cursor-not-allowed inline-flex items-center gap-1"><span className="w-2.5 h-2.5 border-2 border-gray-300 border-t-transparent rounded-full animate-spin" />⬇ Download (enriching…)</span>
-            : <button onClick={() => downloadInteractiveHtml({ v: 1, glid, stampIso: new Date().toISOString(), rich: getEnrichmentRich(), legacy: raw, serverTrace: getServerTrace(), health: getEnrichmentHealth() as unknown[], llmRaw: getLLMRaw() as Record<string, unknown>, extractOut: msynth.out, extractUsage: msynth.usage, extractMs: msynth.ms, pruneKeep: prune.keep, uc2Map: uc2Map as Record<string, unknown>, readZoom }, { fallbackRich: getEnrichmentRich() ?? raw })} title="Download a FULLY-INTERACTIVE offline copy — the whole app + this GLID's data baked in. Opens with the network off; every band, JSON tree, expand/collapse and scroll works exactly like live. (Run `npm run build:offline` once to generate the shell.)" className="text-teal-700 hover:text-teal-900 text-[12px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1">⬇ Download</button>)}
+          {/* Download is available as soon as THIS tier's pull returns (no waiting for OSINT/Parallel — tiers made that gate obsolete). */}
+          {ledger && <button onClick={() => downloadInteractiveHtml({ v: 1, glid, stampIso: new Date().toISOString(), rich: getEnrichmentRich(), legacy: raw, serverTrace: getServerTrace(), health: getEnrichmentHealth() as unknown[], llmRaw: getLLMRaw() as Record<string, unknown>, extractOut: msynth.out, extractUsage: msynth.usage, extractMs: msynth.ms, pruneKeep: prune.keep, uc2Map: uc2Map as Record<string, unknown>, readZoom }, { fallbackRich: getEnrichmentRich() ?? raw })} title="Download a FULLY-INTERACTIVE offline copy — the whole app + this GLID's data baked in. Opens with the network off; every band, JSON tree, expand/collapse and scroll works exactly like live. (Run `npm run build:offline` once to generate the shell.)" className="text-teal-700 hover:text-teal-900 text-[12px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1">⬇ Download</button>}
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm rounded-full border border-gray-200 px-3 py-1">✕ close</button>
         </div>
+      </div>
+
+      {/* All-3-modes legend — always visible so the modes are self-explaining (owner: "labels missing, I don't know
+          what these modes are"). Active tier bolded; full description of the active tier on its own line. */}
+      <div className="mb-2 text-[11px] text-gray-600 flex items-center flex-wrap gap-x-2 gap-y-0.5">
+        <span className="text-gray-400">Speed mode:</span>
+        {(['superfast', 'fast', 'normal'] as const).map((t) => (
+          <span key={t} className={tier === t ? 'font-semibold text-teal-700' : 'text-gray-400'}>
+            <span className="capitalize">{t}</span> <span className="font-normal text-gray-400">({TIER_SHORT[t]})</span>
+          </span>
+        ))}
+        <span className="basis-full text-[10px] text-gray-400 mt-0.5">→ {TIER_LABEL[tier]}</span>
       </div>
 
       {/* V10: the L1–L7 Ledger is the sole view (legacy Observatory/Twin/System tabs retired — the extract twin is the one authority). */}
@@ -882,13 +926,58 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         const failedN = Number(callsSum?.failed_count ?? 0);
         const callStatuses = Array.isArray(callsSum?.statuses) ? callsSum!.statuses! : [];
         const renderTurns = (t: unknown): string => Array.isArray(t) ? (t as Array<Record<string, unknown>>).map((x) => `${String(x.speaker || '?')}: ${String(x.utterance || '')}`).join('\n') : String(t ?? '');
-        if (redashN > 0) channels.push({ key: 'calls', label: `📞 Call recordings · ${callsArr.length} of ${redashN} transcribed${failedN ? ` · ${failedN} failed` : ''}`, count: callsArr.length, tone: 'violet', sample: String(callsArr[0]?.topic ?? renderTurns(callsArr[0]?.transcript_en)).slice(0, 80), body: (<div className="space-y-1">{callsArr.map((c, i) => { const o = c as Record<string, unknown>; return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="text-[10px] font-semibold text-gray-600">{String(o.date || '')}{o.topic ? ` · ${String(o.topic)}` : ''}{o.language ? ` · ${String(o.language)}` : ''}</div><div className="text-[10.5px] text-gray-500 mt-0.5 whitespace-pre-wrap break-words">{renderTurns(o.transcript_en)}</div></div>); })}{callStatuses.filter((s) => (s as Record<string, unknown>).status !== 'transcribed').length > 0 && (<div className="text-[9.5px] text-rose-500 mt-1">Not transcribed: {callStatuses.filter((s) => (s as Record<string, unknown>).status !== 'transcribed').map((s) => String((s as Record<string, unknown>).url || '').split('/').pop()).join(', ')}</div>)}</div>) });
+        // v18 Go-schema: calls/pns_calls now carry a STRUCTURED `extraction{}` (products · buyer_intent · lead_tag ·
+        // call_type · application · language) with status:"extracted" and NO transcript_en. The LLM composer migrated
+        // (emitCallExtraction) but these humanised bodies still read transcript_en/status==='transcribed' → blank + a
+        // false "Not transcribed". `isDone` treats extracted as success; `renderCallExtraction` mirrors the composer
+        // (condensed, with a `more` expander) and keeps transcript_en as the legacy fallback.
+        const isDone = (s: unknown): boolean => { const v = String(s ?? ''); return v === 'transcribed' || v === 'extracted' || v === 'success'; };
+        const drTone = (d: string): string => /hot/i.test(d) ? 'bg-rose-50 text-rose-700 border-rose-200' : /warm/i.test(d) ? 'bg-amber-50 text-amber-700 border-amber-200' : /cold/i.test(d) ? 'bg-gray-50 text-gray-500 border-gray-200' : 'bg-violet-50 text-violet-700 border-violet-200';
+        const renderCallExtraction = (o: Record<string, unknown>) => {
+          const O = (v: unknown) => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
+          const A = (v: unknown) => (Array.isArray(v) ? v as unknown[] : []);
+          const S = (v: unknown) => (v == null ? '' : String(v));
+          const ex = O(o.extraction); const md = O(ex.metadata);
+          const ct = O(md.call_type); const persona = O(O(ct.evidence).buyer_persona); const bi = O(md.buyer_intent); const lead = O(ex.lead_tag);
+          const dr = S(lead.deal_readiness) || S(o.deal_readiness); const drReason = S(lead.deal_readiness_reason) || S(o.deal_readiness_reason);
+          const intentLevel = S(bi.intent_level) || S(o.intent_level); const intentNarr = S(bi.narrative) || S(o.intent_narrative);
+          const typeStr = S(ct.type) || S(o.type) || S(o.b2b_or_b2c); const personaStr = S(persona.persona_category) || S(o.persona);
+          const app = S(md.intended_application) || S(o.intended_application); const lang = S(md.primary_language) || S(o.primary_language);
+          const pay = O(ex.payment); const outcome = O(md.call_outcome);
+          const products = A(ex.products).map((p) => { const po = O(p); return {
+            name: S(po.product_name),
+            specs: A(po.specifications).map((sp) => { const so = O(sp); return S(so.name) && S(so.value) ? `${S(so.name)}: ${S(so.value)}${S(so.unit) ? ' ' + S(so.unit) : ''}` : ''; }).filter(Boolean),
+            qty: (() => { const q = O(po.quantity_required); return S(q.value) ? `${S(q.value)}${S(q.unit) ? ' ' + S(q.unit) : ''}` : ''; })(),
+            price: (() => { const pr = O(po.price); return S(pr.value) ? `${S(pr.value)}${S(pr.currency) ? ' ' + S(pr.currency) : ''}${S(pr.price_unit) ? '/' + S(pr.price_unit) : ''}` : ''; })(),
+          }; }).filter((p) => p.name);
+          if (!(dr || intentLevel || products.length || typeStr || personaStr || app || lang || intentNarr)) return null;
+          const hasMore = !!(app || lang || S(pay.payment_mode) || S(outcome.category) || products.some((p) => p.specs.length || p.price));
+          return (<div className="mt-0.5 space-y-0.5">
+            <div className="flex flex-wrap gap-1 items-center">
+              {intentLevel && <span className="text-[9px] px-1 rounded bg-violet-50 text-violet-700 border border-violet-200">intent {intentLevel}</span>}
+              {dr && <span className={`text-[9px] px-1 rounded border ${drTone(dr)}`}>deal {dr}</span>}
+              {typeStr && <span className="text-[9px] px-1 rounded bg-slate-50 text-slate-600 border border-slate-200">{typeStr}</span>}
+              {personaStr && <span className="text-[9px] px-1 rounded bg-slate-50 text-slate-600 border border-slate-200">{personaStr}</span>}
+            </div>
+            {intentNarr && <div className="text-[10.5px] text-gray-600">{intentNarr}</div>}
+            {products.length > 0 && <div className="text-[10px] text-gray-500">wants: {products.map((p) => `${p.name}${p.qty ? ` (${p.qty})` : ''}`).join(' · ')}</div>}
+            {drReason && <div className="text-[9.5px] text-gray-400 italic">{drReason}</div>}
+            {hasMore && (<details className="text-[9.5px] text-gray-500"><summary className="cursor-pointer text-gray-400">more</summary><div className="ml-2 mt-0.5 space-y-0.5">
+              {app && <div>application: {app}</div>}
+              {lang && <div>language: {lang}</div>}
+              {products.filter((p) => p.specs.length || p.price).map((p, i) => (<div key={i}>{p.name}: {[p.specs.join(' · '), p.price ? `rate ${p.price}` : ''].filter(Boolean).join(' · ')}</div>))}
+              {S(pay.payment_mode) && <div>payment: {S(pay.payment_mode)}{S(pay.payment_details) ? ` — ${S(pay.payment_details)}` : ''}</div>}
+              {S(outcome.category) && <div>outcome: {S(outcome.category)}{S(outcome.conclusion_notes) ? ` — ${S(outcome.conclusion_notes)}` : ''}</div>}
+            </div></details>)}
+          </div>);
+        };
+        if (redashN > 0) channels.push({ key: 'calls', label: `📞 Call recordings · ${callsArr.length} of ${redashN} extracted${failedN ? ` · ${failedN} failed` : ''}`, count: callsArr.length, tone: 'violet', sample: String(callsArr[0]?.topic ?? callsArr[0]?.deal_readiness ?? renderTurns(callsArr[0]?.transcript_en)).slice(0, 80), body: (<div className="space-y-1">{callsArr.map((c, i) => { const o = c as Record<string, unknown>; const ext = renderCallExtraction(o); return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="text-[10px] font-semibold text-gray-600">{String(o.date || '')}{o.topic ? ` · ${String(o.topic)}` : ''}{o.language ? ` · ${String(o.language)}` : ''}</div>{ext || (o.transcript_en ? <div className="text-[10.5px] text-gray-500 mt-0.5 whitespace-pre-wrap break-words">{renderTurns(o.transcript_en)}</div> : <div className="text-[9.5px] text-gray-400 mt-0.5">extracted · no transcript retained</div>)}</div>); })}{callStatuses.filter((s) => !isDone((s as Record<string, unknown>).status)).length > 0 && (<div className="text-[9.5px] text-rose-500 mt-1">Not extracted: {callStatuses.filter((s) => !isDone((s as Record<string, unknown>).status)).map((s) => String((s as Record<string, unknown>).url || '').split('/').pop()).join(', ')}</div>)}</div>) });
         // V14 — PNS calls (separate health node): sellers called + product/category/circle/offer_id + transcript
         const pnsSum = (getEnrichmentRich() as { sources?: { pns_calls?: { summary?: { calls?: Array<Record<string, unknown>>; redash_records?: number; call_count?: number } } } } | null)?.sources?.pns_calls?.summary;
         const pnsArr = Array.isArray(pnsSum?.calls) ? pnsSum!.calls! : [];
         const pnsN = Number(pnsSum?.redash_records ?? pnsArr.length);
         const pnsOk = Number(pnsSum?.call_count ?? pnsArr.filter((c) => (c as Record<string, unknown>).status === 'transcribed').length);
-        if (pnsN > 0) channels.push({ key: 'pns_calls', label: `📞 PNS calls · ${pnsArr.length} sellers called · ${pnsOk} transcribed`, count: pnsArr.length, tone: 'violet', sample: String(pnsArr[0]?.product ?? pnsArr[0]?.mcat ?? '').slice(0, 80), body: (<div className="space-y-1">{pnsArr.map((c, i) => { const o = c as Record<string, unknown>; return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="text-[10px] font-semibold text-gray-600">{String(o.product || o.mcat || '—')}{o.mcat && o.product ? ` · ${String(o.mcat)}` : ''}{o.circle ? ` · ${String(o.circle)}` : ''}{o.date ? ` · ${String(o.date)}` : ''}{o.offer_id ? ` · offer ${String(o.offer_id)}` : ''}{o.status !== 'transcribed' ? <span className="text-gray-400"> · (no transcript)</span> : ''}</div>{!!o.transcript_en && (Array.isArray(o.transcript_en) ? (o.transcript_en as unknown[]).length > 0 : true) && <div className="text-[10.5px] text-gray-500 mt-0.5 whitespace-pre-wrap break-words">{renderTurns(o.transcript_en)}</div>}</div>); })}</div>) });
+        if (pnsN > 0) channels.push({ key: 'pns_calls', label: `📞 PNS calls · ${pnsArr.length} sellers called · ${pnsOk} extracted`, count: pnsArr.length, tone: 'violet', sample: String(pnsArr[0]?.product ?? pnsArr[0]?.mcat ?? '').slice(0, 80), body: (<div className="space-y-1">{pnsArr.map((c, i) => { const o = c as Record<string, unknown>; const ext = renderCallExtraction(o); const hasT = !!o.transcript_en && (Array.isArray(o.transcript_en) ? (o.transcript_en as unknown[]).length > 0 : true); return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="text-[10px] font-semibold text-gray-600">{String(o.product || o.mcat || '—')}{o.mcat && o.product ? ` · ${String(o.mcat)}` : ''}{o.circle ? ` · ${String(o.circle)}` : ''}{o.date ? ` · ${String(o.date)}` : ''}{o.offer_id ? ` · offer ${String(o.offer_id)}` : ''}{!ext && !hasT && !isDone(o.status) ? <span className="text-gray-400"> · (no data)</span> : ''}</div>{ext}{!ext && hasT && <div className="text-[10.5px] text-gray-500 mt-0.5 whitespace-pre-wrap break-words">{renderTurns(o.transcript_en)}</div>}</div>); })}</div>) });
         // V15.1 — IDfy sources: separate health nodes with PROVENANCE badge (which API/version · status · returned/requested · fetched · errors).
         // Renders even when empty-but-attempted, so "buyer has none" vs "API errored" vs "timed out" is never silent (kills the ambiguity).
         const idfyMeta = (sum: { _meta?: Record<string, unknown> } | undefined) => { const m = sum?._meta; if (!m) return null; const st = String(m.status ?? '?'); const stCls = st === 'success' ? 'text-emerald-600' : (st === 'error' || st === 'timeout') ? 'text-rose-600' : (st === 'no_data' || st === 'skipped') ? 'text-gray-400' : 'text-amber-600'; const errStr = m.error_msg ? String(m.error_msg) : (Array.isArray(m.errors) && (m.errors as unknown[]).length ? String((m.errors as unknown[])[0]) : ''); return (<div className="text-[9px] text-gray-400 mb-1 flex flex-wrap gap-x-2 items-center border-b border-gray-100 pb-0.5"><span className="font-mono text-gray-500">{String(m.api ?? m.source ?? 'idfy')}</span><span className={stCls}>● {st}</span>{m.requested != null && <span>{String(m.returned ?? 0)}/{String(m.requested)} returned</span>}{!!m.fetched_at && <span>{String(m.fetched_at).slice(0, 16).replace('T', ' ')}</span>}{!!errStr && <span className="text-rose-500 break-all">err: {errStr}</span>}</div>); };
@@ -922,28 +1011,58 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         const gdDetails = Array.isArray(gdU?.gst_details) ? gdU!.gst_details! : [];
         if (gdDetails.length) channels.push({ key: 'gst_detail_union', label: `🎯 GST consensus · ${gdDetails.length} GSTIN · Sign3⊕IDfy⊕Befisc`, count: gdDetails.length, tone: 'emerald', sample: String((gdDetails[0] as Record<string, unknown>)?.gstin ?? ''), body: (<div className="space-y-2">{gdDetails.map((d, i) => { const o = d as Record<string, unknown>; const fields = (o.fields || {}) as Record<string, Record<string, unknown>>; const fbd = Array.isArray(o.found_by_detail) ? (o.found_by_detail as string[]) : []; return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="text-[10px] font-semibold text-gray-600 mb-0.5">{String(o.gstin)} <span className="text-[9px] font-normal text-gray-400">detail: {fbd.join(' + ')}</span></div><div className="space-y-0.5">{Object.keys(fields).map((f) => { const fv = fields[f] || {}; const vbv = (fv.values_by_vendor || {}) as Record<string, unknown>; const vendors = Object.keys(vbv); const vstr = (x: unknown) => Array.isArray(x) ? (x as unknown[]).join(', ') : String(x ?? ''); const canon = vstr(fv.canonical); const pairs = vendors.map((v) => `${v}:"${vstr(vbv[v])}"`).join(' vs '); return (<div key={f} className="flex items-start gap-2 text-[9.5px]"><span className="w-28 shrink-0 text-gray-400">{f.replace(/_/g, ' ')}</span>{fv.all_agree === true && vendors.length >= 2 ? <span className="text-emerald-600 font-semibold">✓✓ {canon} <span className="font-normal text-[8.5px] text-emerald-500">({vendors.join('+')})</span></span> : vendors.length === 1 ? <span className="text-amber-600">✓ {vstr(vbv[vendors[0]])} <span className="text-[8.5px] text-amber-500">(single · {vendors[0]})</span></span> : <span className="text-rose-600">⚠ {pairs}</span>}</div>); })}</div></div>); })}</div>) });
         // V16.2 — Web OSINT (Parallel.ai deep web-search): digital footprint / scale / legitimacy. Expandable to fields + citations + raw; renders even on timeout/skip.
-        const webSum = (getEnrichmentRich() as { sources?: { web_osint?: { summary?: Record<string, unknown>; basis?: unknown[]; run_id?: string; query?: Record<string, unknown>; __health?: Record<string, unknown> } } } | null)?.sources?.web_osint;
+        const webSum = (getEnrichmentRich() as { sources?: { web_osint?: { summary?: Record<string, unknown>; basis?: unknown[]; proofs?: unknown[]; run_id?: string; match_confidence?: string; query?: Record<string, unknown>; queries_run?: unknown[]; __health?: Record<string, unknown> } } } | null)?.sources?.web_osint;
         const webC = (webSum?.summary && typeof webSum.summary === 'object') ? webSum.summary as Record<string, unknown> : null;
         const webH = (webSum?.__health || {}) as Record<string, unknown>;
-        const webStatus = String(webH.status ?? '');
-        // an empty run_id + 0 basis with a buyer that HAS anchors = the Parallel call FAILED to return a result object,
-        // NOT a search that found nobody. Distinguish it so a silent no-op stops reading as benign "no data". (Fix #9)
-        const webFailed = webH.ok === false || ((webStatus === 'no_data' || webStatus === 'error') && !String(webH.run_id ?? '').trim());
+        // health now NESTS per engine (__health.parallel / __health.gemini): run_id + citation counts live UNDER
+        // .parallel, so the old top-level reads always printed "(empty) · 0 citations" even on a 13-proof success.
+        const webP = (webH.parallel || {}) as Record<string, unknown>;
+        const webG = (webH.gemini || {}) as Record<string, unknown>;
+        const webProofs = Array.isArray(webSum?.proofs) ? webSum!.proofs! : (Array.isArray(webSum?.basis) ? webSum!.basis! : []);
+        const webRunId = String(webP.run_id ?? webH.run_id ?? (webSum as { run_id?: unknown } | undefined)?.run_id ?? '').trim();
+        const webCitations = Number(webP.proofs_count ?? webP.basis_count ?? webH.basis_count ?? webProofs.length) || 0;
+        const webStatus = String(webP.status ?? webH.status ?? '');
+        // v38 (audit gaps 2+3): show BOTH engines. Gemini(gweb) runs in fast+normal; Parallel runs normal-only (skipped in fast BY DESIGN).
+        const geminiRan = webG && Object.keys(webG).length > 0;
+        const gStatus = String(webG.status ?? (geminiRan ? 'success' : ''));
+        const gProofs = Number(webG.proofs_count ?? webG.basis_count ?? 0) || 0;
+        const parallelSkipped = String(webP.status) === 'skipped';
         const webQ = (webSum?.query && typeof webSum.query === 'object') ? webSum.query as Record<string, unknown> : null;
         const webQLine = webQ ? ['company_name', 'gst_number', 'pan', 'mobile', 'email', 'city', 'industry_hint', 'udyam_number', 'contact_name'].map((k) => webQ[k]).filter((v) => v != null && v !== '').map(String).join(' · ') : '';
         const webFields = webC ? Object.keys(webC).filter((k) => { const v = webC[k]; return v != null && v !== '' && !(Array.isArray(v) && !v.length); }) : [];
-        if (webFields.length || webSum?.__health) channels.push({ key: 'web_osint', label: `🌐 Web OSINT · ${webFields.length ? `${webFields.length} fields` : (webStatus || 'no data')} · Parallel.ai`, count: webFields.length, tone: 'sky', sample: String(webC?.business_type ?? webC?.industry ?? webStatus).slice(0, 80), body: (<div>
-          <div className="text-[9px] text-gray-400 mb-1 flex flex-wrap gap-x-2 items-center border-b border-gray-100 pb-0.5"><span className="font-mono text-gray-500">parallel/core</span><span className={webStatus === 'success' ? 'text-emerald-600' : (webStatus === 'timeout' || webStatus === 'error' || webFailed) ? 'text-rose-600' : 'text-gray-400'}>● {webFailed ? 'FAILED (empty run)' : (webStatus || '?')}</span><span className="font-mono">run {String(webH.run_id ?? '').trim() || '(empty)'}</span><span>{String(webH.basis_count ?? 0)} citations</span>{!!webH.fetched_at && <span>{String(webH.fetched_at).slice(0, 16).replace('T', ' ')}</span>}</div>
+        // a SUCCESSFUL Parallel run (fields OR citations OR status=success) is NEVER a failure — even when Gemini's
+        // identity-match verdict is "none". FAILED = we HAD anchors to search but the run returned nothing usable.
+        const webHasData = webFields.length > 0 || webCitations > 0 || webStatus === 'success' || gProofs > 0;
+        // FAILED only when an engine that SHOULD have produced data errored/emptied — NEVER when Parallel was skipped by
+        // tier (fast) and Gemini ran (even a match=none Gemini is "no confident match", not a failure). Fixes gap-3 false-FAILED.
+        const webFailed = !webHasData && ((!parallelSkipped && (webH.ok === false || webStatus === 'error' || webStatus === 'no_data' || webStatus === 'failed_empty')) || (geminiRan && (gStatus === 'error' || gStatus === 'no_data')));
+        // Gemini's identity-match is SEPARATE from a Parallel failure: match=none ⇒ "found a footprint but couldn't
+        // tie it to THIS buyer" (unverified leads), NOT "no data".
+        const webMatch = String((webSum as { match_confidence?: unknown } | undefined)?.match_confidence ?? webG.match_confidence ?? '').toLowerCase();
+        const webWeakMatch = webHasData && (webMatch === 'none' || webMatch === 'low');
+        const webEngineLabel = [geminiRan ? 'Gemini' : '', (!parallelSkipped && (webP.status || webRunId)) ? 'Parallel' : ''].filter(Boolean).join(' + ') || 'Parallel.ai';
+        if (webFields.length || webSum?.__health) channels.push({ key: 'web_osint', label: `🌐 Web OSINT · ${webFields.length ? `${webFields.length} fields` : (webFailed ? 'FAILED' : (webHasData ? 'ok' : 'no data'))} · ${webEngineLabel}`, count: webFields.length, tone: 'sky', sample: String(webC?.business_type ?? webC?.industry ?? (gStatus || webStatus)).slice(0, 80), body: (<div>
+          {/* v38 — per-engine health strip: Gemini(gweb) runs fast+normal · Parallel runs normal-only */}
+          <div className="text-[9px] text-gray-400 mb-1 flex flex-wrap gap-x-3 gap-y-0.5 items-center border-b border-gray-100 pb-0.5">
+            {geminiRan && (<span className="inline-flex items-center gap-1"><span className="font-mono text-indigo-500">gemini/gweb</span><span className={gStatus === 'success' ? 'text-emerald-600' : (gStatus === 'error' || gStatus === 'no_data') ? 'text-rose-600' : 'text-gray-400'}>● {gStatus || '?'}</span>{gProofs > 0 && <span>{gProofs} proofs</span>}{webMatch && <span>match:{webMatch}</span>}</span>)}
+            <span className="inline-flex items-center gap-1"><span className="font-mono text-gray-500">parallel/core</span><span className={parallelSkipped ? 'text-gray-400' : webHasData ? 'text-emerald-600' : (webStatus === 'timeout' || webFailed) ? 'text-rose-600' : 'text-gray-400'}>● {parallelSkipped ? 'skipped · normal-mode only' : (webFailed ? 'FAILED (empty run)' : (webStatus || (webHasData ? 'success' : '?')))}</span>{!parallelSkipped && <><span className="font-mono">run {webRunId || '(empty)'}</span><span>{webCitations} citations</span></>}</span>
+            {!!(webP.fetched_at ?? webG.fetched_at ?? webH.fetched_at) && <span>{String(webP.fetched_at ?? webG.fetched_at ?? webH.fetched_at).slice(0, 16).replace('T', ' ')}</span>}
+          </div>
           {webQLine ? (<div className="text-[9px] text-sky-700 mb-1">🔎 queried: <span className="font-mono">{webQLine}</span></div>) : null}
+          {/* v44 — gweb now self-reports the literal search queries it ran (coverage audit: did it actually search the PAN/GSTIN strings?) */}
+          {Array.isArray(webSum?.queries_run) && (webSum.queries_run as unknown[]).length > 0 ? (<div className="text-[9px] text-indigo-600 mb-1">🔍 gweb queries run ({(webSum.queries_run as unknown[]).length}): <span className="font-mono">{(webSum.queries_run as unknown[]).map(String).join(' · ').slice(0, 400)}</span></div>) : null}
+          {webWeakMatch ? (<div className="text-[9px] text-amber-600 mb-1">⚠ web found a footprint but couldn't confirm it belongs to THIS buyer (identity match: {webMatch || 'none'}) — treat as unverified leads.</div>) : null}
+          {/* v44 — field-level namesake guard (n8n websearch-parse): fields whose proofs cite none of THIS buyer's hard anchors */}
+          {Array.isArray(webC?.__possible_namesake_fields) && (webC.__possible_namesake_fields as unknown[]).length > 0 ? (<div className="text-[9px] text-rose-600 mb-1">⚠ possible NAMESAKE fields (proof not tied to this buyer's IDs/city/phone): <span className="font-mono">{(webC.__possible_namesake_fields as unknown[]).map(String).join(', ')}</span> — each flagged field may belong to a similarly-named other business; the LLM receives them tagged as unverified.</div>) : null}
           {webC ? (<div className="space-y-1">
-            {(([['business_type', 'type'], ['industry', 'industry'], ['official_address', 'address'], ['website', 'website'], ['employee_count', 'employees'], ['turnover_estimate', 'turnover'], ['year_established', 'established'], ['udyam_number', 'udyam']] as Array<[string, string]>).map(([k, lbl]) => { const v = webC[k]; if (v == null || v === '') return null; return (<div key={k} className="text-[10px] flex gap-2"><span className="w-24 shrink-0 text-gray-400">{lbl}</span><span className="text-gray-700 break-words">{String(v)}</span></div>); }))}
+            {(([['business_type', 'type'], ['industry', 'industry'], ['official_address', 'address'], ['website', 'website'], ['employee_count', 'employees'], ['turnover_estimate', 'turnover'], ['year_established', 'established'], ['udyam_number', 'udyam']] as Array<[string, string]>).map(([k, lbl]) => { const v = webC[k]; if (v == null || v === '') return null; const flagged = Array.isArray(webC.__possible_namesake_fields) && (webC.__possible_namesake_fields as unknown[]).map(String).includes(k); return (<div key={k} className="text-[10px] flex gap-2"><span className="w-24 shrink-0 text-gray-400">{lbl}</span><span className={`break-words ${flagged ? 'text-rose-600' : 'text-gray-700'}`}>{String(v)}{flagged ? ' ⚠namesake?' : ''}</span></div>); }))}
             {(['linkedin', 'facebook', 'instagram', 'twitter_x'] as const).some((k) => webC[k]) && <div className="text-[9.5px] flex flex-wrap gap-1 mt-0.5">{(['linkedin', 'facebook', 'instagram', 'twitter_x'] as const).map((k) => { const o = (webC[k] || {}) as Record<string, unknown>; if (!o.url && !o.activity_level) return null; return <span key={k} className="px-1 rounded bg-sky-50 text-sky-700 border border-sky-200">{k}{o.activity_level ? ` · ${String(o.activity_level)}` : ''}</span>; })}</div>}
             {(() => { const gb = (webC.google_business || {}) as Record<string, unknown>; return (gb.exists === true || gb.rating) ? <div className="text-[9.5px] text-gray-600">Google Business: {gb.rating ? `${String(gb.rating)}★` : ''} {gb.reviews_count ? `(${String(gb.reviews_count)} reviews)` : ''}</div> : null; })()}
             {Array.isArray(webC.other_businesses) && (webC.other_businesses as unknown[]).length > 0 && <div className="text-[9.5px] text-gray-500">other businesses: {(webC.other_businesses as unknown[]).map(String).join('; ')}</div>}
             {Array.isArray(webC.recent_news) && (webC.recent_news as unknown[]).length > 0 && <div className="text-[9.5px] text-gray-500">news: {(webC.recent_news as unknown[]).slice(0, 3).map(String).join(' | ')}</div>}
-            {Array.isArray(webSum?.basis) && (webSum!.basis as unknown[]).length > 0 && <details open className="text-[9px] text-gray-400 mt-0.5"><summary className="cursor-pointer">citations / basis ({(webSum!.basis as unknown[]).length})</summary><div className="ml-2 mt-0.5 font-mono whitespace-pre-wrap break-words">{JSON.stringify(webSum!.basis).slice(0, 2000)}</div></details>}
+            {webProofs.length > 0 && <details open className="text-[9px] text-gray-400 mt-0.5"><summary className="cursor-pointer">citations / proofs ({webProofs.length})</summary><div className="ml-2 mt-0.5 font-mono whitespace-pre-wrap break-words">{JSON.stringify(webProofs).slice(0, 2000)}</div></details>}
             <details open className="text-[9px] text-gray-400 mt-0.5"><summary className="cursor-pointer">raw web_osint</summary><div className="ml-2 mt-0.5 font-mono whitespace-pre-wrap break-words">{JSON.stringify(webC).slice(0, 2500)}</div></details>
-          </div>) : <div className={`text-[10px] ${webFailed ? 'text-rose-500' : 'text-gray-400'}`}>{webFailed ? '⚠ web enrich FAILED — Parallel returned an empty run (0 citations) despite anchors on file; not a genuine no-result. Retry.' : webStatus === 'timeout' ? 'web search timed out (partial run — no data this pull)' : webStatus === 'skipped' ? 'no identity to search' : 'no web data returned'}</div>}
+          </div>) : <div className={`text-[10px] ${webFailed ? 'text-rose-500' : 'text-gray-400'}`}>{webFailed ? '⚠ web enrich FAILED — the engine returned an empty run despite anchors on file; not a genuine no-result. Retry.' : webStatus === 'timeout' ? 'web search timed out (partial run — no data this pull)' : (parallelSkipped && geminiRan) ? `Gemini web ran (fast mode)${webMatch ? ` — match: ${webMatch}` : ''}; no usable fields. Parallel.ai deep-search runs in NORMAL mode.` : parallelSkipped ? 'Parallel skipped (normal-mode only); no Gemini fields either.' : 'no web data returned'}</div>}
         </div>) });
         // V16.2.1 — Udyam / MSME registry (Sign3 pan_to_udyam → udyam_verification): authoritative SIZE band + NIC industry + org type + address.
         const udySum = (getEnrichmentRich() as { sources?: { udyam?: { summary?: { registrations?: Array<Record<string, unknown>> }; __health?: Record<string, unknown> } } } | null)?.sources?.udyam;
@@ -955,6 +1074,37 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           {queriedLine('PAN', qPan)}
           {udyRegs.length ? (<div className="space-y-1">{udyRegs.map((r, i) => { const o = r as Record<string, unknown>; const ind = Array.isArray(o.industry) ? (o.industry as Array<Record<string, unknown>>) : []; return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="text-[10px] font-semibold text-gray-600">{String(o.udyam_reg_no || '—')}{o.enterprise_name ? ` · ${String(o.enterprise_name)}` : ''}</div><div className="text-[9.5px] text-gray-500 mt-0.5 flex flex-wrap gap-2">{!!o.enterprise_type && <span className="px-1 rounded bg-amber-50 text-amber-700 border border-amber-200">{String(o.enterprise_type)}</span>}{!!o.organization_type && <span>{String(o.organization_type)}</span>}{!!o.major_activity && <span>{String(o.major_activity)}</span>}{!!o.date_of_incorporation && <span>inc {String(o.date_of_incorporation)}</span>}</div>{ind.length > 0 && <div className="text-[9.5px] text-gray-500 mt-0.5">NIC: {ind.map((x) => `${String(x.nic_code || '')} ${String(x.industry || x.activity || '')}`.trim()).slice(0, 3).join(' · ')}</div>}{!!o.official_address && <div className="text-[9.5px] text-gray-400 mt-0.5">{String(o.official_address)}</div>}</div>); })}</div>) : <div className="text-[10px] text-gray-400">{udySt === 'error' ? 'Udyam lookup error (API stabilizing)' : 'no Udyam/MSME registration found for this PAN'}</div>}
         </div>) });
+        // v38 — the 3 IndiaMART user APIs as first-class debug cards: health (ran · status · fetched_at) + parsed summary +
+        // EMPTY/NULL key surfacing (owner: "parse for empty null keys — they should surface") + full raw payload.
+        const imApis: Array<{ key: string; icon: string; label: string; tone: 'slate' | 'teal' | 'indigo' }> = [
+          { key: 'identity', icon: '👤', label: 'Detail · users/detail', tone: 'slate' },
+          { key: 'company_reg', icon: '🧾', label: 'CompRgst · users/otherdetail (verified GST/KYB)', tone: 'teal' },
+          { key: 'buyerprofile', icon: '📇', label: 'Buyer Profile · users/buyerprofile', tone: 'indigo' },
+        ];
+        for (const api of imApis) {
+          const node = (getEnrichmentRich() as { sources?: Record<string, { summary?: Record<string, unknown>; raw?: unknown; __health?: Record<string, unknown> }> } | null)?.sources?.[api.key];
+          if (!node) continue;
+          const h = (node.__health || (node.summary && (node.summary as Record<string, unknown>).__health) || {}) as Record<string, unknown>;
+          const st = String(h.status ?? (h.ok === false ? 'error' : (h.present ? 'success' : '?')));
+          const rawObj = (node.raw && typeof node.raw === 'object') ? node.raw as Record<string, unknown> : ((node.summary as Record<string, unknown>) || {});
+          const isEmpty = (v: unknown) => v == null || v === '' || (Array.isArray(v) && v.length === 0) || (typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v as object).length === 0);
+          const allKeys = Object.keys(rawObj).filter((k) => k !== '__health');
+          const nullKeys = allKeys.filter((k) => isEmpty(rawObj[k]));
+          const filledKeys = allKeys.filter((k) => !isEmpty(rawObj[k]));
+          channels.push({ key: `im_${api.key}`, label: `${api.icon} ${api.label} · ${st}`, count: filledKeys.length, tone: api.tone, sample: filledKeys.slice(0, 5).join(', '), body: (<div>
+            <div className="text-[9px] text-gray-400 mb-1 flex flex-wrap gap-x-2 items-center border-b border-gray-100 pb-0.5">
+              <span className={st === 'success' ? 'text-emerald-600' : st === 'error' || st === 'no_data' ? 'text-rose-600' : 'text-gray-400'}>● {st}</span>
+              <span>ran: yes</span>
+              {h.present != null && <span>present: {String(h.present)}</span>}
+              {!!h.api && <span className="font-mono text-gray-500">{String(h.api)}</span>}
+              {!!h.fetched_at && <span>{String(h.fetched_at).slice(0, 16).replace('T', ' ')}</span>}
+              <span className="text-gray-500">· {filledKeys.length} filled / {nullKeys.length} empty</span>
+            </div>
+            <details open className="text-[9px] text-gray-500 mt-0.5"><summary className="cursor-pointer">parsed summary</summary><div className="ml-2 mt-0.5 font-mono whitespace-pre-wrap break-words">{JSON.stringify(node.summary ?? {}, null, 1).slice(0, 2500)}</div></details>
+            {nullKeys.length > 0 && <details className="text-[9px] text-amber-600 mt-0.5"><summary className="cursor-pointer">empty / null keys ({nullKeys.length}) — surfaced, not hidden</summary><div className="ml-2 mt-0.5 text-gray-500 break-words">{nullKeys.join(', ')}</div></details>}
+            <details className="text-[9px] text-gray-400 mt-0.5"><summary className="cursor-pointer">raw API payload ({allKeys.length} keys)</summary><div className="ml-2 mt-0.5 font-mono whitespace-pre-wrap break-words">{JSON.stringify(rawObj, null, 1).slice(0, 3500)}</div></details>
+          </div>) });
+        }
         if (requirements.length) { const activeCt = requirements.filter((r) => !r.isExpired).length; channels.push({ key: 'rfq', label: `📑 Prev Requirements / BLs (${activeCt} active · ${requirements.length - activeCt} expired)`, count: requirements.length, tone: 'emerald', sample: requirements.map((r) => r.title).slice(0, 3).join(' · '), body: (<div className="space-y-1">{requirements.map((r, i) => { const rState = r.isExpired ? 'Stale' : (r.recencyDays != null ? (r.recencyDays <= 15 ? 'Fresh' : r.recencyDays <= 45 ? 'Moderate' : 'Stale') : null); return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="flex items-start gap-2"><span className="flex-1 min-w-0 text-[10.5px] font-semibold text-gray-700 break-words">{r.title}</span>{rState && <StatePill state={rState} />}{r.isExpired && <span className="text-[8.5px] px-1 rounded border bg-rose-50 text-rose-600 border-rose-200 shrink-0">EXPIRED</span>}</div>{(r.category || r.posted || r.expiry || r.recencyDays != null) && <div className="text-[9.5px] text-gray-400 flex flex-wrap gap-x-2 mt-0.5">{r.category && <span>{r.category}</span>}{r.posted && <span>· posted {r.posted}</span>}{r.expiry && <span>· exp {r.expiry}</span>}{r.recencyDays != null && <span>· {r.recencyDays}d old</span>}</div>}{r.specs.length > 0 && <div className="flex flex-wrap gap-1 mt-1">{r.specs.map((s, j) => (<span key={j} className="text-[9px] px-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">{s.k}: {s.v}</span>))}</div>}{r.description && <div className="text-[10px] text-gray-500 mt-0.5 italic">“{r.description}”</div>}{r.buyerNotes.filter((n) => n !== r.description).map((n, j) => (<div key={j} className="text-[10px] text-gray-500 mt-0.5 italic">“{n}”</div>))}</div>); })}</div>) }); }
         // §C — Befisc and Sign3 as SEPARATE readable channels (never a combined ambiguous "External").
         const extRows = (rows: NonNullable<typeof external>['befisc']) => (<div className="space-y-0.5">{rows.map((f, i) => (<div key={i} className="flex justify-between gap-2 text-[10.5px]"><span className="text-gray-400">{f.label} <span className="text-gray-300">· {f.source}</span></span><span className="text-gray-700">{f.value}</span></div>))}</div>);
@@ -1082,8 +1232,17 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         // ON CLICK (finalAttrDetail drill). identity_confidence + digital_footprint are NOT here (id-conf renders below
         // Available; digital_footprint/social-presence dropped per owner — not useful, data is presence-only).
         // V10 §D: purchase_frequency MOVED out of the buyer-profile rows → rendered with the requirement (left column). §J2/§J3: retail_wholesale + b2b_b2c added.
-        const PROFILE_KEYS = ['business_persona', 'buyer_maturity', 'sub_industry', 'buyer_intent', 'scale', 'retail_wholesale', 'b2b_b2c', 'price_vs_quality', 'procurement_model', 'communication', 'delivery_timeline', 'urgency', 'payment_mode', 'digital_footprint'];
-        const llmRows: L6ProfileRow[] = PROFILE_KEYS.map((k) => finals.find((f) => f.key === k)).filter((f): f is NonNullable<typeof f> => !!f).map((f) => ({ label: f.label, value: f.value, drill: finalAttrDetail(f), prov: 'llm' as const }));
+        // Audit-fix: business_objective · decision_maker · procurement_challenge · annual_procurements were deduced but
+        // rendered NOWHERE (orphans). Owner: surface on BOTH the card (buyerProfileModel setL) AND here in UC1.
+        // UC1 = "everything" (owner): the FULL inferred attribute set, grouped who → what → intent → how → market →
+        // behaviour → trust. The card shows a curated once-each subset; CARD_KEYS de-dupes those out of the "held" list.
+        const PROFILE_KEYS = ['business_persona', 'business_type', 'business_stage', 'buyer_maturity', 'sub_industry', 'scale', 'b2b_b2c', 'retail_wholesale', 'annual_turnover', 'annual_procurements', 'buyer_intent', 'deal_readiness', 'business_objective', 'use_case', 'procurement_challenge', 'procurement_model', 'purchase_frequency', 'sourcing_channel', 'preferred_suppliers', 'location_sourcing_preference', 'procurement_approach', 'price_vs_quality', 'payment_mode', 'delivery_timeline', 'urgency', 'target_customers', 'selling_channel', 'sales_geography', 'communication', 'primary_language', 'digital_footprint', 'identity_confidence', 'decision_maker'];
+        // CONFIDENCE GATE (owner): an attribute with confidence < 50 NEVER populates UC1 (or the dashboard card) — it
+        // stays only in the full "All attributes" list below (built from rawFinals, ungated) so it's still inspectable.
+        const llmRows: L6ProfileRow[] = PROFILE_KEYS.map((k) => finals.find((f) => f.key === k)).filter((f): f is NonNullable<typeof f> => !!f).filter((f) => (f.confidence ?? 0) >= 50).map((f) => ({ label: f.label, value: f.value, drill: finalAttrDetail(f), prov: 'llm' as const }));
+        // #6/#8 — the FULL attribute set: EVERY extracted key (incl. confidence < 50 hidden above), each expandable to its
+        // last raw line via finalAttrDetail. Rendered as the "All attributes" drawer below the UC1 rows (dashboard only).
+        const allAttrRows = rawFinals.map((f) => ({ label: f.label, value: String(f.value ?? '—'), conf: Math.round(f.confidence ?? 0), drill: finalAttrDetail(f) }));
         // identity_confidence → its OWN row right below the Available block (trust signal about the anchors). % on click.
         const idConfAttr = finals.find((f) => f.key === 'identity_confidence') || null;
         const identityConfidence = idConfAttr ? { value: idConfAttr.value, drill: finalAttrDetail(idConfAttr) } : undefined;
@@ -1139,7 +1298,32 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
             <div><span className="text-emerald-600">to reach full confidence: </span>a second independent source confirming the same age/gender.</div>
           </div>
         ) : undefined;
-        const buyerDetails = (idn || profileRows.length || availFinal.length) ? { name: resolvedName?.name || idn?.name, company: company ? { value: company.company, verified: company.verified, drill: companyDrill } : undefined, memberSince: humanizeSince(idn?.memberSince), memberSinceDrill, device: device ? { value: device.device, note: device.note, source: device.source } : undefined, responseCalls: pnsCards.length, responseReplies: waConvo?.inbound.buyerMsgs ?? 0, ageGender, ageGenderDrill, availability: availFinal, identityConfidence, profileRows } : null;
+        // BL lower card — FULL PII behind a click-to-reveal 🔒 (owner: full unmasked, but gated by a click on the buyer-facing card).
+        const piiRows: { label: string; value: string }[] = [];
+        const pushPii = (l: string, v?: string | null) => { const s = String(v ?? '').trim(); if (s) piiRows.push({ label: l, value: s }); };
+        pushPii('Email', [...new Set([...(idn?.emails || []), ...(ext?.emails || [])])].join(', '));
+        pushPii('Mobile', [...new Set([...(idn?.mobiles || []), ...(ext?.mobiles || [])])].join(', '));
+        pushPii('PAN', ([...new Set((docs.pans || []).map((p) => p.pan).concat(ext?.pans || []))].filter(Boolean).join(', ')) || ext?.pan);
+        pushPii('GST', docs.gst?.gstin || gstAdv?.gstin);
+        pushPii('Full address', ext?.location || idn?.address);
+        pushPii('DOB', ext?.dob);
+        pushPii('Gender', ext?.gender);
+        pushPii('Age', ext?.age ? `${ext.age}y` : '');
+        pushPii('Income', ext?.incomeBand);
+        try { const aad = (getEnrichmentRich() as { sources?: { aadhaar?: { summary?: Record<string, unknown> } } } | null)?.sources?.aadhaar?.summary || {}; pushPii('Aadhaar', String(aad.masked_aadhaar ?? aad.aadhaar ?? aad.aadhaar_number ?? '')); } catch { /* noop */ }
+        // UC1 — segregated digital footprint (OBSERVED presence, bucketed; empty buckets hidden). Sign3 social_platforms + registry-present flags.
+        const _sp = new Set((ext?.socialPlatforms || []).map((s) => String(s).toUpperCase()));
+        const _src = (getEnrichmentRich() as { sources?: Record<string, unknown> } | null)?.sources || {};
+        const _ok = (k: string): boolean => { const n = _src[k] as { summary?: { __health?: { ok?: boolean } }; __health?: { ok?: boolean } } | undefined; if (!n) return false; const h = (n.summary && n.summary.__health) || n.__health; return !h || h.ok !== false; };
+        const _bk = (bucket: string, items: (string | false | undefined | null)[]) => { const v = [...new Set(items.filter(Boolean) as string[])]; return v.length ? { bucket, items: v } : null; };
+        const footprint = [
+          _bk('B2B marketplaces', ['IndiaMART', _sp.has('TRADEINDIA') && 'TradeIndia', _sp.has('EXPORTERSINDIA') && 'ExportersIndia', _sp.has('ALIBABA') && 'Alibaba']),
+          _bk('Business / social', [_sp.has('FACEBOOK') && 'Facebook', _sp.has('INSTAGRAM') && 'Instagram', _sp.has('LINKEDIN') && 'LinkedIn', (_sp.has('TWITTER') || _sp.has('X')) && 'Twitter/X', _sp.has('YOUTUBE') && 'YouTube']),
+          _bk('Government registries', [(_ok('gst_cert_idfy') || _ok('gst_detail_union') || _ok('gstin_union')) && 'GST', _ok('udyam') && 'Udyam', _ok('epfo') && 'EPFO']),
+          _bk('Consumer marketplaces', [_sp.has('AMAZON') && 'Amazon', _sp.has('FLIPKART') && 'Flipkart']),
+          _bk('Discovery / directories', [_sp.has('JUSTDIAL') && 'JustDial', _sp.has('INDIABIZ') && 'IndiaBiz', _sp.has('CRUNCHBASE') && 'Crunchbase']),
+        ].filter(Boolean) as { bucket: string; items: string[] }[];
+        const buyerDetails = (idn || profileRows.length || availFinal.length || piiRows.length) ? { name: resolvedName?.name || idn?.name, company: company ? { value: company.company, verified: company.verified, drill: companyDrill } : undefined, memberSince: humanizeSince(idn?.memberSince), memberSinceDrill, device: device ? { value: device.device, note: device.note, source: device.source } : undefined, responseCalls: pnsCards.length, responseReplies: waConvo?.inbound.buyerMsgs ?? 0, ageGender, ageGenderDrill, availability: availFinal, identityConfidence, profileRows, allAttrRows, pii: piiRows, footprint } : null;
         const selectedReqCard = selReq ? { title: selReq.title, posted: selReq.posted, expiry: selReq.expiry, status: selReq.status, isExpired: selReq.isExpired, recencyDays: selReq.recencyDays, category: selReq.category, location: idn ? ([idn.city, idn.state].filter(Boolean).join(', ') || undefined) : undefined, specs: selReq.specs, specsStatus: selReq.specsStatus, buyerInfo: selReq.buyerInfo, commercials: selReq.commercials } : null;
         const offerEvalCard = offerResult ? { groundedPct: offerResult.eval.groundedPct, hallucinations: offerResult.eval.hallucinations, verdict: offerResult.eval.verdict } : null;
         // UC2 · requirement enrichment/correction (base truth → AI-enriched). REAL grounded LLM path when a key is
@@ -1222,9 +1406,9 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         // node id. GST is included even though n8n emits no __health row for it (decoded from rich.sources.gst).
         // §C — bifurcate external into Befisc vs Sign3 (no ambiguous "external"). GST handled first (it's Befisc-GST but
         // a distinct node). A combined 'external'/'ext' key (if the feed ever merges them) falls back to a labelled combined node.
-        const canonNode = (k: string): string => { const s = k.toLowerCase(); if (/pns[_-]?call|pns_calls/.test(s)) return 'pns_calls'; if (/pan_gst_idfy|pan.?gst.?idfy/.test(s)) return 'pan_gst_idfy'; if (/gst_cert_idfy|cert.?idfy|idfy.?cert/.test(s)) return 'gst_cert_idfy'; if (/epfo/.test(s)) return 'epfo'; if (/gst_detail_union|detail.?union|consensus/.test(s)) return 'gst_detail_union'; if (/gstin_union/.test(s)) return 'gstin_union'; if (/pan_union/.test(s)) return 'pan_union'; if (/mobile/.test(s)) return 'mobiles'; if (/web_osint|osint|parallel/.test(s)) return 'web_osint'; if (/udyam|msme/.test(s)) return 'udyam'; if (/gst/.test(s)) return 'gst'; if (/csl/.test(s)) return 'csl'; if (/req|buylead|isq|rfq/.test(s)) return 'requirement'; if (/whats|wa[-_]/.test(s)) return 'whatsapp'; if (/call|transcript|recording/.test(s)) return 'calls'; if (/ident|profile|glusr/.test(s)) return 'identity'; if (/pns/.test(s)) return 'pns'; if (/sign3/.test(s)) return 'sign3'; if (/befisc/.test(s)) return 'befisc'; if (/\bext\b|external/.test(s)) return 'external'; return s; };
-        const NODE_LABEL: Record<string, string> = { requirement: 'Requirement · BuyLeads ⨝ ISQ', whatsapp: 'WhatsApp · one timeline', pns: 'PNS · sales calls (spoken)', calls: 'Call recordings · transcribed', pns_calls: 'PNS calls · sellers called + transcribed', identity: 'IndiaMART Buyer Profile · Profile ⊕ GLUSR', befisc: 'Befisc · external identity (KYB)', sign3: 'Sign3 · digital-footprint trust', external: 'External · Befisc ⊕ Sign3', csl: 'CSL · on-site behaviour', gst: 'Befisc GST · Mobile/Email→GST (KYB)', pan_gst_idfy: 'IDfy PAN→GST (registrations)', gst_cert_idfy: 'IDfy GST Certificate (KYB)', epfo: 'IDfy EPFO (employer)', mobiles: 'Mobiles · triangulated (3 sources)', pan_union: 'PAN union (Sign3 ⊕ Befisc) + entity', gstin_union: 'GSTIN union (Sign3 ⊕ IDfy ⊕ Befisc)', gst_detail_union: 'GST detail · 3-vendor consensus', web_osint: 'Web OSINT · Parallel.ai (footprint · scale)', udyam: 'Udyam · MSME registry (size · NIC)' };
-        const NODE_ORDER = ['requirement', 'whatsapp', 'pns', 'calls', 'pns_calls', 'identity', 'befisc', 'sign3', 'external', 'csl', 'mobiles', 'pan_union', 'gstin_union', 'gst_detail_union', 'udyam', 'web_osint', 'gst', 'pan_gst_idfy', 'gst_cert_idfy', 'epfo'];
+        const canonNode = (k: string): string => { const s = k.toLowerCase(); if (/pns[_-]?call|pns_calls/.test(s)) return 'pns_calls'; if (/pan_gst_idfy|pan.?gst.?idfy/.test(s)) return 'pan_gst_idfy'; if (/gst_cert_idfy|cert.?idfy|idfy.?cert/.test(s)) return 'gst_cert_idfy'; if (/epfo/.test(s)) return 'epfo'; if (/gst_detail_union|detail.?union|consensus/.test(s)) return 'gst_detail_union'; if (/gstin_union/.test(s)) return 'gstin_union'; if (/pan_union/.test(s)) return 'pan_union'; if (/mobile/.test(s)) return 'mobiles'; if (/gemini|gweb/.test(s)) return 'web_gemini'; if (/web_osint|osint|parallel/.test(s)) return 'web_osint'; if (/udyam|msme/.test(s)) return 'udyam'; if (/gst/.test(s)) return 'gst'; if (/csl/.test(s)) return 'csl'; if (/req|buylead|isq|rfq/.test(s)) return 'requirement'; if (/whats|wa[-_]/.test(s)) return 'whatsapp'; if (/call|transcript|recording/.test(s)) return 'calls'; if (/ident|profile|glusr/.test(s)) return 'identity'; if (/pns/.test(s)) return 'pns'; if (/sign3/.test(s)) return 'sign3'; if (/befisc/.test(s)) return 'befisc'; if (/\bext\b|external/.test(s)) return 'external'; return s; };
+        const NODE_LABEL: Record<string, string> = { requirement: 'Requirement · BuyLeads ⨝ ISQ', whatsapp: 'WhatsApp · one timeline', pns: 'PNS · sales calls (spoken)', calls: 'Call recordings · transcribed', pns_calls: 'PNS calls · sellers called + transcribed', identity: 'IndiaMART Buyer Profile · Profile ⊕ GLUSR', befisc: 'Befisc · external identity (KYB)', sign3: 'Sign3 · digital-footprint trust', external: 'External · Befisc ⊕ Sign3', csl: 'CSL · on-site behaviour', gst: 'Befisc GST · Mobile/Email→GST (KYB)', pan_gst_idfy: 'IDfy PAN→GST (registrations)', gst_cert_idfy: 'IDfy GST Certificate (KYB)', epfo: 'IDfy EPFO (employer)', mobiles: 'Mobiles · triangulated (3 sources)', pan_union: 'PAN union (Sign3 ⊕ Befisc) + entity', gstin_union: 'GSTIN union (Sign3 ⊕ IDfy ⊕ Befisc)', gst_detail_union: 'GST detail · 3-vendor consensus', web_gemini: 'Web · Gemini grounding (Google Search · all tiers)', web_osint: 'Web · Parallel.ai (deep search · normal only)', udyam: 'Udyam · MSME registry (size · NIC)' };
+        const NODE_ORDER = ['requirement', 'whatsapp', 'pns', 'calls', 'pns_calls', 'identity', 'befisc', 'sign3', 'external', 'csl', 'mobiles', 'pan_union', 'gstin_union', 'gst_detail_union', 'udyam', 'web_gemini', 'web_osint', 'gst', 'pan_gst_idfy', 'gst_cert_idfy'];
         const readableByNode: Record<string, ReactNode> = {};
         for (const c of channels) { const cn = canonNode(c.key); readableByNode[cn] = readableByNode[cn] ? (<div className="space-y-1.5">{readableByNode[cn]}{c.body}</div>) : c.body; }
         if (idn && !readableByNode['identity']) readableByNode['identity'] = (
@@ -1249,6 +1433,11 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         for (const [k, node] of richSrcEntries) { const cn = canonNode(k); const n = (node && typeof node === 'object') ? node as Record<string, unknown> : {}; summaryByNode[cn] = 'summary' in n ? n.summary : node; if ('raw' in n) rawByNode[cn] = n.raw; const _inp: Record<string, unknown> = {}; if ('query' in n && n.query != null) Object.assign(_inp, n.query as Record<string, unknown>); if ('__health' in n && n.__health && typeof n.__health === 'object') { const hh = n.__health as Record<string, unknown>; ['api', 'source', 'requested', 'run_id', 'fetched_at'].forEach((f) => { if (hh[f] != null) _inp[f] = hh[f]; }); } if ((cn === 'pan_gst_idfy' || cn === 'udyam' || cn === 'pan_union') && qPan) _inp.queried_pan = qPan; if ((cn === 'gst_cert_idfy' || cn === 'gstin_union') && qGst) _inp.queried_gstin = qGst; if (Object.keys(_inp).length) inputByNode[cn] = _inp; }
         const healthByNode: Record<string, { ok: boolean; latency_ms?: number; output_count?: number; status?: string }> = {};
         for (const h of health) healthByNode[canonNode(h.node)] = h;
+        // v41 Part-C: gweb (Gemini grounding) gets its OWN health-matrix row (was folded into web_osint / Parallel-labeled).
+        // Read the per-engine nested health directly so both rows exist in every tier (gweb runs all tiers; Parallel normal-only).
+        { const wh = (richResp?.sources as { web_osint?: { __health?: { gemini?: Record<string, unknown>; parallel?: Record<string, unknown> } } } | undefined)?.web_osint?.__health;
+          const gh = wh?.gemini; if (gh) healthByNode['web_gemini'] = { ok: gh.ok !== false, status: String(gh.status ?? ''), output_count: Number(gh.proofs_count ?? gh.basis_count ?? 0) || undefined };
+          const ph = wh?.parallel; if (ph) healthByNode['web_osint'] = { ok: ph.ok !== false, status: String(ph.status ?? ''), output_count: Number(ph.basis_count ?? ph.proofs_count ?? 0) || undefined }; }
         const seenNodes = new Set<string>();
         const nodeRows: L1NodeRow[] = [];
         for (const cn of [...NODE_ORDER, ...Object.keys(healthByNode), ...Object.keys(summaryByNode), ...Object.keys(rawByNode), ...Object.keys(inputByNode)]) {
@@ -1260,11 +1449,17 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         return (
           <div className="flex-1 min-h-0 overflow-auto p-4 bg-gray-50/40">
             <div className="max-w-6xl mx-auto space-y-2.5" style={{ zoom: readZoom } as React.CSSProperties}>
-              {/* TrustSEAL Buyer Profile — the polished buyer-facing view on TOP (owner-requested), data-driven from the
-                  same rich pull. Reads parseBuyerProfile(rich); zero fabricated data; provenance-badged. Debug bands below. */}
-              <BuyerProfileCard rich={(() => { const _r = getEnrichmentRich(); const _b = finalsToBuyerBlock(finals); if (Object.keys(_b).length) lastBuyerBlockRef.current = _b; const _bb = Object.keys(_b).length ? _b : lastBuyerBlockRef.current; return (_r && typeof _r === 'object' && Object.keys(_bb).length) ? { ...(_r as object), buyer: _bb } : _r; })()} glid={glid} pending={fullPending} persona={finals.find((f) => f.key === 'business_persona')?.value} />
-              {/* L6 — the Buylead / Buyer card on TOP (the product). Everything else is the debug pipeline behind it. */}
-              <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} reqFrequency={reqFrequency} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} locationCorrected={locationCorrected} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} stillAsk={stillAsk} needsInput={needsInput} mode={cardMode} onMode={setCardMode} defaultOpen />
+              {/* CARD ↔ BUYLEAD toggle (dashboard only — standalone renders neither this block nor the toggle). Default =
+                  the polished 1-pager; switch to the L6 "BuyLead" view (requirement card + UC1 attributes + all use-cases).
+                  The Debug band stays below in BOTH modes (owner: "debug for both modes"). */}
+              <div className="flex items-center gap-1 rounded-lg bg-gray-100 p-0.5 text-[11px] font-semibold w-fit">
+                <button onClick={() => setViewMode('card')} className={'rounded-md px-3 py-1 transition ' + (viewMode === 'card' ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700')}>🪪 Buyer Card</button>
+                <button onClick={() => setViewMode('buylead')} className={'rounded-md px-3 py-1 transition ' + (viewMode === 'buylead' ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-700')}>📑 BuyLead / L6</button>
+              </div>
+              {/* TrustSEAL Buyer Profile — the polished buyer-facing 1-pager (default view). parseBuyerProfile(rich); provenance-badged. */}
+              {viewMode === 'card' && <BuyerProfileCard rich={(() => { const _r = getEnrichmentRich(); const _b = finalsToBuyerBlock(finals.filter((f) => (f.confidence ?? 0) >= 50)); if (Object.keys(_b).length) lastBuyerBlockRef.current = _b; const _bb = Object.keys(_b).length ? _b : lastBuyerBlockRef.current; return (_r && typeof _r === 'object' && Object.keys(_bb).length) ? { ...(_r as object), buyer: _bb } : _r; })()} glid={glid} pending={fullPending} persona={finals.find((f) => f.key === 'business_persona')?.value} />}
+              {/* L6 — the BuyLead / Buyer card + UC1 attributes + all use-cases (the full debug-facing product view). */}
+              {viewMode === 'buylead' && <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} reqFrequency={reqFrequency} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} locationCorrected={locationCorrected} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} stillAsk={stillAsk} needsInput={needsInput} mode={cardMode} onMode={setCardMode} defaultOpen />}
               {/* Debug ABOVE (owner) — everything else folds under ONE collapsed Debug container, in 4 clearly-grouped sections */}
               <Band code="Debug" title="Debug — how the profile & each requirement were built" subtitle="nodes · the buyer-profile LLM · per-requirement enrichment · web verify" tone="slate" defaultOpen={false}>
                 <div className="space-y-2.5">

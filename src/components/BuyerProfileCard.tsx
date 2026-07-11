@@ -5,8 +5,8 @@
 // "Not available" state when a field has no source. NO fabricated data reaches the screen.
 // Icons are lucide-react SVGs (v1.17.0 has no brand icons → the 4 socials use tiny inline brand glyphs).
 import { useMemo } from 'react';
-import { User, Building2, Calendar, MapPin, Factory, Globe, Star, IndianRupee, CreditCard, CircleDot, ShoppingBag, ShieldCheck, ExternalLink, type LucideIcon } from 'lucide-react';
-import { parseBuyerProfile, type BuyerProfileModel, type Field, type IdentitySignals, type PanBlock, type MobileRow } from '../lib/buyerProfileModel';
+import { User, Building2, Calendar, MapPin, Factory, Globe, Star, IndianRupee, CreditCard, CircleDot, ShoppingBag, ShieldCheck, ExternalLink, Mail, Users, Fingerprint, FileText, type LucideIcon } from 'lucide-react';
+import { parseBuyerProfile, type BuyerProfileModel, type Field, type LabeledField, type IdentitySignals, type PanBlock, type MobileRow } from '../lib/buyerProfileModel';
 
 // ── provenance markers ───────────────────────────────────────────────────────────────────────────────────────
 function Marker({ f }: { f: Field }) {
@@ -63,6 +63,42 @@ const SectionTitle = ({ children }: { children: React.ReactNode }) => (
 const ColTitle = ({ children }: { children: React.ReactNode }) => (
   <div className="text-[13px] font-bold text-gray-800 uppercase tracking-wide border-b-2 border-gray-200 pb-1.5 mb-2">{children}</div>
 );
+
+// ── a labeled section that HIDES empty rows (owner: "hide empty rows completely") — and hides its own title when the
+// whole section is empty. `extra` (e.g. a deterministic Business-Nature row) renders after the inferred rows. ────────
+function Section({ title, rows, extra }: { title: string; rows: LabeledField[]; extra?: React.ReactNode }) {
+  const present = rows.filter((o) => o.field.present);
+  if (!present.length && !extra) return null;
+  return (
+    <>
+      <SectionTitle>{title}</SectionTitle>
+      {present.map((o) => <KV key={o.label} Ic={CircleDot} label={o.label} f={o.field} />)}
+      {extra}
+    </>
+  );
+}
+
+// ── Digital Footprint — SEGMENTED chips from the deterministic signals we hold (owner: "segment it"). Government =
+// GST/Udyam/EPFO present · B2B marketplace = IndiaMART storefront · Consumer = Sign3 phone-linked consumer platforms.
+// Only non-empty buckets render. (Business-presence socials are rendered as rows above.) ───────────────────────────
+function FootprintChips({ m }: { m: BuyerProfileModel }) {
+  const gov = [m.company.gst.present && 'GST', m.company.udyam.present && 'Udyam', m.epfo?.present && 'EPFO'].filter(Boolean) as string[];
+  const CONSUMER = ['AMAZON', 'FLIPKART', 'SNAPDEAL', 'MYNTRA'];
+  const consumer = m.socialPlatforms.filter((p) => CONSUMER.includes(p));
+  const b2b = [m.catalogueLink.present && 'IndiaMART'].filter(Boolean) as string[];
+  if (!gov.length && !consumer.length && !b2b.length) return null;
+  const chip = (label: string, tone: string) => <span key={label} className={`text-[9px] px-1.5 py-px rounded border ${tone}`}>{label}</span>;
+  const Row = ({ label, items, tone }: { label: string; items: string[]; tone: string }) => items.length ? (
+    <div className="flex flex-wrap gap-1 items-center"><span className="text-[9px] text-gray-400 w-24 shrink-0">{label}</span>{items.map((x) => chip(x, tone))}</div>
+  ) : null;
+  return (
+    <div className="mt-1.5 space-y-1 border-t border-gray-100 pt-1.5">
+      <Row label="B2B marketplace" items={b2b} tone="bg-teal-50 text-teal-700 border-teal-200" />
+      <Row label="Government" items={gov} tone="bg-emerald-50 text-emerald-700 border-emerald-200" />
+      <Row label="Consumer" items={consumer} tone="bg-amber-50 text-amber-700 border-amber-200" />
+    </div>
+  );
+}
 
 // ── header stat tile — now on WHITE (dark-on-light), moved out of the navy band (owner §2/§7) ───────────────────
 function StatTile({ label, value, note, tone }: { label: string; value: number | null; note: string; tone: string }) {
@@ -134,7 +170,7 @@ function PanPanel({ pans }: { pans: PanBlock | null }) {
           <div className="flex items-center gap-1.5">
             <span className="font-mono text-gray-800">{pans.primary.value}</span>
             {(pans.primary.agreementCount ?? 0) >= 2
-              ? <span title={`found by ${pans.primary.foundBy?.join(', ')}`} className="text-[9px] px-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-help">✓✓ {pans.primary.agreementCount} vendors</span>
+              ? <span title={`found by ${pans.primary.foundBy?.join(', ')}`} className="text-[9px] px-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-help">✓✓ {pans.primary.foundBy && pans.primary.foundBy.length ? pans.primary.foundBy.join(' + ') : `${pans.primary.agreementCount} vendors`}</span>
               : <span className="text-[9px] px-1 rounded bg-amber-50 text-amber-700 border border-amber-200">single source</span>}
           </div>
         )}
@@ -214,9 +250,9 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
           <h2 className="text-2xl font-bold text-gray-900 leading-tight">{m.header.company.present ? m.header.company.value : <span className="text-gray-300 italic text-xl">Company not available</span>}<Marker f={m.header.company} /></h2>
           {m.verifiedBuyer && m.verifiedBuyer.tier !== 'unverified' && (
             <span
-              title={`IndiaMART verified-business-buyer flag = ${m.verifiedBuyer.flag} (6–9 = TrustSEAL buyer · 4/5 = GST-verified)`}
-              className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full border ${m.verifiedBuyer.tier === 'trustseal' ? 'bg-amber-50 text-amber-700 border-amber-300' : m.verifiedBuyer.tier === 'gst_verified' ? 'bg-emerald-50 text-emerald-700 border-emerald-300' : 'bg-gray-100 text-gray-600 border-gray-300'}`}>
-              {m.verifiedBuyer.tier === 'trustseal' ? '🛡 TrustSEAL Buyer' : m.verifiedBuyer.tier === 'gst_verified' ? '✓ GST-Verified Business' : m.verifiedBuyer.label}
+              title={`IndiaMART verified-business-buyer flag = ${m.verifiedBuyer.flag} · TrustSEAL Buyer (flag 6–9) · Verified Business Buyer (flag 4–5) · Verified Buyer (mobile + email verified)`}
+              className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full border ${m.verifiedBuyer.tier === 'fraud' ? 'bg-rose-100 text-rose-700 border-rose-400' : m.verifiedBuyer.tier === 'trustseal' ? 'bg-amber-50 text-amber-700 border-amber-300' : m.verifiedBuyer.tier === 'gst_verified' ? 'bg-emerald-50 text-emerald-700 border-emerald-300' : m.verifiedBuyer.tier === 'verified' ? 'bg-sky-50 text-sky-700 border-sky-300' : 'bg-gray-100 text-gray-600 border-gray-300'}`}>
+              {m.verifiedBuyer.tier === 'trustseal' ? '🛡 ' : (m.verifiedBuyer.tier === 'gst_verified' || m.verifiedBuyer.tier === 'verified') ? '✓ ' : ''}{m.verifiedBuyer.label}
             </span>
           )}
         </div>
@@ -234,7 +270,9 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
       </div>
 
       {/* 3-column body */}
-      <div className="grid grid-cols-1 lg:grid-cols-[30%_40%_30%] gap-x-5 gap-y-3 p-4">
+      {/* fr tracks (not %) so the 3 columns distribute AFTER subtracting gap-x — %-tracks summed to 100% + the 40px
+          gap overflowed ~40px and the card's overflow-hidden clipped Column 3's right edge (the "trimmed on right" bug). */}
+      <div className="grid grid-cols-1 lg:grid-cols-[3fr_4fr_3fr] gap-x-5 gap-y-3 p-4">
         {/* ── COLUMN 1 — BUYER DETAILS ── */}
         <div>
           <ColTitle>Buyer Details</ColTitle>
@@ -244,12 +282,11 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
               <p className="text-[12px] text-gray-700 leading-snug">{m.businessStory.text}{m.businessStory.inferredParts.length > 0 && <span title={`inferred parts: ${m.businessStory.inferredParts.join(', ')} (web_osint)`} className="ml-1 text-[8px] px-1 rounded bg-sky-50 text-sky-600 border border-sky-200 cursor-help align-middle">inferred: {m.businessStory.inferredParts.join(', ')}</span>}</p>
             </div>
           )}
-          <SectionTitle>Business Overview</SectionTitle>
-          {m.overview.map((o) => <KV key={o.label} Ic={CircleDot} label={o.label} f={o.field} />)}
-          <SectionTitle>Procurement Profile</SectionTitle>
-          {m.procurement.map((o) => <KV key={o.label} Ic={CircleDot} label={o.label} f={o.field} />)}
-          <SectionTitle>Market Focus</SectionTitle>
-          {m.market.map((o) => <KV key={o.label} Ic={CircleDot} label={o.label} f={o.field} />)}
+          {/* Who is the buyer? — inferred snapshot (maturity · intent · deal-readiness · objective · stage). Hide-empty. */}
+          <Section title="Buyer Snapshot" rows={m.buyerDetails} />
+          <Section title="Business Overview" rows={m.overview} extra={m.businessNature.present ? <KV Ic={Factory} label="Business Nature" f={m.businessNature} /> : null} />
+          <Section title="Procurement Profile" rows={m.procurement} />
+          <Section title="Market Focus" rows={m.market} />
         </div>
 
         {/* ── COLUMN 2 — COMPANY DETAILS ── */}
@@ -268,6 +305,7 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
           <KV Ic={User} label="Trade Name / Company Name" f={m.company.tradeName} />
           <KV Ic={Building2} label="Constitution of Business" f={m.company.constitution} />
           <KV Ic={Calendar} label="Date of Registration" f={m.company.regDate} />
+          <KV Ic={IndianRupee} label="Annual Turnover (GST-declared)" f={m.company.turnoverBand} />
           <KV Ic={MapPin} label="Principal Place of Business" f={m.company.principalAddress} />
           {m.company.principalAddress.alternates?.map((a) => (
             <div key={a.value} className="ml-6 text-[10px] text-gray-400">also seen as <span className="italic">({a.source})</span>: {a.value}</div>
@@ -288,11 +326,60 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
                   : <Val f={m.company.udyam.regNo} />}
               </span>
             </div>
+            {m.company.udyam.present && m.company.udyam.enterpriseName.present && <div className="ml-6 text-[9.5px] text-gray-700 font-medium">{m.company.udyam.enterpriseName.value}</div>}
             {m.company.udyam.present && (m.company.udyam.majorActivity.present || m.company.udyam.organizationType.present) && (
               <div className="ml-6 text-[9.5px] text-gray-500 flex flex-wrap gap-x-2">{m.company.udyam.majorActivity.present && <span>{m.company.udyam.majorActivity.value}</span>}{m.company.udyam.organizationType.present && <span>· {m.company.udyam.organizationType.value}</span>}{m.company.udyam.incorporation.present && <span>· inc {m.company.udyam.incorporation.value}</span>}</div>
             )}
             {m.company.udyam.nicIndustries.length > 0 && <div className="ml-6 text-[9.5px] text-gray-500">NIC: {m.company.udyam.nicIndustries.slice(0, 3).join(' · ')}</div>}
           </div>
+
+          {/* EPFO employer — deterministic size signal (IDfy) */}
+          {m.epfo?.present && (
+            <div className="flex items-start gap-2 py-1">
+              <Icon Ic={Users} />
+              <span className="w-40 shrink-0 text-[12px] font-semibold text-gray-700">EPFO Employer</span>
+              <span className="flex-1 min-w-0 text-[12px] text-gray-700 break-words">{m.epfo.establishment.value}{m.epfo.employeeCount.present && <span className="ml-1.5 text-[9px] px-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">{m.epfo.employeeCount.value} employees</span>}</span>
+            </div>
+          )}
+
+          {/* ★ Contact & PII — INTERNAL, full deterministic (owner: show everything, unmasked) */}
+          <SectionTitle>Contact &amp; PII <span className="float-right normal-case text-[8px] text-amber-500 font-normal">internal</span></SectionTitle>
+          <KV Ic={Mail} label="Email" f={m.contact.email} />
+          {m.contact.altEmail.present && <KV Ic={Mail} label="Alt Email" f={m.contact.altEmail} />}
+          <KV Ic={MapPin} label="Full Address" f={m.contact.fullAddress} />
+          {(m.contact.district.present || m.contact.pincode.present) && (
+            <div className="ml-6 text-[9.5px] text-gray-500 flex flex-wrap gap-x-2">{m.contact.city.present && <span>{m.contact.city.value}</span>}{m.contact.district.present && <span>· {m.contact.district.value}</span>}{m.contact.state.present && <span>· {m.contact.state.value}</span>}{m.contact.pincode.present && <span>· {m.contact.pincode.value}</span>}</div>
+          )}
+          {(m.contact.dob.present || m.contact.gender.present || m.contact.age.present || m.contact.incomeBand.present) && (
+            <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-0.5 ml-6 text-[11px] text-gray-600">
+              {m.contact.dob.present && <span>DOB: <b className="text-gray-800">{m.contact.dob.value}</b></span>}
+              {m.contact.age.present && <span>Age: <b className="text-gray-800">{m.contact.age.value}</b></span>}
+              {m.contact.gender.present && <span>Gender: <b className="text-gray-800">{m.contact.gender.value}</b></span>}
+              {m.contact.incomeBand.present && <span>Income: <b className="text-gray-800">₹{m.contact.incomeBand.value}</b></span>}
+            </div>
+          )}
+          {m.aadhaar?.present && <KV Ic={Fingerprint} label="Aadhaar" f={m.aadhaar.value} />}
+          {m.catalogueLink.present && <KV Ic={ExternalLink} label="IndiaMART Catalogue" f={m.catalogueLink} link />}
+
+          {/* GST Registry Detail — full GST-advance, expandable (internal) */}
+          {m.gstDetail && (
+            <details className="mt-1.5">
+              <summary className="cursor-pointer text-[11px] font-semibold text-gray-600 flex items-center gap-1.5 select-none"><Icon Ic={FileText} />GST Registry Detail <span className="text-[9px] font-normal text-gray-400">taxpayer · filing · signatories · SAC</span></summary>
+              <div className="ml-6 mt-1 space-y-0.5 text-[10.5px] text-gray-600">
+                {m.gstDetail.taxpayerType && <div>Taxpayer type: <b className="text-gray-800">{m.gstDetail.taxpayerType}</b></div>}
+                {m.gstDetail.filing.latest && <div>Latest filing: {m.gstDetail.filing.latest}{m.gstDetail.filing.count ? ` · ${m.gstDetail.filing.count} returns` : ''}</div>}
+                {m.gstDetail.filing.types.length > 0 && <div>Return types: {m.gstDetail.filing.types.join(', ')}</div>}
+                {m.gstDetail.signatories.length > 0 && <div>Signatories: {m.gstDetail.signatories.join(', ')}</div>}
+                {m.gstDetail.sac.length > 0 && <div className="break-words">SAC/HSN: {m.gstDetail.sac.slice(0, 6).map((s) => `${s.code}${s.desc ? ` ${s.desc}` : ''}`).join(' · ')}</div>}
+                {(m.gstDetail.email || m.gstDetail.mobile) && <div>GST contact: {[m.gstDetail.email, m.gstDetail.mobile].filter(Boolean).join(' · ')}</div>}
+                {(m.gstDetail.centralJurisdiction || m.gstDetail.stateJurisdiction) && <div>Jurisdiction: {[m.gstDetail.centralJurisdiction, m.gstDetail.stateJurisdiction].filter(Boolean).join(' | ')}</div>}
+                {m.gstDetail.complianceRating && <div>Compliance rating: {m.gstDetail.complianceRating}</div>}
+                {m.gstDetail.turnover && <div>Aggregate turnover: {m.gstDetail.turnover}</div>}
+                {m.gstDetail.cancellationDate && <div className="text-rose-600">Registration cancelled: {m.gstDetail.cancellationDate}</div>}
+                {m.gstDetail.eInvoice && <div>e-Invoice: {m.gstDetail.eInvoice}</div>}
+              </div>
+            </details>
+          )}
 
           <SectionTitle>Requirement Activity (Last 6 Months) {m.requirementActivity.total != null && <span className="float-right normal-case text-gray-500 font-normal">Total: {m.requirementActivity.total}</span>}</SectionTitle>
           <ActivityChart months={m.requirementActivity.months} note={m.requirementActivity.note} />
@@ -300,15 +387,21 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
 
         {/* ── COLUMN 3 — SOCIAL / PRODUCTS / PLAN ── */}
         <div>
-          <ColTitle>Social Media Presence</ColTitle>
-          <KV Ic={Globe} label="Website" f={m.social.website} link />
-          <SocialKV Brand={FacebookI} label="Facebook" f={m.social.facebook} />
-          <SocialKV Brand={InstagramI} label="Instagram" f={m.social.instagram} />
-          <SocialKV Brand={LinkedinI} label="LinkedIn" f={m.social.linkedin} />
-          <SocialKV Brand={TwitterI} label="Twitter / X" f={m.social.twitter} />
+          <ColTitle>Digital Footprint</ColTitle>
+          {/* Business presence — hide-empty (only present socials render; saves ~80% space on sparse buyers) */}
+          {m.social.website.present && <KV Ic={Globe} label="Website" f={m.social.website} link />}
+          {m.social.facebook.present && <SocialKV Brand={FacebookI} label="Facebook" f={m.social.facebook} />}
+          {m.social.instagram.present && <SocialKV Brand={InstagramI} label="Instagram" f={m.social.instagram} />}
+          {m.social.linkedin.present && <SocialKV Brand={LinkedinI} label="LinkedIn" f={m.social.linkedin} />}
+          {m.social.twitter.present && <SocialKV Brand={TwitterI} label="Twitter / X" f={m.social.twitter} />}
           {m.googleBusiness?.exists && m.googleBusiness.rating && (
             <KV Ic={Star} label={m.googleBusiness.kind === 'maps_contributor' ? 'Google Maps profile' : 'Google Business'} f={{ value: m.googleBusiness.rating, present: true, provenance: 'inferred', source: m.googleBusiness.kind === 'maps_contributor' ? 'Sign3 · Google-Maps contributor profile' : 'web_osint', inferred: true, note: m.googleBusiness.kind === 'maps_contributor' ? 'personal Google-Maps contributor profile (phone-linked) — its pin may sit in a different city than the registered address; not the firm\'s verified Google Business listing' : undefined }} />
           )}
+          {/* segmented footprint buckets from deterministic signals (Government / B2B marketplace / Consumer) */}
+          <FootprintChips m={m} />
+          {!m.social.website.present && !m.social.facebook.present && !m.social.instagram.present && !m.social.linkedin.present && !m.social.twitter.present && !(m.googleBusiness?.exists && m.googleBusiness.rating) && !m.company.gst.present && !m.company.udyam.present && !m.epfo?.present && !m.catalogueLink.present && !m.socialPlatforms.length && <div className="text-[11px] text-gray-300 italic">No web / social / registry footprint detected.</div>}
+
+          {m.socialPresenceCount != null && m.socialPresenceCount > 0 && <div className="text-[9px] text-gray-400 mt-0.5">{m.socialPresenceCount} phone-linked account{m.socialPresenceCount === 1 ? '' : 's'} detected (Sign3)</div>}
 
           <SectionTitle>Products of Interest</SectionTitle>
           {m.products.length ? (

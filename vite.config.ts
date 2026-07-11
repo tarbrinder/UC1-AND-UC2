@@ -6,8 +6,25 @@ import react from '@vitejs/plugin-react'
 // headers server-side, so the credentials never enter the browser bundle.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  // OFFLINE build (`vite build --mode offline`, via `npm run build:offline`): emit ONE self-contained ES-module chunk
+  // (inlineDynamicImports → no import()/no external fetch) + one CSS + inline assets. The inliner keeps it as an INLINE
+  // `<script type="module">` placed at end-of-body: a fully-inlined module has no fetch, so it runs from file:// (only
+  // module scripts with a src/imports are CORS-blocked there), and body-end placement keeps #root ready. (IIFE was tried
+  // and rolldown's IIFE output rendered nothing for this React-19 app — reverted.) Normal build/dev is untouched.
+  const offline = mode === 'offline'
   return {
     plugins: [react()],
+    ...(offline ? {
+      build: {
+        target: 'es2019',
+        modulePreload: false,
+        cssCodeSplit: false,
+        assetsInlineLimit: 100_000_000,
+        rollupOptions: {
+          output: { inlineDynamicImports: true, entryFileNames: 'assets/[name].js', chunkFileNames: 'assets/[name].js', assetFileNames: 'assets/[name][extname]' },
+        },
+      },
+    } : {}),
     server: {
       proxy: {
         // IndiaMART LLM gateway

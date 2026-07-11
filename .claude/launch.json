@@ -9,6 +9,13 @@
       "port": 5173
     },
     {
+      "name": "rfq-preview",
+      "runtimeExecutable": "/Users/tarbrinder/Desktop/rfq-form/node_modules/.bin/vite",
+      "runtimeArgs": ["--port", "5185", "--strictPort"],
+      "cwd": "/Users/tarbrinder/Desktop/rfq-form",
+      "port": 5185
+    },
+    {
       "name": "demo-snapshot",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8899"],

@@ -74,6 +74,7 @@ export const ATTR_POLICY: Record<string, { policy: PolicyId; rule?: AttributeRul
   purchase_frequency: { policy: 'PROCUREMENT', rule: 'cadence_7d' },
   annual_procurements: { policy: 'PROCUREMENT' },
   procurement_approach: { policy: 'PROCUREMENT' },
+  use_case: { policy: 'PROCUREMENT' },
   // ── HOW · Buying Behaviour ──────────────────────────────────────────────
   price_vs_quality: { policy: 'BEHAVIOUR' },
   preferred_suppliers: { policy: 'BEHAVIOUR' },
@@ -85,6 +86,7 @@ export const ATTR_POLICY: Record<string, { policy: PolicyId; rule?: AttributeRul
   // ── WHY · Intent ────────────────────────────────────────────────────────
   buyer_intent: { policy: 'INTENT', rule: 'recency_ignore_expiry' },
   business_objective: { policy: 'INTENT' },
+  deal_readiness: { policy: 'INTENT' },
   // ── WHERE · Market ──────────────────────────────────────────────────────
   location_sourcing_preference: { policy: 'MARKET', rule: 'verified_address_lock' },
   sourcing_channel: { policy: 'MARKET' },
@@ -97,6 +99,7 @@ export const ATTR_POLICY: Record<string, { policy: PolicyId; rule?: AttributeRul
   // ── Business Classification ─────────────────────────────────────────────
   retail_wholesale: { policy: 'CLASSIFICATION', rule: 'qty_rollup' },
   b2b_b2c: { policy: 'CLASSIFICATION', rule: 'entity_char' },
+  primary_language: { policy: 'CLASSIFICATION', rule: 'language_buyer_authored' },
 };
 
 /** Return the resolved rulebook entry (policy + expected chain + special rule) for

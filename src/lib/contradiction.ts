@@ -53,12 +53,21 @@ const PERSONAL_DISCRETE_CEILING = 25;
 const UNIT_DISCRETE = /piece|pcs|\bnos?\b|\bunit\b|\bset\b|pair|item|each/i;
 const isPersonalish = (i: ContradictionInput) => !!i.isPersonal || /personal|individual|end.?user|home|own use/i.test(i.intentType || '');
 
-// Group locations, treating containment as the SAME place ("Amritsar" ⊂ "Amritsar, Punjab").
+// P1-13 (bazooka): canonicalize Indian state ABBREVIATIONS so a registry "UP" and a profile "Uttar Pradesh" are the
+// SAME place — otherwise they slug differently and fire a false location conflict (audit finding on 268590579).
+const STATE_CANON: Record<string, string> = {
+  up: 'uttarpradesh', mh: 'maharashtra', dl: 'delhi', nd: 'delhi', ka: 'karnataka', tn: 'tamilnadu', gj: 'gujarat',
+  rj: 'rajasthan', wb: 'westbengal', mp: 'madhyapradesh', hr: 'haryana', pb: 'punjab', br: 'bihar', ts: 'telangana',
+  tg: 'telangana', ap: 'andhrapradesh', kl: 'kerala', or: 'odisha', od: 'odisha', jh: 'jharkhand', ch: 'chandigarh',
+  uk: 'uttarakhand', ua: 'uttarakhand', hp: 'himachalpradesh', as: 'assam', ga: 'goa', jk: 'jammukashmir', cg: 'chhattisgarh',
+};
+const canonLoc = (v?: string) => { const s = slug(v); return STATE_CANON[s] || s; };
+// Group locations, treating containment as the SAME place ("Amritsar" ⊂ "Amritsar, Punjab") + state-abbrev canon.
 function distinctLocations(locs?: Array<{ source: string; value: string }>) {
   const clean = (locs || []).filter((l) => l && slug(l.value));
   const groups: Array<{ slug: string; label: string; sources: string[] }> = [];
   for (const l of clean) {
-    const s = slug(l.value);
+    const s = canonLoc(l.value);
     const g = groups.find((x) => x.slug.includes(s) || s.includes(x.slug));
     if (g) { if (s.length > g.slug.length) { g.slug = s; g.label = l.value; } g.sources.push(l.source); }
     else groups.push({ slug: s, label: l.value, sources: [l.source] });

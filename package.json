@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:offline": "vite build && node scripts/build-offline-shell.mjs",
+    "build:offline": "vite build --mode offline && node scripts/build-offline-shell.mjs",
     "build:checked": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "lint": "eslint .",

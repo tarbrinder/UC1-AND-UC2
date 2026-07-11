@@ -4,7 +4,7 @@
 // Provenance is first-class — a field knows whether it is registry-grade, cross-source-triangulated, single-source,
 // or LLM-inferred (web_osint), so the card can badge it. Reads `__health` per node: a node whose health is ok:false
 // or status skipped/timeout/no_data is treated as UNAVAILABLE (no partial render off a failed fetch). PURE, no LLM.
-import { identityFromMerged, externalFromMerged, bandConfidence, gstAdvance } from './buyerDetails';
+import { identityFromMerged, externalFromMerged, bandConfidence, gstAdvance, type GstAdvance } from './buyerDetails';
 import { waFromMerged } from './whatsappTimeline';
 import { requirementsFromMerged, type Requirement } from './requirements';
 
@@ -107,7 +107,11 @@ export interface LabeledField { label: string; field: Field }
 export interface IdentitySignals { registered: { name: string; source: string } | null; bankLinked: { name: string; source: string; confidence?: number } | null; conflict: boolean }
 export interface PanBlock { primary: Field | null; alternates: { value: string; source: string; foundBy?: string[] }[]; conflict: boolean; note?: string }
 export interface MobileRow { value: string; foundBy: string[]; agreementCount: number; primary: boolean }
-export interface UdyamBlock { present: boolean; regNo: Field; enterpriseType: Field; organizationType: Field; majorActivity: Field; nicIndustries: string[]; incorporation: Field; officialAddress: Field }
+export interface UdyamBlock { present: boolean; regNo: Field; enterpriseName: Field; enterpriseType: Field; organizationType: Field; majorActivity: Field; nicIndustries: string[]; incorporation: Field; officialAddress: Field }
+// PII / contact group (INTERNAL card — all deterministic, owner: show everything, full/unmasked).
+export interface ContactPii { email: Field; altEmail: Field; fullAddress: Field; city: Field; district: Field; state: Field; pincode: Field; dob: Field; gender: Field; age: Field; incomeBand: Field }
+export interface EpfoBlock { present: boolean; establishment: Field; employeeCount: Field }
+export interface AadhaarBlock { present: boolean; value: Field; name: Field }
 export interface MonthBar { month: string; count: number }
 // #11 — a web citation behind an inferred field (source URL + quoted excerpt + engine confidence), from web_osint basis[]/proofs[].
 export interface ProofRow { field: string; url: string; excerpt: string; confidence: string }
@@ -119,18 +123,21 @@ export interface BuyerProfileModel {
   header: { company: Field; contactName: Field; memberSince: Field; registeredLocation: Field; tenureYears: number | null; tiles: StatTile[] };
   // Amit (demo): the plain-language "what does this buyer do / kis cheez ka dhandha hai" — the ONE line a CXO reads first.
   headline: string | null;
-  // IndiaMART verified-business-buyer flag → TS status. 6-9 = TrustSEAL buyer; 4/5 = GST-verified; else partial/unverified.
-  verifiedBuyer: { flag: number; tier: 'trustseal' | 'gst_verified' | 'partial' | 'unverified'; label: string } | null;
+  // IndiaMART verified-business-buyer flag → TS status. 6-9 = TrustSEAL Buyer; 4/5 = Verified Business Buyer;
+  // else if mobile+email present & verified = Verified Buyer; else partial/unverified.
+  verifiedBuyer: { flag: number; tier: 'trustseal' | 'gst_verified' | 'verified' | 'partial' | 'unverified' | 'fraud'; label: string } | null;
   businessStory: { text: string; inferredParts: string[] } | null;   // templated, NOT literal
-  overview: LabeledField[];
-  procurement: LabeledField[];              // all "Not available" in current data
-  market: LabeledField[];                   // all "Not available" in current data
+  buyerDetails: LabeledField[];             // "Who is the buyer?" — maturity · intent · deal-readiness · objective · stage (inferred)
+  overview: LabeledField[];                 // "What business?" — type · model · industry · retail/wholesale · scale · turnover · procurement
+  procurement: LabeledField[];              // "How does he buy?" — model · frequency · sourcing · price/quality · payment · timeline · challenge
+  market: LabeledField[];                   // "Whom does he sell to?" — customers · channel · geography
   company: {
-    gst: Field; gstStatus: Field; tradeName: Field; constitution: Field; regDate: Field; principalAddress: Field;
+    gst: Field; gstStatus: Field; tradeName: Field; constitution: Field; regDate: Field; turnoverBand: Field; principalAddress: Field;
     identity: IdentitySignals | null; pans: PanBlock | null; mobiles: MobileRow[]; udyam: UdyamBlock;
   };
   requirementActivity: { total: number | null; months: MonthBar[]; series: string[]; note: string };
   social: { website: Field; facebook: Field; instagram: Field; linkedin: Field; twitter: Field };
+  socialPlatforms: string[];                // Sign3 phone-linked platforms (FLIPKART/FACEBOOK/…) — for the segmented digital-footprint chips
   products: string[];
   productsOffered: string[];
   latestRequirement: ReqDetail | null;      // #4 — BuyLead order value / type / specs of the most-recent requirement
@@ -138,6 +145,14 @@ export interface BuyerProfileModel {
   proofs: ProofRow[];                       // #11 — web citations (URL + excerpt + confidence) behind inferred fields
   googleBusiness: { exists: boolean; rating: string | null; kind: 'gmb' | 'maps_contributor' } | null;
   plan: null;                               // omitted — no source field (see comment in parseBuyerProfile)
+  // ── owner: INTERNAL dashboard card shows EVERY deterministic value (full PII). All below are deterministic passthroughs. ──
+  contact: ContactPii;                      // email · address · dob · gender · age · income (Befisc/profile)
+  gstDetail: GstAdvance | null;             // full GST-advance registry detail (taxpayer · SAC · signatories · filing · jurisdiction · compliance · GST email/mobile)
+  businessNature: Field;                    // GST nature_of_business_activity (deterministic — distinct from the inferred role)
+  socialPresenceCount: number | null;       // Sign3 phone-linked account count
+  epfo: EpfoBlock | null;                   // IDfy EPFO employer (size signal · employee count)
+  aadhaar: AadhaarBlock | null;             // aadhaar-fact (internal, full per owner)
+  catalogueLink: Field;                     // IndiaMART storefront (paidurl) when also a listed seller
   health: Record<string, { ok: boolean; status: string }>;
 }
 
@@ -159,6 +174,8 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const wa = nodeOk(rich, 'whatsapp') ? waFromMerged(rich) : null;
   const reqs = nodeOk(rich, 'requirement') ? requirementsFromMerged(rich) : [];
   const web = summaryOf(rich, 'web_osint');            // {} when web node failed/absent
+  const crSum = obj(summaryOf(rich, 'company_reg'));   // v38 IndiaMART VERIFIED GST/KYB (constitution·nature·turnover-band·reg-year·partners) — deterministic, no LLM
+  const bpSum = obj(summaryOf(rich, 'buyerprofile'));  // v38 IndiaMART buyer record (business_type·social·geo·activity·verification·member-since)
   // v20 audit fix (P0 — namesake pollution): the card renders web fields off the RAW pull, bypassing the extract-LLM's
   // verify-gate. A NAME-ONLY Parallel query (no company_name/gst sent) reliably returns a namesake (a switchgear
   // "Jaiveer" for a notebook buyer). So surface web website/socials/address ONLY when the search was anchored to a real
@@ -169,7 +186,11 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // gate end-to-end: a web fact is trusted only when the search was anchored to a real firm AND the engine did not
   // itself flag "no confirmed match" (Parallel-only pulls carry no match_confidence → fall back to the anchor test).
   const webMc = str(obj(sources.web_osint).match_confidence).toLowerCase();
-  const webVerified = (!!str(webQuery.company_name) || !!str(webQuery.gst_number)) && webMc !== 'none';
+  // v38 (audit gap-4): match_confidence comes ONLY from Gemini; a successful anchored Parallel.ai run (normal mode) must
+  // NOT be suppressed by Gemini's independent 'none'. Verified when anchored AND (Gemini!=none OR Parallel returned a hit).
+  const webParH = obj(obj(obj(sources.web_osint).__health).parallel);
+  const webParallelHit = str(webParH.status) === 'success' && (Number(webParH.proofs_count ?? webParH.basis_count ?? 0) > 0 || Number(webParH.fields_returned ?? 0) > 0);
+  const webVerified = (!!str(webQuery.company_name) || !!str(webQuery.gst_number) || !!str(webQuery.pan)) && (webMc !== 'none' || webParallelHit); // v40: verified PAN alone anchors the search (typed firm name can be junk)
   const certs = arr(summaryOf(rich, 'gst_cert_idfy').certificates).map(obj);
   const cert0 = certs[0] || {};
   const gdDetails = arr(summaryOf(rich, 'gst_detail_union').gst_details).map(obj);
@@ -179,7 +200,7 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // else derive from member_since ISO date. (Honest note: neither is in identity.summary; verified against buyerDetails.ts.)
   const tenureRaw = str(usSince.tenure_years) || str(obj(summaryOf(rich, 'identity')).tenure_years);
   let tenureYears: number | null = tenureRaw && !isNaN(Number(tenureRaw)) ? Number(tenureRaw) : null;
-  const memberSince = idn?.memberSince || str(usSince.member_since) || '';
+  const memberSince = idn?.memberSince || str(usSince.member_since) || str(bpSum.member_since) || '';
   if (tenureYears == null && memberSince) { const t = Date.parse(memberSince); if (!isNaN(t)) tenureYears = Math.floor((Date.now() - t) / (365.25 * 86400000)); }
 
   // ── header stat tiles — the sample JSON has NO "sellers connected" count; map to REAL aggregates, labeled honestly
@@ -204,26 +225,44 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const webConf = bandConfidence(web.confidence) ?? 60;
   // ROLE from VERIFIED GST nature_of_business — registry-grade, needs NO web. Fixes "Business Type = Not available when
   // web fails but the GST clearly says Manufacturer/Wholesaler/Retailer" (GLID 22642257: Factory+Retail+Wholesale).
-  const gstNature: string[] = (Array.isArray(cert0.nature_of_business_activity) ? cert0.nature_of_business_activity as string[]
+  const gstNatureBase: string[] = (Array.isArray(cert0.nature_of_business_activity) ? cert0.nature_of_business_activity as string[]
     : (gdDetails.length && Array.isArray(obj(obj(gdDetails[0].fields).nature_of_business_activity).canonical) ? obj(obj(gdDetails[0].fields).nature_of_business_activity).canonical as string[] : []));
+  // v38 — IndiaMART's OWN verified GST nature (company_reg: primary + secondary activities) is registry-grade too; union it
+  // in so Business Type / role resolve deterministically even when IDfy/consensus is empty (e.g. 22642257: Manufacturer + Factory/Retail/Wholesale/Office).
+  const crNature = [str(crSum.nature_of_business), ...arr(crSum.nature_secondary).map(str)].filter(Boolean);
+  const gstNature: string[] = [...new Set([...gstNatureBase, ...crNature])];
   const roleMap: Array<[RegExp, string]> = [[/manufactur|factory/i, 'Manufacturer'], [/wholesale/i, 'Wholesaler'], [/retail/i, 'Retailer'], [/import|export/i, 'Importer/Exporter'], [/service/i, 'Service Provider'], [/\btrad/i, 'Trader']];
   const gstRole = [...new Set(gstNature.flatMap((n) => roleMap.filter(([re]) => re.test(n)).map(([, r]) => r)))].join(' · ');
-  const gstTurnover = gstAdvance(rich)?.turnover || null;   // registry turnover if the GST-advance record carried one
+  const gstTurnover = gstAdvance(rich)?.turnover || str(crSum.annual_turnover_band) || null;   // GST-advance record, else IndiaMART verified GST turnover band (company_reg)
   // industry: web (inferred) → else the buyer's own top requirement category / enquired product (registry-ish)
   const reqIndustry = str(reqs[0]?.category) || (wa?.meta?.productsEnquired || [])[0] || '';
   const businessTypeField: Field = gstRole
     ? field(gstRole, 'registry', 'GST nature of business (verified · Sign3⊕IDfy)')
     : businessType ? field(businessType, 'inferred', 'web_osint (LLM)', { confidence: webConf }) : absentField('GST / web_osint');
+  // ── Buyer Details "who is the buyer?" (inferred) — maturity · intent · deal-readiness · objective · stage.
+  // Business Stage keeps its deterministic tenure-derived default; the overlay supersedes it with the LLM value. ──
+  const buyerDetails: LabeledField[] = [
+    { label: 'Buyer Maturity', field: absentField('buyer-profile extract (LLM)') },
+    { label: 'Buyer Intent', field: absentField('buyer-profile extract (LLM)') },
+    { label: 'Deal Readiness', field: absentField('call lead-tag · Cold/Warm/Hot (LLM)') },
+    { label: 'Business Objective', field: absentField('buyer-profile extract (LLM)') },
+    { label: 'Business Stage', field: stageDesc ? { value: stageDesc, present: true, provenance: 'derived', source: `derived from tenure (${tenureYears}y)`, note: 'rule: <1y Recently Established · <4y Growing · else Established' } : absentField('tenure') },
+  ];
+  // ── Business Overview "what business?" — type · model(b2b/b2c) · industry · retail/wholesale · scale · turnover · procurement.
+  // Deterministic defaults for Business Type / Industry / Turnover; the LLM overlay supersedes any it grounds. ──
   const overview: LabeledField[] = [
     { label: 'Business Type', field: businessTypeField },
-    { label: 'Business Stage', field: stageDesc ? { value: stageDesc, present: true, provenance: 'derived', source: `derived from tenure (${tenureYears}y)`, note: 'rule: <1y Recently Established · <4y Growing · else Established' } : absentField('tenure') },
-    { label: 'Annual Procurements', field: absentField('no source field in pipeline') },   // §2 — no field exists; never fabricated
+    { label: 'Business Model', field: absentField('buyer-profile extract (LLM · B2B/B2C)') },
+    { label: 'Industry / Sub-Industry', field: (industry && webVerified) ? field(industry, 'inferred', 'web_osint (LLM)', { confidence: webConf }) : (reqIndustry ? field(reqIndustry, 'single', 'buyer requirement category') : absentField('buyer-profile extract (LLM)')) },
+    { label: 'Retail / Wholesale', field: absentField('buyer-profile extract (LLM)') },
+    { label: 'Business Scale', field: absentField('buyer-profile extract (LLM)') },
     { label: 'Annual Turnover', field: turnover ? field(turnover, 'inferred', 'web_osint (LLM · from listing snippet, not a filed financial)', { confidence: webConf }) : gstTurnover ? field(gstTurnover, 'registry', 'GST-advance (filed)') : absentField('web_osint / GST-advance') },
+    { label: 'Annual Procurements', field: absentField('observed order qty/rate/cadence (LLM)') },
   ];
-  // PROCUREMENT PROFILE + MARKET FOCUS — no source fields exist in the pipeline. Rendered as muted "Not available"
-  // rows (owner choice) so the 3-column layout holds and the gap is visible/honest. Wire an upstream source to fill.
-  const procurement: LabeledField[] = ['Sourcing Channel', 'Preferred Suppliers', 'Procurement Approach'].map((label) => ({ label, field: absentField('no source field in pipeline') }));
-  const market: LabeledField[] = ['Target Customers', 'Selling Channel', 'Sales Geography'].map((label) => ({ label, field: absentField('no source field in pipeline') }));
+  // ── Procurement Profile "how does he buy?" + Market Focus "whom does he sell to?" — inferred slots the overlay fills.
+  // Empty (unevidenced) rows are HIDDEN on the card (owner: hide-empty); the overlay wires each by index below. ──
+  const procurement: LabeledField[] = ['Procurement Model', 'Purchase Frequency', 'Sourcing Channel', 'Preferred Suppliers', 'Preferred Sourcing Cities', 'Procurement Approach', 'Price vs Quality', 'Payment Preference', 'Delivery Timeline', 'Procurement Challenge'].map((label) => ({ label, field: absentField('buyer-profile extract (LLM)') }));
+  const market: LabeledField[] = ['Target Customers', 'Selling Channel', 'Sales Geography'].map((label) => ({ label, field: absentField('buyer-profile extract (LLM)') }));
 
   // ── B server-LLM overlay — when the response carries `llm_profile` (from the bi-buyer-profile endpoint's LLM tail),
   // its inferred narrative fields REPLACE the deterministic "Not available"/web fallbacks (this is what fills the
@@ -237,8 +276,9 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const lf = (k: string): Field | null => { const o = obj(llm[k]); const v = str(o.value); if (!v || /^(null|n\/?a|none|unknown|not available)$/i.test(v)) return null; return { value: v, present: true, provenance: 'inferred', source: llmSrc, inferred: true, confidence: Number(o.confidence) || undefined, note: str(o.reason) || undefined }; };
   if (Object.keys(llm).length) {
     const setL = (a: LabeledField[], i: number, k: string) => { const f = lf(k); if (f) a[i] = { label: a[i].label, field: f }; };
-    setL(overview, 0, 'business_type'); setL(overview, 1, 'business_stage'); setL(overview, 3, 'annual_turnover');
-    setL(procurement, 0, 'sourcing_channel'); setL(procurement, 1, 'preferred_suppliers'); setL(procurement, 2, 'procurement_approach');
+    setL(buyerDetails, 0, 'buyer_maturity'); setL(buyerDetails, 1, 'buyer_intent'); setL(buyerDetails, 2, 'deal_readiness'); setL(buyerDetails, 3, 'business_objective'); setL(buyerDetails, 4, 'business_stage');
+    setL(overview, 0, 'business_type'); setL(overview, 1, 'b2b_b2c'); setL(overview, 2, 'sub_industry'); setL(overview, 3, 'retail_wholesale'); setL(overview, 4, 'scale'); setL(overview, 5, 'annual_turnover'); setL(overview, 6, 'annual_procurements');
+    setL(procurement, 0, 'procurement_model'); setL(procurement, 1, 'purchase_frequency'); setL(procurement, 2, 'sourcing_channel'); setL(procurement, 3, 'preferred_suppliers'); setL(procurement, 4, 'location_sourcing_preference'); setL(procurement, 5, 'procurement_approach'); setL(procurement, 6, 'price_vs_quality'); setL(procurement, 7, 'payment_mode'); setL(procurement, 8, 'delivery_timeline'); setL(procurement, 9, 'procurement_challenge');
     setL(market, 0, 'target_customers'); setL(market, 1, 'selling_channel'); setL(market, 2, 'sales_geography');
   }
   // Deterministic Selling-Channel fallback (audit ⑤): a GLID that is ALSO a listed IndiaMART seller has a real selling
@@ -303,17 +343,19 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // Udyam / MSME (Sign3) — the authoritative govt SIZE band + NIC industry. summaryOf applies the __health gate
   // (no_data → {} → all-absent muted rows). Was fully dropped before the card saw it; now a first-class block.
   const udy0 = obj(arr(summaryOf(rich, 'udyam').registrations).map(obj)[0]);
-  const udyProfile = obj(udy0.profile);
-  const udyNic = arr(udy0.industry).map(obj).map((x) => `${str(x.nic_code)} ${str(x.industry || x.activity)}`.trim()).filter(Boolean);
+  const udyProfile = obj(udy0.profile);   // legacy udyam_verification shape (nested); v30 pan_to_udyam emits fields FLAT on udy0
+  const uP = (k: string): string => str(udy0[k]) || str(udyProfile[k]);
+  const udyNic = arr(udy0.industry).map(obj).map((x) => `${str(x.nic_code || x.industry_code)} ${str(x.industry || x.activity)}`.trim()).filter(Boolean);
   const udyam: UdyamBlock = {
     present: !!str(udy0.udyam_reg_no),
     regNo: field(str(udy0.udyam_reg_no), 'registry', 'Udyam MSME registry (Sign3)'),
-    enterpriseType: field(str(udyProfile.enterprise_type), 'registry', 'Udyam MSME registry — authoritative SIZE band'),
-    organizationType: field(str(udyProfile.organization_type), 'registry', 'Udyam MSME registry'),
-    majorActivity: field(str(udyProfile.major_activity), 'registry', 'Udyam MSME registry'),
+    enterpriseName: field(uP('enterprise_name'), 'registry', 'Udyam MSME registry'),
+    enterpriseType: field(uP('enterprise_type'), 'registry', 'Udyam MSME registry — authoritative SIZE band'),
+    organizationType: field(uP('organization_type'), 'registry', 'Udyam MSME registry'),
+    majorActivity: field(uP('major_activity'), 'registry', 'Udyam MSME registry'),
     nicIndustries: udyNic,
-    incorporation: field(str(udyProfile.date_of_incorporation), 'registry', 'Udyam MSME registry'),
-    officialAddress: field(str(udy0.official_address), 'registry', 'Udyam MSME registry'),
+    incorporation: field(uP('date_of_incorporation'), 'registry', 'Udyam MSME registry'),
+    officialAddress: field(str(udy0.official_address) || uP('official_address'), 'registry', 'Udyam MSME registry'),
   };
 
   // v29 (demo · "we are not filling fields"): the Company Details block read ONLY cert0 = gst_cert_idfy, which is often
@@ -331,12 +373,17 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const constitutionVal = str(cert0.constitution_of_business) || gdVal('constitution_of_business');
   const regDateVal = str(cert0.date_of_registration) || gdVal('date_of_registration');
   const kybSrc = str(cert0.gstin) ? 'IDfy GST certificate' : 'GST 3-vendor consensus (Sign3⊕IDfy⊕Befisc)';
+  // v38 — IndiaMART's OWN verified GST record (company_reg) is a registry-grade fallback for every KYB field, and the
+  // AUTHORITATIVE source for constitution + turnover-band (IDfy/consensus rarely carry those). Prefer the discovered
+  // vendor value; else fill from company_reg so Company Details isn't blank when only the platform GST record exists.
+  const crGst = str(crSum.gst), crConstitution = str(crSum.constitution), crRegYear = str(crSum.gst_reg_year), crGstStatus = str(crSum.gst_verified);
   const cmp = {
-    gst: gstinVal ? field(gstinVal, 'registry', gstSrc) : absentField('no GSTIN discovered across IDfy / consensus / union'),
-    gstStatus: gstStatusVal ? { value: gstStatusVal, present: true, provenance: 'registry' as Provenance, source: kybSrc, note: 'literal gstin_status (not a hardcoded label)' } : absentField('GST cert / consensus'),
+    gst: gstinVal ? field(gstinVal, 'registry', gstSrc) : (crGst ? field(crGst, 'registry', 'IndiaMART verified GST record (company_reg)') : absentField('no GSTIN discovered across IDfy / consensus / union / IndiaMART')),
+    gstStatus: gstStatusVal ? { value: gstStatusVal, present: true, provenance: 'registry' as Provenance, source: kybSrc, note: 'literal gstin_status (not a hardcoded label)' } : (crGstStatus ? field(crGstStatus, 'registry', 'IndiaMART verified GST record') : absentField('GST cert / consensus')),
     tradeName: tradeNameVal ? field(tradeNameVal, 'registry', kybSrc) : absentField('GST cert / consensus'),
-    constitution: constitutionVal ? field(constitutionVal, 'registry', kybSrc) : absentField('GST cert / consensus'),
-    regDate: regDateVal ? field(regDateVal, 'registry', kybSrc) : absentField('GST cert / consensus'),
+    constitution: constitutionVal ? field(constitutionVal, 'registry', kybSrc) : (crConstitution ? field(crConstitution, 'registry', 'IndiaMART verified GST record (legal status)') : absentField('GST cert / consensus / IndiaMART')),
+    regDate: regDateVal ? field(regDateVal, 'registry', kybSrc) : (crRegYear ? field(crRegYear, 'registry', 'IndiaMART verified GST record (registration year)') : absentField('GST cert / consensus')),
+    turnoverBand: gstTurnover ? field(gstTurnover, 'registry', gstAdvance(rich)?.turnover ? 'GST-advance registry' : 'IndiaMART verified GST record (declared turnover band)') : absentField('GST turnover band'),
     principalAddress,
     identity,
     pans,
@@ -361,9 +408,15 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // Sign3 phone-linked social presence (["FACEBOOK","INSTAGRAM",…]) — a real per-buyer signal (not a web namesake), so it
   // fills a slot as presence-only when web_osint has nothing. No handle/URL is fabricated.
   const sign3Socials = new Set(arr(summaryOf(rich, 'external').social_platforms).map((p) => str(p).toUpperCase()));
+  // v38 — IndiaMART buyerprofile social_profiles (already cleaned/deduped upstream: markdown-wrapped + /test placeholders stripped).
+  // Add their domains to the presence set AND keep the real profile URL, so the footprint shows an actual link (not just "Present").
+  const bpSocialUrl = new Map<string, string>();
+  for (const s of arr(bpSum.social_profiles)) { const d = str(obj(s).domain).toUpperCase(); const u = str(obj(s).url); if (d) { sign3Socials.add(d); if (u && !bpSocialUrl.has(d)) bpSocialUrl.set(d, u); } }
   const sf = (v: unknown, label: string): Field => {
     const s = webVerified ? webVal(v) : '';
     if (s) return { value: s, present: true, provenance: 'inferred', source: `web_osint (LLM) · ${label}`, inferred: true, confidence: webConf };
+    const bpu = bpSocialUrl.get(label.toUpperCase());   // real profile URL from the IndiaMART buyer record
+    if (bpu) return { value: bpu, present: true, provenance: 'registry', source: 'IndiaMART buyer profile · social_profiles (verified link)' };
     if (sign3Socials.has(label.toUpperCase())) return { value: 'Present', present: true, provenance: 'inferred', source: 'Sign3 · phone-linked account', inferred: true, note: 'account exists per Sign3 — presence only, profile URL not captured' };
     return absentField(webVerified ? 'web_osint / Sign3' : 'no web/social account on file (Sign3 checked)');
   };
@@ -396,7 +449,13 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     const list = dedupeStr(xs).map((name) => ({ name, tk: sigTokens(name) }));
     return list.filter((p, i) => p.tk.size === 0 || !list.some((q, j) => j !== i && q.tk.size > p.tk.size && [...p.tk].every((t) => q.tk.has(t)))).map((p) => p.name);
   };
-  const products = dedupeProducts([...reqs.map((r) => str(r.title)), ...(wa?.meta?.productsEnquired || []).map(str)].filter(Boolean));
+  // Prefer the extract-LLM's RANKED products_of_interest (already relevance-filtered — off-core BuyLead titles like
+  // "Tata Chhota Hathi"/"Garbage Tipper Body" are demoted by the LLM but leak through the raw title aggregate). Fall
+  // back to the deterministic aggregate CAPPED to 6 so an unranked dump can't over-elongate the card.
+  const llmPoi = str(obj(llm.products_of_interest).value);
+  const products = llmPoi
+    ? dedupeProducts(llmPoi.split(/\s*[·,;|]\s*/).map(str).filter(Boolean))
+    : dedupeProducts([...reqs.map((r) => str(r.title)), ...(wa?.meta?.productsEnquired || []).map(str)].filter(Boolean)).slice(0, 6);
 
   // #4 — most-recent requirement's BuyLead-page fields (order value / requirement type / category / specs). Prefer the
   // first requirement carrying order-value or specs, else the recency-spine head. orderValue/requirementType are
@@ -437,13 +496,24 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
 
   // ── Amit (demo): verified-business (TS) flag + the prominent plain-language "what does this buyer do" headline ──────
   const idSum = obj(summaryOf(rich, 'identity'));
-  const vbbRaw = idSum.verified_business_buyer_flag; const vbbN = Number(vbbRaw);
-  const verifiedBuyer: BuyerProfileModel['verifiedBuyer'] = (vbbRaw != null && vbbRaw !== '' && !isNaN(vbbN))
-    ? (vbbN >= 6 ? { flag: vbbN, tier: 'trustseal', label: 'TrustSEAL Verified Business Buyer' }
-      : (vbbN === 4 || vbbN === 5) ? { flag: vbbN, tier: 'gst_verified', label: 'GST-Verified Business' }
+  const bpVer = obj(bpSum.verification);   // v38 buyerprofile verification (flag + email/mobile) — bpSum read at top
+  const vbbRaw = idSum.verified_business_buyer_flag ?? bpVer.verified_business_buyer_flag; const vbbN = Number(vbbRaw);
+  // "Verified Buyer" tier = a reachable, verified email AND mobile (email verified + WhatsApp-active/alt-mobile verified).
+  const emailV = bpVer.email === true || bpVer.alt_email === true;
+  const mobileV = bpVer.whatsapp_active === true || bpVer.alt_mobile === true;
+  const verifiedTier = (emailV && mobileV) ? { tier: 'verified' as const, label: 'Verified Buyer' } : null;
+  // v38 SAFETY (audit P1): an IndiaMART is_fraud flag is a HARD NEGATIVE — it overrides every positive tier so a
+  // fraud-flagged account can NEVER read as TrustSEAL/Verified. Shown as its own red badge (never silently hidden).
+  const isFraud = bpSum.is_fraud === true;
+  const verifiedBuyer: BuyerProfileModel['verifiedBuyer'] = isFraud
+    ? { flag: isNaN(vbbN) ? 0 : vbbN, tier: 'fraud', label: '⚠ Fraud-flagged account' }
+    : (vbbRaw != null && vbbRaw !== '' && !isNaN(vbbN))
+    ? (vbbN >= 6 ? { flag: vbbN, tier: 'trustseal', label: 'TrustSEAL Buyer' }
+      : (vbbN === 4 || vbbN === 5) ? { flag: vbbN, tier: 'gst_verified', label: 'Verified Business Buyer' }
+      : verifiedTier ? { flag: vbbN, ...verifiedTier }
       : vbbN > 0 ? { flag: vbbN, tier: 'partial', label: 'Partially-Verified Account' }
       : { flag: vbbN, tier: 'unverified', label: 'Unverified Account' })
-    : null;
+    : (verifiedTier ? { flag: 0, ...verifiedTier } : null);
   // "kis cheez ka dhandha hai" — one plain line: designation · role · what they deal in. Deterministic (no LLM needed);
   // the server-LLM business_persona (if present) supersedes it for a richer phrasing.
   const desigStr = str(idSum.designation);
@@ -455,6 +525,38 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const headline = (llmPersona && !/^(null|n\/?a|none)$/i.test(llmPersona))
     ? llmPersona
     : (() => { const lead = [desigStr, roleStr].filter(Boolean).join(' · '); const s = [lead, headlineProds && `deals in ${headlineProds}`].filter(Boolean).join(' — '); return s.trim() || null; })();
+
+  // ── INTERNAL card: all DETERMINISTIC PII + registry detail (owner: show everything, full/unmasked, high-confidence) ──
+  const detField = (v: string | null | undefined, src: string): Field => { const s = str(v); return s && !isAbsent(s) ? field(s, 'single', src) : absentField(src); };
+  const extLoc = obj(obj(summaryOf(rich, 'external')).location);
+  const contact: ContactPii = {
+    email: detField(idn?.emails?.[0] || ext?.emails?.[0], 'IndiaMART profile / external'),
+    altEmail: detField((idn?.emails || ext?.emails || [])[1], 'external'),
+    fullAddress: detField(ext?.location || idn?.address, 'Befisc (external identity)'),
+    city: detField(idn?.city || ext?.city, 'profile / external'),
+    district: detField(str(idSum.district), 'IndiaMART profile'),
+    state: detField(idn?.state || ext?.state, 'profile / external'),
+    pincode: detField(str(extLoc.pincode), 'Befisc'),
+    dob: detField(ext?.dob, 'Befisc (external identity)'),
+    gender: detField(ext?.gender, 'Befisc (external identity)'),
+    age: detField(ext?.age, 'Befisc (external identity)'),
+    incomeBand: detField(ext?.incomeBand, 'Befisc — purchasing-power hint'),
+  };
+  const gstDetail = gstAdvance(rich);
+  const natureList = (gstDetail?.natureOfBusiness && gstDetail.natureOfBusiness.length) ? gstDetail.natureOfBusiness : gstNature;
+  const businessNature = natureList.length ? field([...new Set(natureList)].join(' · '), 'registry', 'GST nature_of_business_activity (verified)') : absentField('GST certificate / advance');
+  const socialPresenceCount = (ext && ext.socialPresenceCount != null) ? ext.socialPresenceCount : null;
+  const epfoArr = arr(summaryOf(rich, 'epfo').details).map(obj);
+  const epfo: EpfoBlock | null = epfoArr.length ? {
+    present: true,
+    establishment: detField(str(epfoArr[0].establishment_name), 'IDfy EPFO (employer registry)'),
+    employeeCount: detField(str(epfoArr[0].employee_count ?? epfoArr[0].employees ?? epfoArr[0].employee_strength), 'IDfy EPFO'),
+  } : null;
+  const aadSum = obj(summaryOf(rich, 'aadhaar'));
+  const aadNo = str(aadSum.aadhaar || aadSum.aadhaar_number || aadSum.masked_aadhaar || obj(arr(aadSum.facts)[0]).value);
+  const aadhaar: AadhaarBlock | null = (aadNo && !isAbsent(aadNo)) ? { present: true, value: field(aadNo, 'single', 'aadhaar-fact'), name: detField(str(aadSum.name), 'aadhaar-fact') } : null;
+  const paidurlS = str(idSum.paidurl);
+  const catalogueLink = (paidurlS && !isAbsent(paidurlS) && /^https?:|indiamart|\.com|\.in/i.test(paidurlS)) ? field(paidurlS, 'registry', 'IndiaMART storefront (paidurl)') : absentField('IndiaMART listing');
 
   return {
     glid: str(obj(rich).glid),
@@ -470,7 +572,7 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     headline,
     verifiedBuyer,
     businessStory,
-    overview, procurement, market,
+    buyerDetails, overview, procurement, market,
     company: cmp,
     requirementActivity,
     social: {
@@ -480,12 +582,14 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
       linkedin: sf(web.linkedin, 'linkedin'),
       twitter: sf(web.twitter_x ?? web.twitter, 'twitter'),
     },
+    socialPlatforms: [...sign3Socials],
     products,
     productsOffered: arr(summaryOf(rich, 'whatsapp').products_offered).map(str).filter(Boolean),   // available if the spec wants both; not shown by default
     latestRequirement,
     hasActiveRequirement,
     proofs,
     googleBusiness,
+    contact, gstDetail, businessNature, socialPresenceCount, epfo, aadhaar, catalogueLink,
     plan: null,   // §2 — no plan_type / activated_on field anywhere in the pipeline → card omits the TrustSEAL Plan tile entirely (never fabricated)
     health: Object.fromEntries(Object.keys(sources).map((k) => { const n = obj(sources[k]); const h = obj('__health' in n ? n.__health : obj(n.summary).__health); return [k, { ok: h.ok !== false, status: str(h.status) }]; })),
   };

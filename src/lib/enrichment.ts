@@ -723,14 +723,34 @@ export function extractHealth(raw: unknown): HealthNode[] {
 // mounting). Each unguarded call = a separate ~7-min n8n execution. This map coalesces concurrent callers for the SAME
 // glid onto ONE fetch → n8n Executions shows a SINGLE run per GLID. Entry clears on settle, so a later re-pull works.
 const enrichInFlight = new Map<string, Promise<{ profile: EnrichmentProfile | null; raw: unknown }>>();
-export async function fetchEnrichment(glid: string, opts?: { fast?: boolean }): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> {
+// PER-(glid:tier) RESULT CACHE (owner 2026-07-10): "switching tier should reset, but coming back to a tier I already
+// pulled keeps the progress — not a fresh request." Session-scoped (cleared on reload). Restoring a hit re-syncs the
+// module globals (lastRich/lastRaw/lastHealth/lastServerTrace) so getEnrichmentRich()/health/trace reflect THAT tier —
+// the card + extract read those globals, so a switch-back is instant + consistent. (Distinct from the old "no stale
+// cross-session cache" lock — this is within one open dashboard, exactly what the owner asked for.)
+const enrichResultCache = new Map<string, { profile: EnrichmentProfile | null; legacy: unknown; rich: unknown; health: HealthNode[]; serverTrace: ServerTrace | null }>();
+export function clearEnrichResultCache(): void { enrichResultCache.clear(); }
+// v42 — per-tier cache visibility for the tier selector (✓ = this glid+tier already pulled this session)
+export function hasCachedTier(glid: string, tier: string): boolean { return enrichResultCache.has(`${String(glid).trim()}:${tier}`); }
+export async function fetchEnrichment(glid: string, opts?: { fast?: boolean; tier?: 'superfast' | 'fast' | 'normal'; fresh?: boolean }): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> {
   if (!glid?.trim()) return { profile: null, raw: null };
-  // fast=1 (respond-after-facts): the workflow gates web_osint + udyam OFF (v16.5) → responds at the ~164s fast tier.
-  // Deduped SEPARATELY from the full pull (different key) so the frontend can fire both in parallel: fast paints first,
-  // full upgrades with web_osint/udyam. On a v16.4-or-earlier endpoint fast=1 is simply ignored (full pull) — safe.
-  const _key = glid.trim() + (opts?.fast ? ':fast' : '');
-  const _inflight = enrichInFlight.get(_key);
-  if (_inflight) return _inflight; // a pull for this GLID is already running — share it, don't fire a 2nd execution
+  // 3 SPEED TIERS (2026-07-09): superfast (DEFAULT) = registries + PNS-insights API + Udyam + gweb, NO Redash transcripts /
+  // NO Parallel.ai; fast = superfast + the 2 Redash audio transcripts; normal = fast + Parallel.ai deep web. Server-side
+  // t0 resolves ?tier=; deduped per-tier so tiers can be fetched independently. Back-compat: opts.fast → 'fast'.
+  const _tier = opts?.tier || (opts?.fast ? 'fast' : 'superfast');
+  const _key = glid.trim() + ':' + _tier;
+  // FRESH PULL (owner): a "Fresh pull" bypasses BOTH caches — drops the frontend per-tier entry AND sends ?nocache=1 so
+  // n8n's result-cache short-circuit is skipped (a genuine, uncached, all-sources-re-hit pull). The fresh result still
+  // repopulates both caches at the end, so subsequent switch-backs are fast again.
+  const _fresh = !!opts?.fresh;
+  if (_fresh) enrichResultCache.delete(_key);
+  const _cached = _fresh ? undefined : enrichResultCache.get(_key);
+  if (_cached) { // instant switch-back — restore this tier's globals so the card/extract re-render from ITS data
+    lastRich = _cached.rich; lastRaw = _cached.legacy; lastHealth = _cached.health; lastServerTrace = _cached.serverTrace;
+    return { profile: _cached.profile, raw: _cached.legacy };
+  }
+  const _inflight = _fresh ? undefined : enrichInFlight.get(_key);
+  if (_inflight) return _inflight; // a pull for this GLID is already running — share it, don't fire a 2nd execution (a fresh pull never shares a possibly-cached in-flight one)
   const _run = (async (): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> => {
   try {
     // `-advanced` is the v12 path: same 7 buyer sources PLUS the appended `requirement_brain`
@@ -754,7 +774,7 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean }): 
     // V16.2 pulls run ~7-10 min (Parallel web-OSINT + IDfy/Sign3 async polls). The old 240s (4min) abort fired BEFORE
     // n8n responded → screen fell back to "No buyer data". Bumped to 660s (11 min) to cover the real runtime.
     // (Proper fix is speeding up the pull — de-Wait the async poll loops — but this unblocks the dashboard now.)
-    const res = await fetch(api(`/api/imworkflow/webhook/${path}?glid=${g}${opts?.fast ? '&fast=1' : ''}`), { signal: AbortSignal.timeout(660000) });
+    const res = await fetch(api(`/api/imworkflow/webhook/${path}?glid=${g}&tier=${_tier}${_fresh ? '&nocache=1' : ''}`), { signal: AbortSignal.timeout(1200000) });   // 20 min — a real `normal` (Parallel) pull was observed at ~17 min (total_pull_s 1047); the old 11-min cap aborted it BEFORE n8n responded. Superfast/fast finish far sooner; the 75s "slow — reload/switch" prompt is the escape hatch.
     if (!res.ok) return { profile: null, raw: null };
     const _resp = await res.json();
     // n8n "Respond to Webhook" may emit the single final-assemble item WRAPPED IN AN ARRAY ([{ glid, sources, … }]).
@@ -778,6 +798,8 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean }): 
     // null here is a safe degrade. Default OFF (-advanced) → old array shape → computes exactly as before.
     let profile: EnrichmentProfile | null = null;
     try { profile = deriveEnrichment(legacy, new Date().toISOString()); } catch { profile = null; }
+    // cache this tier's full result (+ the module globals it implies) so a later switch-back is instant, not a re-pull.
+    try { enrichResultCache.set(_key, { profile, legacy, rich: BI ? rich : null, health: lastHealth, serverTrace: lastServerTrace }); } catch { /* noop */ }
     return { profile, raw: legacy };
   } catch {
     return { profile: null, raw: null };
@@ -819,15 +841,16 @@ export async function fetchBuyerProfileLLM(glid: string): Promise<unknown> {
 // fetchBuyerProfileLLM. Registry facts (GST/PAN/company/address/tenure/socials) are NEVER in buyer{} — they ride sources.*.
 type BuyerUnified = { glid?: string; sources?: Record<string, unknown>; derived_anchors?: Record<string, unknown>; buyer?: Record<string, { value: string; confidence: number; reason?: string; grounded?: boolean; sources?: string[] }>; __health?: unknown };
 const unifiedInFlight = new Map<string, Promise<BuyerUnified | null>>();
-export async function fetchBuyerUnified(glid: string, opts?: { fast?: boolean }): Promise<BuyerUnified | null> {
+export async function fetchBuyerUnified(glid: string, opts?: { fast?: boolean; tier?: 'superfast' | 'fast' | 'normal' }): Promise<BuyerUnified | null> {
   if (!glid?.trim()) return null;
   const g = glid.trim();
-  const key = g + (opts?.fast ? ':fast' : '');   // fast tier gates Parallel web + Udyam OFF server-side; deduped separately from full
+  const _tier = opts?.tier || (opts?.fast ? 'fast' : 'superfast');   // 3 tiers: superfast(default)/fast/normal — see fetchEnrichment
+  const key = g + ':' + _tier;
   const hit = unifiedInFlight.get(key);
   if (hit) return hit;
   const run = (async (): Promise<BuyerUnified | null> => {
     try {
-      const res = await fetch(api(`/api/imworkflow/webhook/${BUYER_UNIFIED_HOOK}?glid=${encodeURIComponent(g)}${opts?.fast ? '&fast=1' : ''}`), { signal: AbortSignal.timeout(660000) });
+      const res = await fetch(api(`/api/imworkflow/webhook/${BUYER_UNIFIED_HOOK}?glid=${encodeURIComponent(g)}&tier=${_tier}`), { signal: AbortSignal.timeout(660000) });
       if (!res.ok) return null;
       const resp = await res.json();
       const u = Array.isArray(resp) ? (resp.find((x) => x && typeof x === 'object' && ('buyer' in x || 'sources' in x)) ?? resp[0] ?? resp) : resp;
