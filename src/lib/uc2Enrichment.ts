@@ -149,7 +149,7 @@ export function buildUC2Prompt(ctx: UC2Context): { system: string; user: string;
   return { system: UC2_ENRICH_SYSTEM, user, evidenceIds: ctx.evidence.map((e) => e.evidence_id) };
 }
 
-const GATE_LO = 50; // ≥LO apply · below → keep raw (no change shown)
+const GATE_LO = 70; // audit 2026-07-13: aligned with offerEnrich (≥70 apply) — a medium-confidence (50-69) edit no longer OVERWRITES a buyer-recorded field; it is held. Owner data-honesty: don't overwrite the buyer's own words on a medium guess.
 function resolveUC2Evidence(ids: string[] | undefined, byId: Map<string, UC2Evidence>): { ev: UC2Evidence[]; leaks: number } {
   const ev: UC2Evidence[] = []; let leaks = 0;
   for (const id of ids || []) { const e = byId.get(id); if (e) ev.push(e); else leaks++; }
@@ -202,8 +202,10 @@ export function mergeUC2LLM(ctx: UC2Context, out: UC2LLMOut | null): UC2Result {
   // added specs (not already present)
   for (const x of specEdits) if (x.applied && x.kind === 'added' && !norms.has(norm(x.field))) specOut.push({ k: x.field, kind: 'added', to: x.to, reason: x.reason });
 
-  const corrected = editsFull.filter((x) => x.applied && x.kind === 'corrected').length;
-  const added = editsFull.filter((x) => x.applied && x.kind === 'added').length;
+  // audit P2: count corrected/added from what is ACTUALLY RENDERED (specOut + the title/category/location edits), not
+  // from editsFull — a 'corrected' spec whose field matched no base key was counted but never shown, overstating "N corrected".
+  const corrected = specOut.filter((x) => x.kind === 'corrected').length + [titleE, catE, locE].filter(Boolean).length;
+  const added = specOut.filter((x) => x.kind === 'added').length;
   const ev = uc2Eval(editsFull, leaks, !!out);
   const derived = ctx.profile.length; // Available + profile rows are AI-derived (framed "new")
   const parts: string[] = [];

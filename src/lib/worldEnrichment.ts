@@ -179,9 +179,13 @@ export async function fetchWorldContext(args: {
     business.status = (adv.data.status || adv.data.registration_status) as string | undefined;
     business.turnoverBand = (adv.data.aggregate_turnover || adv.data.turnover) as string | undefined;
     business.natureOfBusiness = adv.data.nature_of_business as string | undefined;
-    const sac = adv.data.sac_codes || adv.data.hsn_codes;
-    if (Array.isArray(sac)) business.sacCodes = sac.map(String);
-    business.verified = business.status?.toLowerCase().includes('active') ?? false;
+    // audit P2: keep goods (HSN) and services (SAC) codes in their OWN buckets — the old `sac_codes || hsn_codes`
+    // stashed HSN goods codes into sacCodes (services) whenever only HSN was returned, mislabelling them.
+    if (Array.isArray(adv.data.sac_codes)) business.sacCodes = (adv.data.sac_codes as unknown[]).map(String);
+    if (Array.isArray(adv.data.hsn_codes) && !business.hsnCodes.length) business.hsnCodes = (adv.data.hsn_codes as unknown[]).map(String);
+    // audit 2026-07-13 (P1): substring includes('active') matched "Inactive"/"Not Active" as verified=true. Match the
+    // active state exactly (allow only a leading modifier-free "active"/"verified"), and reject explicit negatives.
+    business.verified = (() => { const st = business.status?.trim().toLowerCase() || ''; if (!st) return false; if (/\b(in-?active|cancel|suspend|not\s+active|not\s+verified|deactivat)/.test(st)) return false; return /^(active|verified)\b/.test(st); })();
   }
   if (udyam.data) {
     business.udyam = {

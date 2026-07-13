@@ -182,13 +182,15 @@ export interface ExternalConfig {
 
 // Creds/endpoints come from env (Vite) — NEVER hardcoded in source. Part C wires these.
 export function getExternalConfig(): ExternalConfig {
-  const e = ((import.meta as unknown as { env?: Record<string, string> }).env) || {};
+  // audit 2026-07-13 (P0-security): read each VITE_ var by STATIC member access so Vite inlines only these — NOT the
+  // whole import.meta.env object (which would pull every VITE_ var, incl. the Langfuse secret, into the bundle).
+  const env = import.meta.env as unknown as Record<string, string | undefined>;
   return {
-    befiscAuthkey: e.VITE_BEFISC_AUTHKEY,
-    befiscProfileEndpoint: e.VITE_BEFISC_PROFILE_ENDPOINT,
-    sign3Endpoint: e.VITE_SIGN3_ENDPOINT,
-    sign3Bearer: e.VITE_SIGN3_BEARER,
-    proxyBase: e.VITE_EXTERNAL_PROXY_BASE || '/api/smartauth',
+    befiscAuthkey: env.VITE_BEFISC_AUTHKEY,
+    befiscProfileEndpoint: env.VITE_BEFISC_PROFILE_ENDPOINT,
+    sign3Endpoint: env.VITE_SIGN3_ENDPOINT,
+    sign3Bearer: env.VITE_SIGN3_BEARER,
+    proxyBase: env.VITE_EXTERNAL_PROXY_BASE || '/api/smartauth',
   };
 }
 

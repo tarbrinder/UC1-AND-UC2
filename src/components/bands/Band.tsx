@@ -20,27 +20,45 @@ const TONE: Record<BandTone, { chip: string; ring: string; bar: string; text: st
 };
 
 // The numbered band shell. `code` = "L1"…"L7"/"UC3"; `status` = a one-glance health/count chip; `meta` = small note.
-export function Band({ code, title, subtitle, tone = 'slate', status, statusTone, meta, defaultOpen = false, children }: {
+export function Band({ code, title, subtitle, tone = 'slate', status, statusTone, meta, defaultOpen = false, locked = false, children }: {
   code: string; title: string; subtitle?: string; tone?: BandTone;
-  status?: ReactNode; statusTone?: BandTone; meta?: ReactNode; defaultOpen?: boolean; children: ReactNode;
+  status?: ReactNode; statusTone?: BandTone; meta?: ReactNode; defaultOpen?: boolean; locked?: boolean; children: ReactNode;
 }) {
   const t = TONE[tone];
   const st = statusTone ? TONE[statusTone] : t;
+  const header = (
+    <>
+      <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded border ${t.chip} font-mono`}>{code}</span>
+      <span className="flex-1 min-w-0">
+        <span className="block text-[13px] font-semibold text-gray-800 truncate">{title}</span>
+        {subtitle && <span className="block text-[10.5px] text-gray-400 truncate">{subtitle}</span>}
+      </span>
+      {status != null && <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded border ${st.chip}`}>{status}</span>}
+    </>
+  );
+  const body = (
+    <div className="px-3 pb-3 pt-1 border-t border-gray-100">
+      {meta && <div className="text-[10.5px] text-gray-400 mb-2">{meta}</div>}
+      {children}
+    </div>
+  );
+  // UI-5 (owner 2026-07-13): a LOCKED band is always-open and has NO collapse control — render a plain container, not a
+  // <details>, so it can never be closed. Used for the buylead Debug band (owner: "should not be closable, always open").
+  if (locked) {
+    return (
+      <div className={`rounded-xl border ${t.ring} bg-white overflow-hidden`}>
+        <div className="select-none flex items-center gap-2.5 px-3 py-2.5">{header}</div>
+        {body}
+      </div>
+    );
+  }
   return (
     <details open={defaultOpen} className={`group rounded-xl border ${t.ring} bg-white overflow-hidden`}>
       <summary className="cursor-pointer list-none select-none flex items-center gap-2.5 px-3 py-2.5 hover:bg-gray-50/70">
-        <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded border ${t.chip} font-mono`}>{code}</span>
-        <span className="flex-1 min-w-0">
-          <span className="block text-[13px] font-semibold text-gray-800 truncate">{title}</span>
-          {subtitle && <span className="block text-[10.5px] text-gray-400 truncate">{subtitle}</span>}
-        </span>
-        {status != null && <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded border ${st.chip}`}>{status}</span>}
+        {header}
         <span className="shrink-0 text-gray-300 group-open:rotate-90 transition-transform text-[11px]">▶</span>
       </summary>
-      <div className="px-3 pb-3 pt-1 border-t border-gray-100">
-        {meta && <div className="text-[10.5px] text-gray-400 mb-2">{meta}</div>}
-        {children}
-      </div>
+      {body}
     </details>
   );
 }

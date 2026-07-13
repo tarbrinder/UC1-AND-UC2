@@ -43,6 +43,24 @@ export function isAbsent(value: string | null | undefined): boolean {
 // clean a possibly-absent web string → real value or null
 const webVal = (v: unknown): string | null => { const s = str(v); return (!s || isAbsent(s)) ? null : s; };
 
+// ── SHARED digital-footprint platform → bucket map (audit BPC-84) — ONE source of truth so the GLADMIN card
+// (FootprintChips) and the BuyLead card (BL footprint builder) surface the IDENTICAL set from the same Sign3
+// social_platforms data. UPPERCASE match key → display label + bucket. (IndiaMART / GST / Udyam / EPFO are added
+// per-surface from their own model fields, not from social_platforms.) ────────────────────────────────────────────
+export type FootprintBucket = 'b2b' | 'social' | 'consumer' | 'discovery';
+export const PLATFORM_BUCKET: Array<{ key: string; label: string; bucket: FootprintBucket }> = [
+  { key: 'TRADEINDIA', label: 'TradeIndia', bucket: 'b2b' }, { key: 'EXPORTERSINDIA', label: 'ExportersIndia', bucket: 'b2b' }, { key: 'ALIBABA', label: 'Alibaba', bucket: 'b2b' },
+  { key: 'FACEBOOK', label: 'Facebook', bucket: 'social' }, { key: 'INSTAGRAM', label: 'Instagram', bucket: 'social' }, { key: 'LINKEDIN', label: 'LinkedIn', bucket: 'social' }, { key: 'TWITTER', label: 'Twitter/X', bucket: 'social' }, { key: 'X', label: 'Twitter/X', bucket: 'social' }, { key: 'YOUTUBE', label: 'YouTube', bucket: 'social' },
+  { key: 'AMAZON', label: 'Amazon', bucket: 'consumer' }, { key: 'FLIPKART', label: 'Flipkart', bucket: 'consumer' }, { key: 'SNAPDEAL', label: 'Snapdeal', bucket: 'consumer' }, { key: 'MYNTRA', label: 'Myntra', bucket: 'consumer' },
+  { key: 'JUSTDIAL', label: 'JustDial', bucket: 'discovery' }, { key: 'INDIABIZ', label: 'IndiaBiz', bucket: 'discovery' }, { key: 'CRUNCHBASE', label: 'Crunchbase', bucket: 'discovery' },
+];
+export function bucketPlatforms(platforms: readonly string[]): Record<FootprintBucket, string[]> {
+  const up = new Set((platforms || []).map((p) => String(p).toUpperCase()));
+  const out: Record<FootprintBucket, string[]> = { b2b: [], social: [], consumer: [], discovery: [] };
+  for (const { key, label, bucket } of PLATFORM_BUCKET) if (up.has(key) && !out[bucket].includes(label)) out[bucket].push(label);
+  return out;
+}
+
 // ── §3 reusable reconciliation — one function, source-priority + agreement, alternates always kept ──────────────
 export type SourceTier = 'registry' | 'agreement' | 'thirdparty' | 'web';
 const TIER_RANK: Record<SourceTier, number> = { registry: 4, agreement: 3, thirdparty: 2, web: 1 };
@@ -78,7 +96,10 @@ export function triangulateAddress(gstAddr: string | null, webAddr: string | nul
   const w = webAddr && !isAbsent(webAddr) ? webAddr.trim() : '';
   if (!g && !w) return absentField('GST registry / web_osint');
   if (g && w) {
-    const match = normVal(g).includes(normVal(w).slice(0, 24)) || normVal(w).includes(normVal(g).slice(0, 24));
+    // audit P2: a 24-char prefix let a city-only web string "agree" with any full GST address in that city. Require the
+    // SHORTER address to be substantial (≥30 chars) AND fully contained in the longer one before claiming 2-source agreement.
+    const gn = normVal(g), wn = normVal(w); const shorter = gn.length <= wn.length ? gn : wn; const longer = gn.length <= wn.length ? wn : gn;
+    const match = shorter.length >= 30 && longer.includes(shorter);
     if (match) return { value: g, present: true, provenance: 'triangulated', source: 'GST certificate ⊕ web_osint (agree)', note: 'confirmed by 2 independent sources' };
     return { value: g, present: true, provenance: 'registry', source: 'GST certificate (registry)', note: 'web_osint reported a different address', alternates: [{ value: w, source: 'web_osint (LLM)' }] };
   }
@@ -207,11 +228,15 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // (owner §2). buyer_turns / campaigns_received (cited) are ABSENT from the frontend shape → computed from the WA
   // timeline instead of trusting a key that isn't there. ────────────────────────────────────────────────────────
   const buyerMsgs = wa ? wa.inbound.buyerMsgs : null;
-  const campaigns = wa ? wa.inbound.messages.filter((m) => m.side === 'platform' && m.kind === 'template').length : null;
+  // HOD P-1 / UI-6 (2026-07-13): the top strip carries ONLY the three counts the internal APIs already give —
+  // Requirements · Calls · Messages. "Campaigns Received" REMOVED (it's an outbound-to-buyer count, not buyer activity).
+  const _cs = obj(obj(sources.calls).summary); const _ps = obj(obj(sources.pns_calls).summary);   // total connected calls across both call sources
+  const _cn = (Number(_cs.call_count) || (Array.isArray(_cs.calls) ? _cs.calls.length : 0)) + (Number(_ps.call_count) || (Array.isArray(_ps.calls) ? _ps.calls.length : 0));
+  const callCount = _cn > 0 ? _cn : null;
   const tiles: StatTile[] = [
-    { label: 'Buyer Messages (6mo)', value: buyerMsgs, sourceNote: 'whatsapp.summary.timeline · buyer-side count (cited buyer_turns not in shape)' },
-    { label: 'Campaigns Received', value: campaigns, sourceNote: 'whatsapp.summary.timeline · templated/offer msgs (cited campaigns_received not in shape)' },
-    { label: 'BuyLeads', value: reqs.length || null, sourceNote: 'requirement.summary.requirements[].length' },
+    { label: 'Total Requirements', value: (sources as Record<string, unknown>).requirement ? reqs.length : (reqs.length || null), sourceNote: 'requirement.summary.requirements[].length' },
+    { label: 'Total Calls', value: callCount, sourceNote: 'calls/pns_calls summary · total connected calls' },
+    { label: 'Buyer Messages', value: buyerMsgs, sourceNote: 'whatsapp.summary.timeline · buyer-side count' },
   ];
 
   // ── business overview ───────────────────────────────────────────────────────────────────────────────────────
@@ -285,10 +310,12 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // channel even without the server-LLM overlay — surface its own storefront rather than leaving the slot blank.
   {
     const idS = obj(summaryOf(rich, 'identity')); const cslS = obj(summaryOf(rich, 'csl'));
-    const paidurl = str(idS.paidurl); const alsoSeller = cslS.also_a_seller === true || /listed seller/i.test(str(cslS.account_status));
-    if (!market[1].field.present && (paidurl || alsoSeller)) {
-      const store = paidurl ? paidurl.replace(/^https?:\/\/(www\.)?/, '').replace(/\/+$/, '') : '';
-      market[1] = { label: 'Selling Channel', field: { value: store ? `Sells on IndiaMART · ${store}` : 'Listed seller on IndiaMART', present: true, provenance: 'derived', source: 'IndiaMART listing (paidurl · also_a_seller)', note: 'this GLID is also a listed IndiaMART seller' } };
+    const paidurl = str(idS.paidurl); void cslS;
+    // audit P2 (consistency): align with the BuyLead card's LINK-GATE — surface Selling Channel ONLY when there is a
+    // real storefront URL (paidurl). A bare "also_a_seller" flag with no link is no longer shown as a selling channel.
+    if (!market[1].field.present && paidurl) {
+      const store = paidurl.replace(/^https?:\/\/(www\.)?/, '').replace(/\/+$/, '');
+      market[1] = { label: 'Selling Channel', field: { value: `Sells on IndiaMART · ${store}`, present: true, provenance: 'derived', source: 'IndiaMART listing (paidurl)', note: 'this GLID is also a listed IndiaMART seller (storefront link on file)' } };
     }
   }
 
@@ -396,9 +423,15 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const bucketCounts = new Map<string, number>();
   const order: string[] = [];
   for (const r of reqs) { const b = monthBucket(r); if (!b) continue; if (!bucketCounts.has(b)) order.push(b); bucketCounts.set(b, (bucketCounts.get(b) || 0) + 1); }
-  const months: MonthBar[] = order.map((m) => ({ month: m, count: bucketCounts.get(m) || 0 }));
+  // audit P2: order the month axis CHRONOLOGICALLY (was requirement-sort order → jumbled) and enforce the stated
+  // "(Last 6 Months)" window — keep only the 6 most-recent month buckets.
+  const _bucketKey = (b: string): number => { const m = /^([A-Z]{3})'(\d{2})$/.exec(b); return m ? (2000 + Number(m[2])) * 12 + Math.max(0, MON.indexOf(m[1])) : 0; };
+  const months: MonthBar[] = order.map((m) => ({ month: m, count: bucketCounts.get(m) || 0 })).sort((a, b) => _bucketKey(a.month) - _bucketKey(b.month)).slice(-6);
+  // audit P2: when the requirement source RAN (present), 0 BuyLeads is an honest ZERO, not unknown '—'. Only null when
+  // the source itself is absent/errored.
+  const _reqPresent = !!(sources as Record<string, unknown>).requirement;
   const requirementActivity = {
-    total: reqs.length || null,
+    total: _reqPresent ? reqs.length : (reqs.length || null),
     months,
     series: ['BuyLeads'],
     note: months.length ? 'Grouped by BuyLead posted-month. Single series — the reference BuyLead/Call/Enquiry 3-way split is not present in this data shape.' : 'No dated requirements to chart.',
@@ -562,7 +595,7 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     glid: str(obj(rich).glid),
     available,
     header: {
-      company: field(company, company === idn?.company ? 'registry' : 'inferred', company === idn?.company ? 'IndiaMART profile' : 'GST certificate'),
+      company: field(company, 'registry', company === idn?.company ? 'IndiaMART profile' : 'GST certificate'),   // audit P2: GST-cert name is REGISTRY-grade, not 'inferred' (LLM synthesis)
       contactName: field(idn?.name || '', 'registry', 'IndiaMART profile'),
       memberSince: field(memberSince, 'registry', 'GLUSR usersince'),
       registeredLocation: (() => { const loc = [idn?.city, idn?.state].filter(Boolean).join(', '); return loc ? field(loc, 'registry', 'IndiaMART profile · registered city (glusr) — the ORIGINAL operating location; sourcing cities are separate') : absentField('profile city'); })(),

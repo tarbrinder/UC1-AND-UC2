@@ -68,7 +68,11 @@ function present(rich: unknown, spec: SurfaceSpec): boolean {
     const n = obj(node);
     const summary = n.summary, raw = n.raw;
     const nonEmpty = (v: unknown) => v != null && (Array.isArray(v) ? v.length > 0 : (typeof v === 'object' ? Object.keys(v as object).length > 0 : String(v).trim() !== ''));
-    if (nonEmpty(summary) || nonEmpty(raw) || nonEmpty(node)) return true;
+    if (nonEmpty(summary) || nonEmpty(raw)) return true;
+    // audit SC-71: the bare-node fallback must be SEMANTIC — a wrapper carrying only plumbing (__health/count/status/_meta)
+    // is NOT "present". Only a real, non-plumbing content key with a value counts.
+    const PLUMB = new Set(['summary', 'raw', '__health', '_meta', 'count', 'status', 'ok', 'node']);
+    if (Object.keys(n).some((kk) => !PLUMB.has(kk) && nonEmpty((n as Record<string, unknown>)[kk]))) return true;
   }
   return false;
 }

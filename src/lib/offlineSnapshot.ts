@@ -22,6 +22,7 @@ export interface OfflineSnapshot {
   extractMs: number;
   pruneKeep: string[] | null;           // the twin-prune keep-set
   uc2Map: Record<string, unknown>;      // captured per-offer requirement enrichment (may be partial)
+  observedExternal?: unknown;           // audit P1: the client-fetched Befisc/Sign3 external identity (window.__buyerTwin.observed_external) — WITHOUT this the offline copy showed fewer verified anchors than the live view
   readZoom?: number;
 }
 
@@ -32,6 +33,9 @@ export function maybeHydrateOffline(): OfflineSnapshot | null {
   if (!snap || typeof snap !== 'object' || !snap.glid) return null;
   w.__offlineSnapshot = snap;
   w.__ledgerDemoRaw = snap.legacy;                       // fetch + external effects short-circuit → no network / paid API
+  // audit P1: re-seed the captured Befisc/Sign3 external identity (GLID-keyed, so withObservedExternal accepts it) so the
+  // offline copy shows the SAME verified anchors as the live view it reproduces.
+  try { if (snap.observedExternal) { (w as { __buyerTwin?: Record<string, unknown> }).__buyerTwin = { ...((w as { __buyerTwin?: Record<string, unknown> }).__buyerTwin || {}), observed_external: snap.observedExternal, observed_external_glid: snap.glid }; } } catch { /* noop */ }
   try { seedEnrichment({ rich: snap.rich, raw: snap.legacy, serverTrace: (snap.serverTrace ?? null) as never, health: (Array.isArray(snap.health) ? snap.health : []) as never }); } catch { /* noop */ }
   try { seedLLMRaw((snap.llmRaw || {}) as Record<string, never>); } catch { /* noop */ }
   return snap;

@@ -1,9 +1,9 @@
 // ─── Standalone alternate UI (owner) — the PURE-BACKEND replica of the dashboard card ────────────────────────────────
 // Open with ?profile=<GLID>. Fetches the INDEPENDENT bi-buyer-unified endpoint (ONE server-side LLM) and renders
-// BuyerProfileCard by SIMPLE KEY-MATCH on { sources, buyer } — no client extract, no debug. FAST-ONLY (owner 2026-07-08):
-// one fast pull fills the FIXED attribute set; there is no "run full" — every hit returns the same closed schema.
-// (Web OSINT + Udyam are gated OFF at the fast tier; the attribute KEYS are identical regardless — the fast pull just
-// grounds fewer of them when web/Udyam are absent.) Same attributes as the dashboard UC1/card — the LLM runs INSIDE n8n.
+// BuyerProfileCard by SIMPLE KEY-MATCH on { sources, buyer } — no client extract, no debug. (Doc updated 2026-07-13:
+// the component ships the SAME 3-tier selector as the dashboard — superfast/fast/normal — each returning the same closed
+// attribute schema; deeper tiers just ground more keys, e.g. Udyam + gweb are on at every tier, Parallel.ai adds at normal.
+// The attribute KEYS are identical regardless of tier.) Same attributes as the dashboard UC1/card — the LLM runs INSIDE n8n.
 import { useEffect, useState } from 'react';
 import { fetchBuyerUnified, fetchEnrichment, getEnrichmentRich } from '../lib/enrichment';
 import BuyerProfileCard from './BuyerProfileCard';

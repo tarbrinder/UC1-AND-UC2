@@ -22,7 +22,8 @@ import { buildPnsCards } from '../lib/pnsCards';
 import { buildRequirements, requirementsFromMerged } from '../lib/requirements';
 import { buildOfferSkeleton, buildOfferEnrichPrompt, mergeOfferLLM, type OfferLLMOut } from '../lib/offerEnrich';
 import { buildPrunePrompt, applyPrune, synthEval, type FinalAttr } from '../lib/synthesisEngine';
-import { bundleFromResponse, buildExtractPrompt, extractedToFinals, finalsToBuyerBlock, extractNeedsInput, type RichResponse } from '../lib/buyerProfileExtract';
+import { bundleFromResponse, buildExtractPrompt, extractedToFinals, finalsToBuyerBlock, extractNeedsInput, EXTRACT_PROMPT_VERSION, type RichResponse } from '../lib/buyerProfileExtract';
+import { bucketPlatforms } from '../lib/buyerProfileModel';   // audit BPC-84: shared footprint bucket map (same set on both cards)
 import { fetchEnrichment, getEnrichmentRich, getServerTrace, getEnrichmentHealth, hasCachedTier } from '../lib/enrichment';
 import { runExternal } from '../lib/externalRun';
 import { getLLMRaw, getLLMHealth } from '../lib/gemini';
@@ -31,7 +32,8 @@ import { identityFromMerged, externalFromMerged, resolveAvailable, resolveBuyerN
 import { attributeLineage } from '../lib/attributeLineage';
 import { parseRequirementBrain, resolveRequirement } from '../lib/requirementBrain';
 import { stateFromFrequency } from '../lib/brains/threeBrainRegistry';
-import { L0Band, L1Band, L3Band, L4Band, L5Band, L6Band, UC2DebugBand, CrawlerBand, L7Band, UC3Band, confidenceChip, type SignalChannel, type OutAttr, type EvalRow, type CatalogRow, type OfferFieldRow, type L6Availability, type L6ProfileRow, type ReqRow, type L1NodeRow } from './bands/ledgerBands';
+import { L0Band, L1Band, L3Band, L4Band, L5Band, L6Band, UC2DebugBand, L7Band, UC3Band, confidenceChip, type SignalChannel, type OutAttr, type EvalRow, type CatalogRow, type OfferFieldRow, type L6Availability, type L6ProfileRow, type ReqRow, type L1NodeRow } from './bands/ledgerBands';
+import { Download, IdCard, FileText } from 'lucide-react';   // UI-4: crisp SVG icons replace the download/toggle/header emoji
 import BuyerProfileCard from './BuyerProfileCard';
 import { downloadInteractiveHtml } from '../lib/downloadProfile';
 import { getOfflineSnapshot } from '../lib/offlineSnapshot';
@@ -129,10 +131,14 @@ function StagedLoader({ glid, complete, slow }: { glid?: string; complete?: bool
 // The form stores the normalised result on window.__buyerTwin.observed_external. Merge it in as one more
 // raw element so the ledger's extractor surfaces the External (Befisc/Sign3) nodes on a real pull. When no
 // external pull ran (demo / no mobile), this is a no-op and those nodes correctly stay absent.
-function withObservedExternal(raw: unknown): unknown {
+// P0 (audit 2026-07-13): observed_external is keyed by GLID so buyer A's Befisc/Sign3 PII (age/gender/income/PAN)
+// can NEVER bleed into buyer B. Only merge when the stored GLID matches the current view's GLID.
+function withObservedExternal(raw: unknown, glid: string): unknown {
   if (!Array.isArray(raw)) return raw;
-  const obs = (window as unknown as { __buyerTwin?: { observed_external?: unknown } }).__buyerTwin?.observed_external;
+  const tw = (window as unknown as { __buyerTwin?: { observed_external?: unknown; observed_external_glid?: string } }).__buyerTwin;
+  const obs = tw?.observed_external;
   if (!obs || typeof obs !== 'object') return raw;
+  if (String(tw?.observed_external_glid || '') !== String(glid || '').trim()) return raw; // belongs to a different buyer — ignore
   const already = (raw as Array<Record<string, unknown>>).some((el) => el && typeof el === 'object' && ('observed_external' in el || 'befisc' in el || 'sign3' in el));
   return already ? raw : [...raw, { observed_external: obs }];
 }
@@ -189,7 +195,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     // V10 (owner-locked #7): NO caching — always pull fresh n8n so the rich extract input is current + matches THIS glid.
     // (Removed the getEnrichmentRaw() reuse that served a prior/stale pull and silently forced the merged fallback.)
     if (!glid.trim()) return;
-    setLoading(true); setFullPending(false);
+    setLoading(true);
     // SINGLE TIER PULL (2026-07-09): one pull at the selected `tier`. superfast (default) already includes the Gemini
     // grounded web engine, so the old fast-paints-then-full-upgrades DUAL pull is obsolete (it re-ran skipped branches and
     // its late response clobbered the good result). Switching tier (state) re-runs this effect → re-pulls at the new tier.
@@ -201,9 +207,26 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     // ignored). Mirrors the standalone's guard (BuyerProfileStandalone).
     let alive = true;
     const fresh = freshRef.current; freshRef.current = false;   // consume the one-shot fresh flag set by the Fresh-pull button
-    fetchEnrichment(glid, { tier, fresh }).then(({ raw }) => { if (alive && raw) { setRaw(raw); setWebEpoch((e) => e + 1); } }).catch(() => undefined).finally(() => { if (alive) { setLoading(false); setFullPending(false); } });
+    fetchEnrichment(glid, { tier, fresh }).then(({ raw }) => { if (alive && raw) { setRaw(raw); setWebEpoch((e) => e + 1); } }).catch(() => undefined).finally(() => { if (alive) { setLoading(false); } });
     return () => { alive = false; };
   }, [glid, tier, refreshKey]);
+
+  // HOD UI-2 (2026-07-13): PRE-WARM the CHEAP tiers in the BACKGROUND so switching tabs is INSTANT (served from the
+  // per-tier cache, zero reload — the tier chip shows ✓ the moment it's warm). Fired on a short delay so it never slows
+  // the selected tier; gated on hasCachedTier so an already-warm tier is never re-pulled. `background:true` keeps these
+  // pulls OUT of the latest-wins race (see fetchEnrichment) so they can never clobber — or suppress — the displayed
+  // tier's commit (that bug rendered the card EMPTY on first load until a switch).
+  // COST DECISION (owner 2026-07-13): auto-warm ONLY superfast + fast. `normal` carries Parallel.ai (~up to 12 min +
+  // vendor spend) and is NEVER pre-warmed — it fires only when the user actually clicks the Normal tab (setTier →
+  // the single-tier pull effect above). So a default view costs at most superfast + fast, not the ~3× triple-warm.
+  useEffect(() => {
+    if (presetLedger || !glid.trim()) return;
+    if ((window as unknown as { __ledgerDemoRaw?: unknown }).__ledgerDemoRaw) return;
+    const WARM_TIERS = ['superfast', 'fast'] as const;   // 'normal' deliberately excluded — on-demand only
+    const others = WARM_TIERS.filter((t) => t !== tier);
+    const id = setTimeout(() => { others.forEach((t) => { if (!hasCachedTier(glid, t)) fetchEnrichment(glid, { tier: t, background: true }).catch(() => undefined); }); }, 2500);
+    return () => clearTimeout(id);
+  }, [glid, tier, refreshKey, presetLedger]);
 
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
@@ -224,16 +247,16 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     const t = setTimeout(() => setPullSlow(true), 75000);   // 75s (was 6min) — surface the actionable "slow / reload" state fast instead of a silent spinner
     return () => clearTimeout(t);
   }, [loading]);
-  // fullPending = fast tier is in but the FULL pull (web_osint + udyam) is still running. Drives the ⏱ "still
-  // enriching" badge + gates the Download button (download only once the profile is COMPLETE, owner request).
-  const [fullPending, setFullPending] = useState(false);
+  // (audit P2: the old `fullPending` state was dead — never set true since the dual fast→full pull was removed. Deleted.)
   useEffect(() => {
     if (presetLedger) { setLedger(presetLedger); setBuildError(null); return; }
     if (!raw) { setLedger(null); setBuildError(null); return; }
     try { (window as unknown as { __enrichment?: unknown }).__enrichment = raw; } catch { /* noop — diagnosis hook (inspect the real pull shape) */ }
-    try { setLedger(buildLedger(withObservedExternal(raw))); setBuildError(null); }
+    try { setLedger(buildLedger(withObservedExternal(raw, glid))); setBuildError(null); }
     catch (e) { setBuildError(String((e as Error)?.message || e)); setLedger(null); try { (window as unknown as { __ledgerError?: unknown }).__ledgerError = e; } catch { /* noop */ } }
-  }, [raw, presetLedger]);
+  }, [raw, presetLedger, glid]);
+  // P0 (audit): clear the GLID-keyed external identity on unmount so it can't be read by the next buyer's view.
+  useEffect(() => () => { try { const w = window as unknown as { __buyerTwin?: { observed_external?: unknown; observed_external_glid?: string } }; if (w.__buyerTwin && String(w.__buyerTwin.observed_external_glid || '') === String(glid || '').trim()) { delete w.__buyerTwin.observed_external; delete w.__buyerTwin.observed_external_glid; } } catch { /* noop */ } }, [glid]);
 
   // ── EXTERNAL at pull-time — the standalone Observatory pull doesn't run the form's Befisc/Sign3 fetch, so
   //    external (the paid identity APIs) was always absent here. Fire runExternal (mobile → Befisc + Sign3) ONCE
@@ -244,8 +267,8 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   useEffect(() => {
     if (presetLedger || !ledger || extState !== 'idle') return;
     if ((window as unknown as { __ledgerDemoRaw?: unknown }).__ledgerDemoRaw) { setExtState('skip'); return; } // never hit paid APIs for injected demo data
-    const w = window as unknown as { __buyerTwin?: { observed_external?: unknown } };
-    if (w.__buyerTwin?.observed_external) { setExtState('done'); return; } // already fetched (e.g. by the form)
+    const w = window as unknown as { __buyerTwin?: { observed_external?: unknown; observed_external_glid?: string } };
+    if (w.__buyerTwin?.observed_external && String(w.__buyerTwin.observed_external_glid || '') === String(glid || '').trim()) { setExtState('done'); return; } // already fetched for THIS buyer (P0: GLID-keyed)
     if (ledger.facts.some((f) => f.sourceNode === 'befisc' || f.sourceNode === 'sign3')) { setExtState('done'); return; } // n8n ebi_data already carried external — don't re-hit the paid API
     const pf = ledger.facts.filter((f) => f.sourceNode === 'profile-api');
     const byPath = (re: RegExp) => pf.find((f) => re.test(f.jsonPath))?.rawValue?.trim();
@@ -257,7 +280,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         const obs: { befisc?: unknown; sign3?: unknown } = {};
         const bef = res.sources.find((s) => s.source === 'Befisc' && s.status === 'ok'); if (bef && bef.value) obs.befisc = bef.value;
         const s3 = res.sources.find((s) => s.source === 'Sign3' && s.status === 'ok'); if (s3 && s3.value) obs.sign3 = s3.value;
-        if (obs.befisc || obs.sign3) { (window as unknown as { __buyerTwin?: unknown }).__buyerTwin = { ...(w.__buyerTwin || {}), observed_external: obs }; setRaw((prev: unknown) => (Array.isArray(prev) ? [...prev] : prev)); }
+        if (obs.befisc || obs.sign3) { (window as unknown as { __buyerTwin?: unknown }).__buyerTwin = { ...(w.__buyerTwin || {}), observed_external: obs, observed_external_glid: String(glid || '').trim() }; setRaw((prev: unknown) => (Array.isArray(prev) ? [...prev] : prev)); }
         setExtState('done');
       })
       .catch(() => setExtState('done'));
@@ -276,7 +299,11 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // LLM-NATIVE extract path — bundle the source SUMMARIES → ONE exhaustive extraction → FinalAttr. This is the sole authority.
   const extractOn = true; // V10: extract is the only twin builder (the legacy merged/arithmetic path is deleted)
   const extractSynth = useMemo(() => {
-    if (!extractOn) return null; const rich = getEnrichmentRich(); if (!rich) return null;
+    if (!extractOn || presetLedger) return null; const rich = getEnrichmentRich(); if (!rich) return null;
+    // P1 (audit 2026-07-13): never extract on a PREVIOUS buyer's module-cached rich. The rich carries its own glid;
+    // if it doesn't match this view's glid, this buyer's own pull hasn't landed yet — bail (no wasted paid call, no
+    // buyer-A values rendered under buyer B). When rich has no glid (legacy), fall through unchanged.
+    { const rg = String((rich as { glid?: unknown }).glid || '').trim(); if (rg && rg !== glid.trim()) return null; }
     try { const bundle = bundleFromResponse(rich as RichResponse); const rr = rich as { derived_anchors?: Record<string, unknown>; source_registry?: Record<string, Record<string, unknown>>; source_priority?: Record<string, unknown> };
       // V14: feed the DECODED PAN entity into the anchors so the persona use-case can reconcile (Individual-PAN vs Manufacturer).
       let anchors: Record<string, unknown> | null = rr.derived_anchors || null;
@@ -330,7 +357,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const [enrichMode, setEnrichMode] = useState<'profile' | 'offer'>('profile');
   const offerIdx = Math.min(sampleOfferIdx, Math.max(0, requirements.length - 1));
   const offerSkeleton = useMemo(() => (ledger && requirements.length ? buildOfferSkeleton(requirements[offerIdx], ledger) : null), [ledger, requirements, offerIdx]);
-  const [offerLLM, setOfferLLM] = useState<{ status: 'idle' | 'loading' | 'done' | 'skip'; out: OfferLLMOut | null }>({ status: 'idle', out: null });
+  const [offerLLM, setOfferLLM] = useState<{ status: 'idle' | 'loading' | 'done' | 'skip' | 'failed'; out: OfferLLMOut | null }>({ status: 'idle', out: null });
   useEffect(() => { setOfferLLM({ status: 'idle', out: null }); }, [glid, offerIdx]);
   useEffect(() => {
     if (enrichMode !== 'offer' || !offerSkeleton || offerLLM.status !== 'idle') return;
@@ -338,7 +365,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     if (!hasGeminiKey()) { setOfferLLM({ status: 'skip', out: null }); return; }
     setOfferLLM({ status: 'loading', out: null });
     const p = buildOfferEnrichPrompt(offerSkeleton, requirements[offerIdx]);
-    offerEnrichLLM(p.system, p.user).then((out) => setOfferLLM({ status: 'done', out })).catch(() => setOfferLLM({ status: 'done', out: null }));
+    offerEnrichLLM(p.system, p.user).then((out) => setOfferLLM({ status: 'done', out })).catch(() => setOfferLLM({ status: 'failed', out: null })); // audit 2026-07-13: a failed call is 'failed', never 'done' (else the banner claims a clean pass)
   }, [enrichMode, offerSkeleton, offerLLM.status, requirements, offerIdx]);
   const offerResult = useMemo(() => (offerSkeleton ? (offerLLM.out ? mergeOfferLLM(offerSkeleton, offerLLM.out) : offerSkeleton.result) : null), [offerSkeleton, offerLLM.out]);
   useEffect(() => { try { (window as unknown as { __offerEnrich?: unknown }).__offerEnrich = offerResult; } catch { /* noop */ } }, [offerResult]);
@@ -389,9 +416,10 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   // The requirement-enrichment LLM is LAZY — fires ONLY on the Requirement tab, so profile vs requirement calls are distinct.
   const [cardMode, setCardMode] = useState<'original' | 'profile' | 'requirement'>('profile');
   useEffect(() => { setCardMode('profile'); }, [glid]); // keep the user's open tab across a same-GLID web upgrade
+  useEffect(() => { setEnrichMode('profile'); }, [glid]); // audit BLV-1122: reset enrich mode on a NEW buyer so the next buyer never auto-runs offer-enrich silently / the enrich CTA re-appears
   // UC2 is PER-REQUIREMENT (owner): a MAP keyed by offer index keeps a debug block for EVERY requirement enriched this
   // pull. The lazy effect writes map[offerIdx]; per-call cost is captured from the LLM health ring right after the call.
-  type Uc2Entry = { status: 'idle' | 'loading' | 'done' | 'no-key'; out: UC2LLMOut | null; usage: SynthUsage | null; costUsd?: number; rawOutput?: string };
+  type Uc2Entry = { status: 'idle' | 'loading' | 'done' | 'no-key' | 'failed'; out: UC2LLMOut | null; usage: SynthUsage | null; costUsd?: number; rawOutput?: string };
   const [uc2Map, setUc2Map] = useState<Record<number, Uc2Entry>>(() => (getOfflineSnapshot()?.uc2Map as Record<number, Uc2Entry>) || {});
   useEffect(() => { setUc2Map((getOfflineSnapshot()?.uc2Map as Record<number, Uc2Entry>) || {}); }, [glid]);   // reset on new buyer (not the web upgrade — keeps per-requirement enrichment); OFFLINE (P4) → seed captured per-offer enrichment
   const uc2LLM: Uc2Entry = uc2Map[offerIdx] || { status: 'idle', out: null, usage: null };
@@ -408,7 +436,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     setUc2Map((m) => ({ ...m, [idx]: { status: 'loading', out: null, usage: null } }));
     enrichRequirementLLM(p.system, p.user)
       .then(({ out, usage }) => { const h = getLLMHealth().filter((r) => r.label === 'uc2Enrich').slice(-1)[0]; setUc2Map((m) => ({ ...m, [idx]: { status: 'done', out, usage, costUsd: h?.costUsd, rawOutput: getLLMRaw()['uc2Enrich']?.output } })); })
-      .catch(() => setUc2Map((m) => ({ ...m, [idx]: { status: 'done', out: null, usage: null } })));
+      .catch(() => setUc2Map((m) => ({ ...m, [idx]: { status: 'failed', out: null, usage: null } }))); // audit 2026-07-13: failed ≠ 'done/clean' — the debug band renders an explicit failure, never "confirmed clean"
   }, [uc2Ctx, uc2LLM.status, cardMode, offerIdx, anyUc2Loading]);
   const uc2Result = useMemo(() => (uc2Ctx && uc2LLM.out ? mergeUC2LLM(uc2Ctx, uc2LLM.out) : null), [uc2Ctx, uc2LLM.out]);
   // evidence_id → evidence line, for resolving the clickable citations to a human-readable "node · value"
@@ -786,7 +814,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 bg-white shrink-0">
         <div className="flex items-center gap-3">
-          <h2 className="font-bold text-gray-900 text-[15px]">{title || '🪪 GLADMIN Buyer Profile Card'}</h2>
+          <h2 className="font-bold text-gray-900 text-[15px] inline-flex items-center gap-1.5">{title || (<><IdCard size={16} className="text-teal-600" />GLADMIN Buyer Profile Card</>)}</h2>
           <span className="text-gray-400">GLID {glid || '—'}</span>
         </div>
         <div className="flex items-center gap-3">
@@ -799,7 +827,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           {/* HERO ROW 1 — 3 speed tiers with time budget. While a pull runs, the OTHER tiers grey out (can't switch
               mid-pull); ✓ = already pulled this session (instant, no re-run until Fresh pull); ⏳ = pulling now. */}
           <div className="flex items-center rounded-lg border border-gray-200 bg-white text-[11px] font-semibold overflow-hidden">
-            {(['superfast', 'fast', 'normal'] as const).map((t) => { const disabled = loading && tier !== t; return (
+            {(['superfast', 'fast', 'normal'] as const).map((t) => { const disabled = (loading && tier !== t) || !!getOfflineSnapshot(); return (   /* audit P2: tier switch is inert in the offline copy (static snapshot) — disable it */
               <button key={t} disabled={disabled} onClick={() => setTier(t)} title={TIER_LABEL[t] + `  ·  ${TIER_TIME[t]}`} className={'px-2.5 py-1 capitalize flex items-center gap-1 ' + (tier === t ? 'bg-teal-600 text-white' : disabled ? 'text-gray-300 cursor-not-allowed' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800')}>
                 {t}<span className={'text-[8.5px] font-normal ' + (tier === t ? 'text-teal-100' : 'text-gray-400')}>{TIER_TIME[t]}</span>{loading && tier === t ? <span className="animate-pulse">⏳</span> : (glid && hasCachedTier(glid, t)) ? <span className={tier === t ? 'text-teal-100' : 'text-emerald-500'}>✓</span> : null}
               </button>
@@ -807,12 +835,24 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           </div>
           {/* Fresh pull — hero after the tier control. n8n source data is cached ~24h; this forces a fresh backend pull.
               (The AI profile call is ALWAYS run fresh regardless.) Cache-age chip renders alongside when the pull is cached. */}
-          <button onClick={() => { freshRef.current = true; setRefreshKey((k) => k + 1); }} title="n8n source data is cached for ~24 hours to keep pulls fast. Click for a FRESH backend pull that re-hits every source live. The AI profile call is always run fresh on every view — only the raw n8n data is cached." className="text-[12px] rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-amber-800 hover:bg-amber-100 font-semibold">↻ Fresh pull</button>
+          {/* audit P2: Fresh-pull can't work in the offline copy (no network) — hide it there rather than render an inert button. */}
+          {!getOfflineSnapshot() && <button onClick={() => { freshRef.current = true; setRefreshKey((k) => k + 1); }} title="n8n source data is cached for ~24 hours to keep pulls fast. Click for a FRESH backend pull that re-hits every source live. The AI profile call is always run fresh on every view — only the raw n8n data is cached." className="text-[12px] rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-amber-800 hover:bg-amber-100 font-semibold">↻ Fresh pull</button>}
           {(() => { const fa = (getEnrichmentRich() as { fetched_at?: string } | null)?.fetched_at; if (!fa) return null; let t = ''; try { t = new Date(fa).toLocaleString('en-IN', { hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' }); } catch { t = fa; } return <span className="text-[10px] text-gray-400" title="When the underlying n8n source data was fetched. Older than expected? Click ↻ Fresh pull.">data as of {t}</span>; })()}
-          {glid && <button onClick={() => window.open(`?profile=${encodeURIComponent(glid)}`, '_blank', 'noopener')} title="Open the clean standalone buyer card for this GLID (independent bi-buyer-unified endpoint + server-side LLM) in a new tab" className="text-indigo-500 hover:text-indigo-700 text-[11px] underline underline-offset-2">standalone ↗</button>}
-          {/* Download is available as soon as THIS tier's pull returns (no waiting for OSINT/Parallel — tiers made that gate obsolete). */}
-          {ledger && <button onClick={() => downloadInteractiveHtml({ v: 1, glid, stampIso: new Date().toISOString(), rich: getEnrichmentRich(), legacy: raw, serverTrace: getServerTrace(), health: getEnrichmentHealth() as unknown[], llmRaw: getLLMRaw() as Record<string, unknown>, extractOut: msynth.out, extractUsage: msynth.usage, extractMs: msynth.ms, pruneKeep: prune.keep, uc2Map: uc2Map as Record<string, unknown>, readZoom }, { fallbackRich: getEnrichmentRich() ?? raw })} title="Download a FULLY-INTERACTIVE offline copy — the whole app + this GLID's data baked in. Opens with the network off; every band, JSON tree, expand/collapse and scroll works exactly like live. (Run `npm run build:offline` once to generate the shell.)" className="text-teal-700 hover:text-teal-900 text-[12px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1">⬇ Download</button>}
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm rounded-full border border-gray-200 px-3 py-1">✕ close</button>
+          {glid && !getOfflineSnapshot() && <button onClick={() => window.open(`?profile=${encodeURIComponent(glid)}`, '_blank', 'noopener')} title="Open the clean standalone buyer card for this GLID (independent bi-buyer-unified endpoint + server-side LLM) in a new tab" className="text-indigo-500 hover:text-indigo-700 text-[11px] underline underline-offset-2">standalone ↗</button>}
+          {/* Download bakes the CLIENT-SIDE extract (msynth.out) into the offline copy. That LLM call runs AFTER the n8n
+              pull and takes ~1-2 min; the offline HTML has no network, so a download taken while it's still 'loading'/'idle'
+              permanently omits every AI field (extractOut:null → all "Not available"). GATE the button until the extract
+              settles ('done'/'error'/'no-key') so we never ship a silently-blank offline card. */}
+          {ledger && (() => { const llmPending = !!synthCtx && (msynth.status === 'idle' || msynth.status === 'loading'); return (   // audit P2: only gate while an extract is genuinely pending; if synthCtx never builds (no rich), don't lock Download forever
+            <button
+              disabled={llmPending}
+              onClick={() => downloadInteractiveHtml({ v: 1, glid, stampIso: new Date().toISOString(), rich: getEnrichmentRich(), legacy: raw, serverTrace: getServerTrace(), health: getEnrichmentHealth() as unknown[], llmRaw: getLLMRaw() as Record<string, unknown>, extractOut: msynth.out, extractUsage: msynth.usage, extractMs: msynth.ms, pruneKeep: prune.keep, uc2Map: uc2Map as Record<string, unknown>, observedExternal: (window as unknown as { __buyerTwin?: { observed_external?: unknown } }).__buyerTwin?.observed_external, readZoom }, { fallbackRich: getEnrichmentRich() ?? raw })}
+              title={llmPending ? 'The AI profile extract is still running (~1-2 min after the data pull). Downloading now would bake an EMPTY AI layer into the offline copy — wait until the card shows its AI fields, then download.' : 'Download a FULLY-INTERACTIVE offline copy — the whole app + this GLID\'s data (incl. the AI extract) baked in. Opens with the network off; every band works exactly like live. (Run `npm run build:offline` once to generate the shell.)'}
+              className={'text-[12px] rounded-full border px-3 py-1 ' + (llmPending ? 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed' : 'border-teal-200 bg-teal-50 text-teal-700 hover:text-teal-900')}>
+              {llmPending ? <span className="inline-flex items-center gap-1">⏳ AI extract running…</span> : <span className="inline-flex items-center gap-1"><Download size={13} strokeWidth={2} />Download</span>}
+            </button>
+          ); })()}
+          {!getOfflineSnapshot() && <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm rounded-full border border-gray-200 px-3 py-1">✕ close</button>}
         </div>
       </div>
 
@@ -824,10 +864,10 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
       {!loading && !buildError && !ledger && <div className="flex-1 flex items-center justify-center text-gray-400">No buyer data. Pull a GLID first.</div>}
 
       {/* ═══ 📋 L1–L7 LEDGER — the "no black box" stack: nodes → signals → LLM input → prompt → output → UC1 → UC2 → UC3 ═══ */}
-      {ledger && !pullFinishing && tab === 'ledger' && (() => {
+      {ledger && !loading && !pullFinishing && tab === 'ledger' && (() => {
         const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
         // L1 · nodes & health
-        const health = getEnrichmentHealth().map((h) => ({ node: h.node, ok: h.ok, latency_ms: h.latency_ms, output_count: h.output_count, source: h.source }));
+        const health = getEnrichmentHealth().map((h) => ({ node: h.node, ok: h.ok, status: h.status, latency_ms: h.latency_ms, output_count: h.output_count, source: h.source }));   // audit DEFECT-2: carry `status` through so L1Band's skipped/error handling isn't inert (was dropped here)
         // L1 coverage TRUTH (V10 #8): the dead-ledger "used/ignored" measured the retired arithmetic path. The honest number
         // is what the ONE extract LLM actually SAW (bundle.evidence sent) → what it CITED (finals[].llm.reasoning[].evidence),
         // with structural plumbing (ids, timestamps, parse flags) excluded from the denominator so "ignored" isn't inflated by noise.
@@ -930,7 +970,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         const pnsSum = (getEnrichmentRich() as { sources?: { pns_calls?: { summary?: { calls?: Array<Record<string, unknown>>; redash_records?: number; call_count?: number } } } } | null)?.sources?.pns_calls?.summary;
         const pnsArr = Array.isArray(pnsSum?.calls) ? pnsSum!.calls! : [];
         const pnsN = Number(pnsSum?.redash_records ?? pnsArr.length);
-        const pnsOk = Number(pnsSum?.call_count ?? pnsArr.filter((c) => (c as Record<string, unknown>).status === 'transcribed').length);
+        const pnsOk = Number(pnsSum?.call_count ?? pnsArr.filter((c) => isDone((c as Record<string, unknown>).status)).length);   // audit P2: use isDone (v18 'extracted'), not the pre-v18 'transcribed' literal
         if (pnsN > 0) channels.push({ key: 'pns_calls', label: `📞 PNS calls · ${pnsArr.length} sellers called · ${pnsOk} extracted`, count: pnsArr.length, tone: 'violet', sample: String(pnsArr[0]?.product ?? pnsArr[0]?.mcat ?? '').slice(0, 80), body: (<div className="space-y-1">{pnsArr.map((c, i) => { const o = c as Record<string, unknown>; const ext = renderCallExtraction(o); const hasT = !!o.transcript_en && (Array.isArray(o.transcript_en) ? (o.transcript_en as unknown[]).length > 0 : true); return (<div key={i} className="rounded border border-gray-200 p-1.5"><div className="text-[10px] font-semibold text-gray-600">{String(o.product || o.mcat || '—')}{o.mcat && o.product ? ` · ${String(o.mcat)}` : ''}{o.circle ? ` · ${String(o.circle)}` : ''}{o.date ? ` · ${String(o.date)}` : ''}{o.offer_id ? ` · offer ${String(o.offer_id)}` : ''}{!ext && !hasT && !isDone(o.status) ? <span className="text-gray-400"> · (no data)</span> : ''}</div>{ext}{!ext && hasT && <div className="text-[10.5px] text-gray-500 mt-0.5 whitespace-pre-wrap break-words">{renderTurns(o.transcript_en)}</div>}</div>); })}</div>) });
         // V15.1 — IDfy sources: separate health nodes with PROVENANCE badge (which API/version · status · returned/requested · fetched · errors).
         // Renders even when empty-but-attempted, so "buyer has none" vs "API errored" vs "timed out" is never silent (kills the ambiguity).
@@ -1045,7 +1085,33 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
           const allKeys = Object.keys(rawObj).filter((k) => k !== '__health');
           const nullKeys = allKeys.filter((k) => isEmpty(rawObj[k]));
           const filledKeys = allKeys.filter((k) => !isEmpty(rawObj[k]));
+          // UI-1 (HOD 2026-07-13): a plain-English "what this node found" LEAD line — so IndiaMART Buyer Profile / GLUSR /
+          // CompRgst read like the other humanised nodes, not a raw JSON dump. Defensive: only names fields that are present.
+          const sm = (node.summary && typeof node.summary === 'object' ? node.summary : rawObj) as Record<string, unknown>;
+          const pick = (...ks: string[]): string => { for (const k of ks) { const v = sm[k] ?? rawObj[k]; if (v != null && v !== '' && typeof v !== 'object') return String(v); } return ''; };
+          const hz: string[] = [];
+          if (api.key === 'identity') {
+            const nm = pick('name', 'first_name', 'contact_name'); if (nm) hz.push(nm);
+            const co = pick('company_name', 'company', 'firm_name'); if (co) hz.push(co);
+            const loc = [pick('city'), pick('state')].filter(Boolean).join(', '); if (loc) hz.push(loc);
+            if (pick('mobile', 'ph_mobile', 'phone')) hz.push('mobile on file'); if (pick('email', 'email_id')) hz.push('email on file');
+            const ms = pick('member_since', 'reg_date', 'membersince'); if (ms) hz.push(`member since ${ms}`);
+          } else if (api.key === 'company_reg') {
+            const con = pick('constitution', 'constitution_of_business'); if (con) hz.push(con);
+            const nat = pick('nature_of_business', 'business_nature'); if (nat) hz.push(nat);
+            const tb = pick('turnover', 'turnover_band', 'aggregate_turnover'); if (tb) hz.push(`turnover ${tb}`);
+            const gy = pick('gst_registration_year', 'registration_year', 'reg_year'); if (gy) hz.push(`GST since ${gy}`);
+            if (pick('gstin', 'gst')) hz.push('GSTIN on record');
+          } else if (api.key === 'buyerprofile') {
+            const bt = pick('business_type'); if (bt) hz.push(bt);
+            const act = (sm.activity && typeof sm.activity === 'object') ? sm.activity as Record<string, unknown> : {};
+            const tr = act.total_requirement ?? sm.total_requirement; if (tr != null) hz.push(`${tr} requirements`);
+            const poi = Array.isArray(sm.products_of_interest) ? (sm.products_of_interest as unknown[]).length : 0; if (poi) hz.push(`${poi} products of interest`);
+            const ms = pick('member_since', 'membersince'); if (ms) hz.push(`member since ${ms}`);
+          }
+          const hzLead = hz.length ? hz.join(' · ') : (st === 'success' ? `${filledKeys.length} fields on file` : (st === 'no_data' ? 'source returned no data' : ''));
           channels.push({ key: `im_${api.key}`, label: `${api.icon} ${api.label} · ${st}`, count: filledKeys.length, tone: api.tone, sample: filledKeys.slice(0, 5).join(', '), body: (<div>
+            {hzLead && <div className="text-[11px] text-gray-700 mb-1 rounded bg-gray-50 border border-gray-100 px-2 py-1"><span className="text-[8px] uppercase tracking-wide text-gray-400 mr-1">in plain words</span>{hzLead}</div>}
             <div className="text-[9px] text-gray-400 mb-1 flex flex-wrap gap-x-2 items-center border-b border-gray-100 pb-0.5">
               <span className={st === 'success' ? 'text-emerald-600' : st === 'error' || st === 'no_data' ? 'text-rose-600' : 'text-gray-400'}>● {st}</span>
               <span>ran: yes</span>
@@ -1064,6 +1130,27 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         const extRows = (rows: NonNullable<typeof external>['befisc']) => (<div className="space-y-0.5">{rows.map((f, i) => (<div key={i} className="flex justify-between gap-2 text-[10.5px]"><span className="text-gray-400">{f.label} <span className="text-gray-300">· {f.source}</span></span><span className="text-gray-700">{f.value}</span></div>))}</div>);
         if (external?.befisc?.length) channels.push({ key: 'befisc', label: '🛡 Befisc · external identity', count: external.befisc.length, tone: 'amber', body: extRows(external.befisc) });
         if (external?.sign3?.length) channels.push({ key: 'sign3', label: '🛡 Sign3 · digital footprint', count: external.sign3.length, tone: 'amber', body: extRows(external.sign3) });
+        // UI-1 (HOD 2026-07-13): CSL on-site behaviour — a plain-English readable (was raw-only). CSL = the buyer's browse
+        // access-logs; surface what they looked at + how active, defensively over whatever the summary carries.
+        { const cslNode = (getEnrichmentRich() as { sources?: Record<string, { summary?: Record<string, unknown>; raw?: unknown; __health?: Record<string, unknown> }> } | null)?.sources?.csl;
+          const cslSum = (cslNode && cslNode.summary && typeof cslNode.summary === 'object') ? cslNode.summary as Record<string, unknown> : null;
+          if (cslNode && cslSum) {
+            const arrLen = (v: unknown) => Array.isArray(v) ? v.length : 0;
+            const prods = arrLen(cslSum.products) + arrLen(cslSum.products_viewed) + arrLen(cslSum.product_views);
+            const cats = arrLen(cslSum.categories) + arrLen(cslSum.mcats) + arrLen(cslSum.category_views);
+            const sellers = arrLen(cslSum.sellers) + arrLen(cslSum.seller_glids) + arrLen(cslSum.suppliers_viewed);
+            const events = Number(cslSum.event_count ?? cslSum.total_events ?? cslSum.hits ?? 0) || arrLen(cslSum.events) || arrLen(cslSum.rows);
+            const parts: string[] = [];
+            if (events) parts.push(`${events} on-site events`);
+            if (prods) parts.push(`${prods} products viewed`);
+            if (cats) parts.push(`${cats} categories browsed`);
+            if (sellers) parts.push(`${sellers} sellers looked at`);
+            const cslLead = parts.length ? parts.join(' · ') : 'on-site browse activity captured (no product/category breakdown in this pull)';
+            channels.push({ key: 'csl', label: '🧭 CSL · on-site behaviour', count: events || prods || cats || 0, tone: 'slate', sample: parts.slice(0, 3).join(' · '), body: (<div>
+              <div className="text-[11px] text-gray-700 mb-1 rounded bg-gray-50 border border-gray-100 px-2 py-1"><span className="text-[8px] uppercase tracking-wide text-gray-400 mr-1">in plain words</span>{cslLead}</div>
+              <details className="text-[9px] text-gray-400 mt-0.5"><summary className="cursor-pointer">CSL parsed summary</summary><div className="ml-2 mt-0.5 font-mono whitespace-pre-wrap break-words">{JSON.stringify(cslSum, null, 1).slice(0, 3000)}</div></details>
+            </div>) });
+          } }
         // L3 · LLM input (the ONE extract call — system + user are two parts of it)
         const richResp = getEnrichmentRich() as { sources?: Record<string, unknown>; source_registry?: Record<string, Record<string, unknown>>; source_priority?: Record<string, unknown> } | null;
         const rawIO = getLLMRaw();
@@ -1113,9 +1200,12 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
             </div>)
           : offerLLM.status === 'loading'
           ? <span className="text-[10px] text-amber-700 animate-pulse">⏳ enriching — reading calls · WhatsApp · requirement…</span>
-          : (() => { const c = offerFields.filter((f) => f.action === 'corrected').length; const a = offerFields.filter((f) => f.action === 'added').length; const d = offerFields.filter((f) => f.action === 'dropped').length; const k = offerFields.filter((f) => f.action === 'kept').length; const changed = c + a + d; return (
+          : offerLLM.status === 'failed'
+          // audit 2026-07-13: a failed/errored call must NOT render as a clean pass. Show a retry affordance.
+          ? <button type="button" onClick={() => setOfferLLM({ status: 'idle', out: null })} className="text-[10px] px-2 py-0.5 rounded-md font-semibold bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100">⚠ Enrichment failed — retry</button>
+          : (() => { const c = offerFields.filter((f) => f.action === 'corrected').length; const a = offerFields.filter((f) => f.action === 'added').length; const d = offerFields.filter((f) => f.action === 'dropped').length; const k = offerFields.filter((f) => f.action === 'kept').length; const changed = c + a + d; const ran = offerLLM.status === 'done' && !!offerLLM.out; return (
               <span className={'text-[10px] px-2 py-0.5 rounded-md font-semibold ' + (changed ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-gray-50 text-gray-500 border border-gray-200')}>
-                {changed ? `✓ Enriched · ${c} corrected · ${a} added${d ? ` · ${d} dropped` : ''} · ${k} kept` : `✓ Enriched · nothing to correct — the recorded lead already matches the buyer’s own words (${k} fields verified)`}
+                {changed ? `✓ Enriched · ${c} corrected · ${a} added${d ? ` · ${d} dropped` : ''} · ${k} kept` : ran ? `✓ Enriched · nothing to correct — the recorded lead already matches the buyer’s own words (${k} fields verified)` : `Enrichment not run (deterministic skeleton shown)`}
               </span>
             ); })();
         // L7 · requirement enrichment (requirement_brain → the subtraction math)
@@ -1192,7 +1282,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         // a sourcing signal misread as operating (the "Operates in X · Sources from X" self-contradiction / PAN-only flip).
         const sourcingCities = (locAttr?.value.match(/sources? from\s+(.+)$/i)?.[1] || '').split(/[,·|]/).map((c) => norm(c)).filter(Boolean);
         const opIsSourcing = !!operatingCity && sourcingCities.includes(norm(operatingCity));
-        const locationCorrected = (operatingCity && recordedLoc && norm(operatingCity) !== norm(recordedLoc) && !norm(operatingCity).includes(norm(idn?.city || ' ')) && !opIsSourcing)
+        const locationCorrected = (operatingCity && recordedLoc && norm(operatingCity) !== norm(recordedLoc) && !(idn?.city && norm(operatingCity).includes(norm(idn.city))) && !opIsSourcing)
           ? { from: recordedLoc, to: operatingCity } : undefined;
         const titleDrill = selReq ? (<div className="text-[10.5px] text-gray-600 space-y-0.5">{selReq.offerId && <div>offer id: <span className="font-mono">{selReq.offerId}</span></div>}{selReq.status && <div>status: {selReq.status}{selReq.isExpired ? ' (expired)' : ''}</div>}{selReq.posted && <div>posted: {selReq.posted}</div>}{selReq.expiry && <div>expiry: {selReq.expiry}</div>}{selReq.recencyDays != null && <div>age: {selReq.recencyDays}d</div>}{selReq.category && <div>category: {selReq.category}{selReq.categoryId ? ` (#${selReq.categoryId})` : ''}</div>}{selReq.orderValue && <div>probable order value: {selReq.orderValue} <span className="text-gray-400">(system-deduced)</span></div>}{selReq.requirementType && <div>requirement type: {selReq.requirementType} <span className="text-gray-400">(system-deduced)</span></div>}{selReq.productOrService && <div>type: {selReq.productOrService}</div>}{selReq.verified != null && selReq.verified !== '' && <div>verified flag: {selReq.verified}</div>}{selReq.queryId && <div>query id: <span className="font-mono">{selReq.queryId}</span></div>}</div>) : undefined;
         // V11 — LLM-derived (>1 source) buyer-profile rows. Headline is the VALUE ONLY; confidence% + LLM badge show
@@ -1203,10 +1293,62 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         // rendered NOWHERE (orphans). Owner: surface on BOTH the card (buyerProfileModel setL) AND here in UC1.
         // UC1 = "everything" (owner): the FULL inferred attribute set, grouped who → what → intent → how → market →
         // behaviour → trust. The card shows a curated once-each subset; CARD_KEYS de-dupes those out of the "held" list.
-        const PROFILE_KEYS = ['business_persona', 'business_type', 'business_stage', 'buyer_maturity', 'sub_industry', 'scale', 'b2b_b2c', 'retail_wholesale', 'annual_turnover', 'annual_procurements', 'buyer_intent', 'deal_readiness', 'business_objective', 'use_case', 'procurement_challenge', 'procurement_model', 'purchase_frequency', 'sourcing_channel', 'preferred_suppliers', 'location_sourcing_preference', 'procurement_approach', 'price_vs_quality', 'payment_mode', 'delivery_timeline', 'urgency', 'target_customers', 'selling_channel', 'sales_geography', 'communication', 'primary_language', 'digital_footprint', 'identity_confidence', 'decision_maker'];
-        // CONFIDENCE GATE (owner): an attribute with confidence < 50 NEVER populates UC1 (or the dashboard card) — it
-        // stays only in the full "All attributes" list below (built from rawFinals, ungated) so it's still inspectable.
-        const llmRows: L6ProfileRow[] = PROFILE_KEYS.map((k) => finals.find((f) => f.key === k)).filter((f): f is NonNullable<typeof f> => !!f).filter((f) => (f.confidence ?? 0) >= 50).map((f) => ({ label: f.label, value: f.value, drill: finalAttrDetail(f), prov: 'llm' as const }));
+        // OWNER FINAL IA (2026-07-12) — RIGHT column = 7 curated buyer-profile rows; requirement-side behaviour moves
+        // LEFT (reqSideRows); duplicates dropped (all keys stay inspectable in the All-attributes drawer, ungated).
+        // CONFIDENCE GATE unchanged: < 50 never populates a curated row.
+        const lfA = (k: string) => { const f = finals.find((x) => x.key === k); return f && (f.confidence ?? 0) >= 50 ? f : null; };
+        // TRUE MERGE (owner): a merged row shows ONE clean value — never a `·`-concatenation of every source attr.
+        // The absorbed attribute stays fully inspectable inside the drill ("merged here" block).
+        const mergedDrill = (p: NonNullable<ReturnType<typeof lfA>>, s?: ReturnType<typeof lfA>): ReactNode => s ? (
+          <div className="space-y-1">
+            {finalAttrDetail(p)}
+            <div className="mt-1 pt-1 border-t border-gray-200"><span className="text-[9px] text-gray-400 uppercase">merged here</span> <b className="text-[10px]">{s.label}:</b> <span className="text-[10px]">{s.value}</span>{finalAttrDetail(s)}</div>
+          </div>
+        ) : finalAttrDetail(p);
+        const mkRow = (label: string, f: ReturnType<typeof lfA>, value?: string, absorbed?: ReturnType<typeof lfA>): L6ProfileRow | null => f ? { label, value: (value ?? f.value) || '—', drill: mergedDrill(f, absorbed), prov: 'llm' as const } : null;
+        const fType = lfA('business_type'), fSub = lfA('sub_industry');                        // #4/#6: Type row carries sub-industry as ONE phrase; persona = headline only
+        const fStage = lfA('business_stage'), fMat = lfA('buyer_maturity');                    // #5: one row, richer maturity value wins
+        const fB2B = lfA('b2b_b2c'), fRW = lfA('retail_wholesale');                            // #7: ONE classification phrase ("B2B — mostly wholesale")
+        const fInt = lfA('buyer_intent'), fDR = lfA('deal_readiness');                         // #8: ONE value — intent stage wins (readiness is a synonym temperature → drill)
+        const fSell = lfA('selling_channel');                                                  // #15: LINK-GATED — real URL/domain or a named non-IndiaMART B2B marketplace only
+        const sellOk = !!fSell && (/https?:\/\/|www\.|\.[a-z]{2,3}(\/|\s|$)/i.test(fSell.value) || /justdial|tradeindia|exporters\s?india|alibaba|udaan/i.test(fSell.value));
+        const TEMP_WORD = /^(hot|warm|cold)\b/i;
+        const intentOne = (() => {
+          if (!fInt && !fDR) return null;
+          const segs = (fInt?.value || '').split('·').map((s) => s.trim()).filter(Boolean);
+          const stage = segs.filter((s) => !TEMP_WORD.test(s)).join(' · ');                    // descriptive stage, temperature words stripped
+          return stage || fDR?.value || fInt?.value || '';
+        })();
+        const fComm = lfA('communication');
+        const commOne = fComm ? fComm.value.split('·').map((s) => s.trim()).filter((s) => s && !/responsiv/i.test(s)).join(' · ') : '';  // responsiveness dupes the Response row
+        const fScale = lfA('scale'), fTurn = lfA('annual_turnover');                           // scale + turnover = ONE size statement
+        const llmRows: L6ProfileRow[] = [
+          mkRow('Business Type', fType || fSub, fType && fSub ? `${fType.value} — ${fSub.value}` : (fType?.value || fSub?.value), fType ? fSub : null),
+          mkRow('Business Stage', fMat || fStage, (fMat?.value || fStage?.value)),
+          mkRow('Business Model', fB2B || fRW, fB2B && fRW ? `${fB2B.value} — ${fRW.value.charAt(0).toLowerCase()}${fRW.value.slice(1)}` : (fB2B?.value || fRW?.value), fB2B ? fRW : null),
+          (fInt || fDR) ? { label: 'Buyer Intent', value: intentOne || '—', drill: mergedDrill((fInt || fDR)!, fInt ? fDR : null), prov: 'llm' as const } : null,
+          mkRow('Communication', fComm, commOne || fComm?.value),                              // #16: language lives inside it; separate row dropped
+          sellOk ? mkRow('Selling Channel', fSell) : null,
+          mkRow('Business Scale', fScale || fTurn, fScale && fTurn ? `${fScale.value} — ${fTurn.value}` : (fScale?.value || fTurn?.value), fScale ? fTurn : null),
+          mkRow('Annual Procurements', lfA('annual_procurements')),
+        ].filter((r): r is L6ProfileRow => !!r);
+        // LEFT (requirement side) — "how this buyer buys" (#9b/#11/#12/#13). Frequency stays via reqFrequency (§D).
+        const fPM = lfA('procurement_model'), fPA = lfA('procurement_approach');               // approach (richer) wins; model → drill
+        const fLoc = lfA('location_sourcing_preference'), fPS = lfA('preferred_suppliers');    // sourcing cities win; "Operates in <own city>" clause dropped (dupes the requirement location); suppliers → drill
+        const sourcingOne = fLoc ? (fLoc.value.replace(/(^|\s*)Operates in[^·]*·\s*/i, '').trim() || fLoc.value) : (fPS?.value || '');
+        const reqSideRows: L6ProfileRow[] = [
+          mkRow('Use Case', lfA('use_case')),
+          mkRow('Procurement', fPA || fPM, fPA?.value || fPM?.value, fPA ? fPM : null),
+          mkRow('Sourcing', fLoc || fPS, sourcingOne, fLoc ? fPS : null),
+          mkRow('Procurement Challenge', lfA('procurement_challenge')),
+          mkRow('Price vs Quality', lfA('price_vs_quality')),
+          mkRow('Payment Mode', lfA('payment_mode')),
+          mkRow('Delivery Timeline', lfA('delivery_timeline')),
+        ].filter((r): r is L6ProfileRow => !!r);
+        // #19: decision-maker rides the demographics line ("31y · FEMALE · Owner decides") — no separate row.
+        const __dm = lfA('decision_maker'); const __dmShort = __dm ? __dm.value.split(/[(·]/)[0].trim() : '';
+        // DROPPED as duplicates (owner): business_persona(row) · business_objective · identity_confidence(row) ·
+        // digital_footprint(row→chips) · sourcing_channel · target_customers · sales_geography · urgency · primary_language.
         // #6/#8 — the FULL attribute set: EVERY extracted key (incl. confidence < 50 hidden above), each expandable to its
         // last raw line via finalAttrDetail. Rendered as the "All attributes" drawer below the UC1 rows (dashboard only).
         const allAttrRows = rawFinals.map((f) => ({ label: f.label, value: String(f.value ?? '—'), conf: Math.round(f.confidence ?? 0), drill: finalAttrDetail(f) }));
@@ -1235,11 +1377,22 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         if (resolvedName) availability.push({ key: 'name', label: 'Name', present: true, verified: resolvedName.confidence >= 85, value: resolvedName.name, source: resolvedName.source, note: `${resolvedName.full ? 'full name' : 'first name only'} · ${resolvedName.confidence}% (${resolvedName.source})` });
         if (docs.pan) availability.push({ key: 'pan', label: 'PAN', present: true, verified: docs.pan.nameMatch === 'match', value: `${docs.pan.pan} · ${docs.pan.entityType}${docs.pan.nameMatch !== 'unknown' ? ` · surname ${docs.pan.nameMatch}` : ''}${docs.panDuplicate ? ' · ⚠ 2 distinct PANs' : ''}`, source: 'Befisc / identity', note: `4th char "${docs.pan.entityChar}" → ${docs.pan.entityType}; format ${docs.pan.valid ? 'valid' : 'invalid'}` });
         if (docs.gst) availability.push({ key: 'gst', label: 'GST', present: true, verified: true, value: `${docs.gst.gstin} · ${docs.gst.state} · ${docs.gst.entityType}${gstFetched.count > 1 ? ` (+${gstFetched.count - 1} more)` : ''}`, source: 'Mobile/Email→GST', note: `state ${docs.gst.stateCode} → ${docs.gst.state}; embedded PAN ${docs.gst.pan}` });
+        // Udyam / MSME → Available (owner #1): rendered ONLY when a registration actually exists on this pull.
+        {
+          const udySum = (getEnrichmentRich() as { sources?: Record<string, { summary?: Record<string, unknown> }> } | null)?.sources?.udyam?.summary as { registrations?: Array<Record<string, unknown>>; reg_nos?: string[]; enterprise_type?: string } | undefined;
+          const uReg = (udySum?.registrations || [])[0];
+          const uNo = String(uReg?.udyam_reg_no || (udySum?.reg_nos || [])[0] || '');
+          if (uNo) availability.push({ key: 'udyam', label: 'Udyam / MSME', present: true, verified: true, value: `${uNo}${udySum?.enterprise_type ? ` · ${udySum.enterprise_type}` : ''}`, source: 'Sign3 pan_to_udyam (govt MSME registry)', note: [uReg?.enterprise_name, uReg?.organization_type, uReg?.major_activity, uReg?.date_of_incorporation ? `inc ${uReg.date_of_incorporation}` : ''].filter(Boolean).join(' · ') || 'MSME registration on record' });
+        }
         // de-dup by key — prefer the POPULATED row (resolveAvailable may carry an empty pan/gst placeholder)
         const availMap = new Map<string, L6Availability>(); for (const a of availability) { const ex = availMap.get(a.key); if (!ex || (!ex.present && a.present) || (a.present && a.value && !ex.value)) availMap.set(a.key, a); }
         const availFinal = [...availMap.values()];
-        // GST Verified ribbon badge — present ONLY when the GST node returned a decodable GSTIN (else hidden).
-        const gstVerified = docs.gst ? { gstin: docs.gst.gstin, state: docs.gst.state, entity: docs.gst.entityType, count: gstFetched.count || gstFetched.gsts.length || 1, list: gstFetched.gsts.length ? gstFetched.gsts : [docs.gst.gstin], advance: gstAdv || undefined } : null;
+        // GST Verified ribbon badge — present when the GST node returned a decodable GSTIN AND its registration is not
+        // explicitly INACTIVE/CANCELLED (audit P1: presence-only let a cancelled GSTIN render the green "GST Verified").
+        const _gstAdvR = gstAdv as unknown as Record<string, unknown> | null;
+        const _gstStatus = String((_gstAdvR && (_gstAdvR.status || _gstAdvR.gstin_status)) || '').trim().toLowerCase();
+        const _gstActive = !_gstStatus || (!/\b(in-?active|cancel|suspend|deactivat|not\s+active)/.test(_gstStatus) && /^(active|verified|provisional)/.test(_gstStatus));
+        const gstVerified = (docs.gst && _gstActive) ? { gstin: docs.gst.gstin, state: docs.gst.state, entity: docs.gst.entityType, count: gstFetched.count || gstFetched.gsts.length || 1, list: gstFetched.gsts.length ? gstFetched.gsts : [docs.gst.gstin], advance: gstAdv || undefined } : null;
         // Q76 — "still ask": frozen buyer questions NOT deduced (LLM omitted = couldn't ground) or below-confidence → ask the buyer.
         const ASK_LABELS: Record<string, string> = { business_persona: 'Buyer Persona', buyer_maturity: 'Buyer Maturity', buyer_intent: 'Buyer Intent', procurement_model: 'Procurement Model', purchase_frequency: 'Purchase Frequency', price_vs_quality: 'Price vs Quality', communication: 'Communication', delivery_timeline: 'Delivery Timeline', payment_mode: 'Payment Mode', location_sourcing_preference: 'Location & Sourcing' };
         const stillAsk = Object.keys(ASK_LABELS).filter((k) => { if (k === 'delivery_timeline') return !finals.some((f) => f.key === 'delivery_timeline' || f.key === 'urgency'); const f = finals.find((x) => x.key === k); return !f || (f.confidence ?? 0) < 60; }).map((k) => ASK_LABELS[k]);
@@ -1279,18 +1432,20 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
         pushPii('Income', ext?.incomeBand);
         try { const aad = (getEnrichmentRich() as { sources?: { aadhaar?: { summary?: Record<string, unknown> } } } | null)?.sources?.aadhaar?.summary || {}; pushPii('Aadhaar', String(aad.masked_aadhaar ?? aad.aadhaar ?? aad.aadhaar_number ?? '')); } catch { /* noop */ }
         // UC1 — segregated digital footprint (OBSERVED presence, bucketed; empty buckets hidden). Sign3 social_platforms + registry-present flags.
-        const _sp = new Set((ext?.socialPlatforms || []).map((s) => String(s).toUpperCase()));
+        // audit BPC-84: platform buckets come from the ONE shared map (bucketPlatforms) so the BuyLead card + GLADMIN card
+        // surface the identical set from the same social_platforms data. GST/Udyam/EPFO stay health-derived per surface.
+        const _pb = bucketPlatforms(ext?.socialPlatforms || []);
         const _src = (getEnrichmentRich() as { sources?: Record<string, unknown> } | null)?.sources || {};
         const _ok = (k: string): boolean => { const n = _src[k] as { summary?: { __health?: { ok?: boolean } }; __health?: { ok?: boolean } } | undefined; if (!n) return false; const h = (n.summary && n.summary.__health) || n.__health; return !h || h.ok !== false; };
         const _bk = (bucket: string, items: (string | false | undefined | null)[]) => { const v = [...new Set(items.filter(Boolean) as string[])]; return v.length ? { bucket, items: v } : null; };
         const footprint = [
-          _bk('B2B marketplaces', ['IndiaMART', _sp.has('TRADEINDIA') && 'TradeIndia', _sp.has('EXPORTERSINDIA') && 'ExportersIndia', _sp.has('ALIBABA') && 'Alibaba']),
-          _bk('Business / social', [_sp.has('FACEBOOK') && 'Facebook', _sp.has('INSTAGRAM') && 'Instagram', _sp.has('LINKEDIN') && 'LinkedIn', (_sp.has('TWITTER') || _sp.has('X')) && 'Twitter/X', _sp.has('YOUTUBE') && 'YouTube']),
+          _bk('B2B marketplaces', ['IndiaMART', ..._pb.b2b]),
+          _bk('Business / social', _pb.social),
           _bk('Government registries', [(_ok('gst_cert_idfy') || _ok('gst_detail_union') || _ok('gstin_union')) && 'GST', _ok('udyam') && 'Udyam', _ok('epfo') && 'EPFO']),
-          _bk('Consumer marketplaces', [_sp.has('AMAZON') && 'Amazon', _sp.has('FLIPKART') && 'Flipkart']),
-          _bk('Discovery / directories', [_sp.has('JUSTDIAL') && 'JustDial', _sp.has('INDIABIZ') && 'IndiaBiz', _sp.has('CRUNCHBASE') && 'Crunchbase']),
+          _bk('Consumer marketplaces', _pb.consumer),
+          _bk('Discovery / directories', _pb.discovery),
         ].filter(Boolean) as { bucket: string; items: string[] }[];
-        const buyerDetails = (idn || profileRows.length || availFinal.length || piiRows.length) ? { name: resolvedName?.name || idn?.name, company: company ? { value: company.company, verified: company.verified, drill: companyDrill } : undefined, memberSince: humanizeSince(idn?.memberSince), memberSinceDrill, device: device ? { value: device.device, note: device.note, source: device.source } : undefined, responseCalls: pnsCards.length, responseReplies: waConvo?.inbound.buyerMsgs ?? 0, ageGender, ageGenderDrill, availability: availFinal, identityConfidence, profileRows, allAttrRows, pii: piiRows, footprint } : null;
+        const buyerDetails = (idn || profileRows.length || availFinal.length || piiRows.length) ? { name: resolvedName?.name || idn?.name, company: company ? { value: company.company, verified: company.verified, drill: companyDrill } : undefined, memberSince: humanizeSince(idn?.memberSince), memberSinceDrill, device: device ? { value: device.device, note: device.note, source: device.source } : undefined, responseCalls: pnsCards.length, responseReplies: waConvo?.inbound.buyerMsgs ?? 0, ageGender: [ageGender, __dmShort ? `${__dmShort} decides` : ''].filter(Boolean).join(' · ') || undefined, ageGenderDrill, availability: availFinal, identityConfidence, profileRows, allAttrRows, pii: piiRows, footprint } : null;
         const selectedReqCard = selReq ? { title: selReq.title, posted: selReq.posted, expiry: selReq.expiry, status: selReq.status, isExpired: selReq.isExpired, recencyDays: selReq.recencyDays, category: selReq.category, location: idn ? ([idn.city, idn.state].filter(Boolean).join(', ') || undefined) : undefined, specs: selReq.specs, specsStatus: selReq.specsStatus, buyerInfo: selReq.buyerInfo, commercials: selReq.commercials } : null;
         const offerEvalCard = offerResult ? { groundedPct: offerResult.eval.groundedPct, hallucinations: offerResult.eval.hallucinations, verdict: offerResult.eval.verdict } : null;
         // UC2 · requirement enrichment/correction (base truth → AI-enriched). REAL grounded LLM path when a key is
@@ -1420,19 +1575,18 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
                   the polished 1-pager; switch to the L6 "BuyLead" view (requirement card + UC1 attributes + all use-cases).
                   The Debug band stays below in BOTH modes (owner: "debug for both modes"). */}
               <div className="flex items-center gap-2 rounded-xl bg-gray-100 p-1 text-[13px] font-bold w-fit">
-                <button onClick={() => setViewMode('buylead')} className={'rounded-lg px-4 py-2 transition flex flex-col items-start leading-tight ' + (viewMode === 'buylead' ? 'bg-white text-teal-700 shadow' : 'text-gray-500 hover:text-gray-700')}>📑 BuyLead Card<span className="text-[9px] font-normal text-gray-400">debug mode available here</span></button>
-                <button onClick={() => setViewMode('card')} className={'rounded-lg px-4 py-2 transition flex flex-col items-start leading-tight ' + (viewMode === 'card' ? 'bg-white text-teal-700 shadow ring-2 ring-teal-300 animate-pulse' : 'text-gray-500 hover:text-gray-700')}>🪪 GLADMIN Buyer Profile Card<span className="text-[9px] font-normal text-gray-400">the buyer-facing 1-pager</span></button>
+                <button onClick={() => setViewMode('buylead')} className={'rounded-lg px-4 py-2 transition flex flex-col items-start leading-tight ' + (viewMode === 'buylead' ? 'bg-white text-teal-700 shadow' : 'text-gray-500 hover:text-gray-700')}><span className="inline-flex items-center gap-1.5"><FileText size={14} strokeWidth={2} />BuyLead Card</span><span className="text-[9px] font-normal text-gray-400">debug mode available here</span></button>
+                <button onClick={() => setViewMode('card')} className={'rounded-lg px-4 py-2 transition flex flex-col items-start leading-tight ' + (viewMode === 'card' ? 'bg-white text-teal-700 shadow' : 'text-gray-500 hover:text-gray-700')}><span className="inline-flex items-center gap-1.5"><IdCard size={14} strokeWidth={2} />GLADMIN Buyer Profile Card</span><span className="text-[9px] font-normal text-gray-400">the buyer-facing 1-pager</span></button>
               </div>
-              {/* ZERO-VS-FLAKE honesty banner (owner A2): if this pull returned 0 BuyLeads but the buyer's lifetime
-                  requirement counter is > 0, it's almost certainly a source-API miss (a flaked / stale cached run),
-                  NOT a buyer with no requirements. Say so + point at Fresh pull — never a silent empty chart. */}
-              {(() => { const rich = getEnrichmentRich() as { sources?: Record<string, { summary?: Record<string, unknown>; __health?: Record<string, unknown> }> } | null; const rq = rich?.sources?.requirement; const bp = rich?.sources?.buyerprofile?.summary as Record<string, unknown> | undefined; const pulled = Number((rq?.__health as Record<string, unknown> | undefined)?.buyleads ?? (rq?.summary as Record<string, unknown> | undefined)?.requirement_count ?? 0); const lifetime = Number((bp?.activity as Record<string, unknown> | undefined)?.total_requirement ?? 0); if (pulled === 0 && lifetime > 0) return (<div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">⚠ <b>0 BuyLeads returned this pull</b>, but this account shows <b>{lifetime} lifetime requirements</b> — almost certainly a source-API miss on this run (often a stale cached pull), not a buyer with no demand. Click <b>↻ Fresh pull</b> for live data.</div>); return null; })()}
+              {/* ZERO-VS-FLAKE banner REMOVED (owner 2026-07-13): the "0 BuyLeads … lifetime requirements … source-API miss"
+                  amber banner was noise on the card — dropped entirely. (Flake/stale-run honesty still lives in the L1
+                  health matrix + the per-source __health status in the debug view.) */}
               {/* TrustSEAL Buyer Profile — the polished buyer-facing 1-pager (default view). parseBuyerProfile(rich); provenance-badged. */}
-              {viewMode === 'card' && <BuyerProfileCard rich={(() => { const _r = getEnrichmentRich(); const _b = finalsToBuyerBlock(finals.filter((f) => (f.confidence ?? 0) >= 50)); if (Object.keys(_b).length) lastBuyerBlockRef.current = _b; const _bb = Object.keys(_b).length ? _b : lastBuyerBlockRef.current; return (_r && typeof _r === 'object' && Object.keys(_bb).length) ? { ...(_r as object), buyer: _bb } : _r; })()} glid={glid} pending={fullPending} persona={finals.find((f) => f.key === 'business_persona')?.value} />}
+              {viewMode === 'card' && <BuyerProfileCard rich={(() => { const _r = getEnrichmentRich(); const _b = finalsToBuyerBlock(finals.filter((f) => (f.confidence ?? 0) >= 50)); if (Object.keys(_b).length) lastBuyerBlockRef.current = _b; const _bb = Object.keys(_b).length ? _b : lastBuyerBlockRef.current; return (_r && typeof _r === 'object' && Object.keys(_bb).length) ? { ...(_r as object), buyer: _bb } : _r; })()} glid={glid} persona={finals.find((f) => f.key === 'business_persona' && (f.confidence ?? 0) >= 50)?.value} />}
               {/* L6 — the BuyLead / Buyer card + UC1 attributes + all use-cases (the full debug-facing product view). */}
-              {viewMode === 'buylead' && <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} reqFrequency={reqFrequency} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} locationCorrected={locationCorrected} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} stillAsk={stillAsk} needsInput={needsInput} mode={cardMode} onMode={setCardMode} defaultOpen />}
+              {viewMode === 'buylead' && <L6Band picker={offerPicker} selectedReq={selectedReqCard} uc2={uc2} productsOfInterest={productsOfInterest} reqFrequency={reqFrequency} reqRows={reqSideRows} requirementCount={requirements.length} buyerDetails={buyerDetails} retailLead={selReq?.retailLead} titleDrill={titleDrill} locationDrill={locationDrill} locationCorrected={locationCorrected} fields={offerFields} offerEval={offerEvalCard} enrichControl={enrichControl} gstVerified={gstVerified} stillAsk={stillAsk} needsInput={needsInput} mode={cardMode} onMode={setCardMode} defaultOpen locked />}
               {/* Debug ABOVE (owner) — everything else folds under ONE collapsed Debug container, in 4 clearly-grouped sections */}
-              <Band code="Debug" title="Debug — how the profile & each requirement were built" subtitle="nodes · the buyer-profile LLM · per-requirement enrichment · web verify" tone="slate" defaultOpen={false}>
+              <Band code="Debug" title="Debug — how the profile & each requirement were built" subtitle="nodes · the buyer-profile LLM · per-requirement enrichment · web verify" tone="slate" defaultOpen={viewMode === 'buylead'} locked={viewMode === 'buylead'}>
                 <div className="space-y-2.5">
                   <div className="text-[11px] text-gray-400">The pipeline behind the card above — every step expands to its last raw line.</div>
                   <DebugGroup n="1" label="Nodes & Health — shared: every source raw · what the LLM saw · our readable view" />
@@ -1464,7 +1618,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
                   <L3Band model={io?.model || 'google/gemini-2.5-flash'} maxTokens={io?.maxTokens ?? 16000} temperature={io?.temperature ?? 0} promptVersion={io?.promptVersion} catalog={catalog} sources={sources} signalCount={synthCtx?.bundle.evidence.length || 0} usage={msynth.usage ? { inputTokens: msynth.usage.promptTokens, outputTokens: msynth.usage.completionTokens, reasoningTokens: msynth.usage.reasoningTokens, ms: msynth.ms, costUsd: extractCost } : null} sourceGuide={sourceGuideNode} defaultOpen />
                   <L4Band system={io?.system || synthCtx?.prompt.system} user={io?.user || synthCtx?.prompt.user} output={getLLMRaw()['extractBuyerProfile']?.output} rawRequest={l4RawRequest} defaultOpen />
                   <L5Band attrs={outAttrs} evalRows={evalRows} evalDrill={evalDetail} prune={pruneInfo} status={l5status} drillFor={(key) => { const f = finals.find((x) => x.key === key); return f ? finalAttrDetail(f) : null; }} defaultOpen />
-                  <L0Band calls={l0calls} totals={l0totals} evalDetail={evalDetail} harness={harnessNode} promptVersion={io?.promptVersion || 'extract-v9'} defaultOpen />
+                  <L0Band calls={l0calls} totals={l0totals} evalDetail={evalDetail} harness={harnessNode} promptVersion={io?.promptVersion || EXTRACT_PROMPT_VERSION} defaultOpen />
                   <DebugGroup n="3" label={`Requirement Enrichment (per requirement) — ${enrichedReqs.length || 'no'} requirement${enrichedReqs.length === 1 ? '' : 's'} enriched this pull`} />
                   {enrichedReqs.length === 0
                     ? <div className="text-[11px] text-gray-400 italic px-1">Open the <b>Requirement</b> tab on the card above to enrich a requirement — each one you enrich gets its own debug block here.</div>
@@ -1472,24 +1626,9 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
                       <UC2DebugBand key={r.idx} reqTitle={r.title} status={r.status} model="google/gemini-2.5-flash" promptVersion={UC2_PROMPT_VERSION} usage={r.usage} evalRes={r.result?.eval ?? null} edits={r.result?.edits} input={r.promptIO} rawOutput={r.rawOutput} coverage={r.idx === offerIdx ? pnsCoverage : null} defaultOpen={r.idx === offerIdx} />
                     ))}
                   {SHOW_L7 && <L7Band rows={reqRows} added={resolved.addedSpecs} ask={resolved.ask} dropped={reqDropped} coverage={reqCoverage} hasBrain={!!reqBrain} />}
-                  <DebugGroup n="4" label="Web verify (OSINT) — on-demand entity scrape" />
-                  <CrawlerBand
-                    glid={String((getEnrichmentRich() as { glid?: string | number } | null)?.glid || '')}
-                    seed={(() => {
-                      // club Buyer-Profile + Befisc/Sign3 + GST anchors into the OSINT search seed (low-confidence, observed-only)
-                      const r = getEnrichmentRich();
-                      const i = identityFromMerged(r); const e = externalFromMerged(r); const ga = gstAdvance(r);
-                      const d = decodeIdentityDocs(i, e, undefined);
-                      return {
-                        glid: String((r as { glid?: string | number } | null)?.glid || ''),
-                        name: i?.name, company: i?.company, legalName: ga?.legalName,
-                        city: i?.city, state: i?.state,
-                        mobile: (i?.mobiles && i.mobiles[0]) || (e?.mobiles && e.mobiles[0]),
-                        gstin: ga?.gstin || d.gst?.gstin || i?.gst,
-                        pan: d.pan?.pan || e?.pan,
-                      };
-                    })()}
-                  />
+                  {/* CrawlerBand (Firecrawl on-demand OSINT scrape) REMOVED (owner obs-1, 2026-07-13): web intelligence comes
+                      only from gweb (Gemini web-search) + Parallel.ai now — the extra crawler was redundant and its band
+                      mislabelled LLM-scraped guesses as deterministic. gweb/Parallel surface in the web-verify strip above. */}
                 </div>
               </Band>
               {/* UC3 BELOW Debug (owner) — greyed "Upcoming", not clickable; the form wiring is kept behind it for later */}
@@ -1502,7 +1641,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
       {/* in-flight toaster — fires for ANY live LLM call: the extract twin, the critic prune, AND the per-offer
           requirement (UC2) / offer enrichment (so changing the offer or hitting "enrich" shows it). Poppy gradient. */}
       {ledger && (() => {
-        const busy = msynth.status === 'loading' || prune.status === 'loading' || uc2LLM.status === 'loading' || offerLLM.status === 'loading';
+        const busy = msynth.status === 'loading' || prune.status === 'loading' || uc2LLM.status === 'loading' || anyUc2Loading || offerLLM.status === 'loading';   // audit P2: anyUc2Loading so switching the offer picker mid-enrich doesn't hide the toaster
         if (!busy) return null;
         const label = (msynth.status === 'loading' || prune.status === 'loading') ? 'Fetching buyer profile…'
           : uc2LLM.status === 'loading' ? 'Enriching the requirement…'

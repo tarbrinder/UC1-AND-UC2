@@ -243,8 +243,9 @@ export function mergeOfferLLM(sk: OfferSkeleton, out: OfferLLMOut | null): Offer
     let action = (['kept', 'corrected', 'added', 'dropped', 'suggested'].includes(String(llm.action)) ? llm.action : target.action) as OfferAction;
     const grounded = !!llm.grounded && ev.length > 0;
     if (target.deduced && action === 'dropped') action = 'kept'; // deduced fields are validated in place, NEVER dropped
-    // confidence gate: medium-confidence changes become suggestions (show both); low-confidence revert to raw.
-    if ((action === 'corrected' || action === 'added') && conf < GATE_HI) action = conf >= GATE_MED ? 'suggested' : 'kept';
+    // confidence + GROUNDING gate (audit P1): an UNGROUNDED corrected/added value must NEVER be applied to the lead — it
+    // demotes to 'suggested' (shown, not applied) or 'kept'. Grounded changes still need conf ≥ GATE_HI to apply.
+    if ((action === 'corrected' || action === 'added') && (!grounded || conf < GATE_HI)) action = conf >= GATE_MED ? 'suggested' : 'kept';
     const corrected = action === 'kept' ? target.raw : String(llm.value ?? target.corrected);
     return { ...target, action, corrected, confidence: conf, grounded, inferred: !!llm.inferred, deduced: target.deduced, evidence: ev, llmReason: llm.reason || target.llmReason, conflict: llm.conflict || undefined };
   };

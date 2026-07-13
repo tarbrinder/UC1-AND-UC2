@@ -226,6 +226,12 @@ export default function MainApp() {
           </div>
         )}
 
+        {/* audit MAIN-164: without ?debug the landing has no interactive CTA (GLID input is debug-gated, quote CTAs off) —
+            so show a one-line hint instead of a dead-end page. */}
+        {!debug && !SHOW_QUOTE_CTAS && (
+          <p className="text-[12px] text-gray-400 max-w-sm text-center">Append <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-600">?debug=1</code> to the URL to open the Buyer Profile &amp; Enrichment console.</p>
+        )}
+
         {/* Version buttons — hidden for now (owner: declutter; re-enable via SHOW_QUOTE_CTAS) */}
         {SHOW_QUOTE_CTAS && (
         <div className="flex flex-wrap justify-center gap-3 w-full">

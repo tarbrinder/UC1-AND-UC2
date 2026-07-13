@@ -89,7 +89,9 @@ export function requirementsFromMerged(rich: unknown): Requirement[] {
       if (purchaseFrequency) commParts.push(`Purchase Frequency: ${purchaseFrequency}`);
       const commercials = commParts.length ? commParts.join(' | ') : undefined;
       const specs = allSpecs.filter((s) => !COMM.test(s.k)); // product specs only (Commercials shown as its own line)
-      const retailLead = /end[\s-]?user|individual|personal|\bretail\b|b2c|home use|household/i.test(`${buyerInfo || ''} ${requirementType || ''} ${str(o.product_or_service)}`);
+      // audit REQ-92: whole-word buyer-context tokens over buyerInfo/requirementType ONLY — NOT the product name (where
+      // "personal"/"individual" are legitimate product descriptors, e.g. "personal care", "individual packing").
+      const retailLead = /\b(end[\s-]?user|individual buyer|personal use|home use|household|b2c)\b/i.test(`${buyerInfo || ''} ${requirementType || ''}`);
       out.push({
         title, specs, buyerNotes: str(o.description) ? [str(o.description)] : [], hasBL: true, hasISQ: allSpecs.length > 0, facts: [],
         offerId: str(o.offer_id) || undefined, posted: str(o.posted) || undefined, expiry: str(o.expiry) || undefined,

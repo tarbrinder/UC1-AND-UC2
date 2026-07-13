@@ -68,7 +68,8 @@ export function finalsToBuyerTwin(finals: FinalAttr[], ctx: TwinAdapterCtx): Buy
   if (natureDrives(nature)) businessType = institutionalRole(nature, authorityDrives(authority) ? authority.authorityRole : undefined) || businessType;
 
   // ── layer_c commercial intelligence (always populate the load-bearing fields) ──
-  const activeIntentVal = val('current_active_intent') || val('products_of_interest') || val('buyer_persona') || val('industry');
+  // audit 2026-07-13 (P1 drift): read extract-v41 keys. buyer_intent (the deduced intent) leads — NOT the product list.
+  const activeIntentVal = val('buyer_intent') || val('products_of_interest') || val('business_persona') || val('sub_industry');
   const clustersSrc = (ctx.historicalCategories && ctx.historicalCategories.length) ? ctx.historicalCategories : (val('products_of_interest') ? val('products_of_interest').split(/[,;]/).map((s) => s.trim()).filter(Boolean) : []);
   const recent_intent_clusters = clustersSrc.slice(0, 4).map((intent) => ({ intent, signal_count: 1, last_seen: ctx.lastSignalAt || '' }));
 
@@ -85,16 +86,16 @@ export function finalsToBuyerTwin(finals: FinalAttr[], ctx: TwinAdapterCtx): Buy
       city: ctx.identity?.city || '',
       state: ctx.identity?.state || '',
       business_type: businessType,
-      secondary_roles: val('industry') && val('industry') !== businessType ? [val('industry')] : undefined,
+      secondary_roles: val('sub_industry') && val('sub_industry') !== businessType ? [val('sub_industry')] : undefined,
       language: val('language') || ctx.identity?.language || '',
       verified: !!ctx.identity?.verified,
       company_desc: companyDesc,
     },
     layer_b_behavioral: omitUndef({
-      whatsapp_affinity: /whatsapp/i.test(val('preferred_channel')) ? trait('preferred_channel', 'LMH') : undefined,
+      whatsapp_affinity: /whatsapp/i.test(val('communication')) ? trait('communication', 'LMH') : undefined,
       local_preference: trait('location_sourcing_preference', 'LMH'),
-      response_sensitivity: trait('responsiveness', 'LMH'),
-      decision_style: byKey.has('buyer_persona') ? trait('buyer_persona') : undefined,
+      response_sensitivity: undefined,                                   // audit 2026-07-13: no extract-v41 'responsiveness' key — omit rather than read a dead key
+      decision_style: byKey.has('business_persona') ? trait('business_persona') : undefined,
     }),
     layer_c_commercial_intelligence: {
       historical_categories: ctx.historicalCategories || [],
@@ -103,7 +104,7 @@ export function finalsToBuyerTwin(finals: FinalAttr[], ctx: TwinAdapterCtx): Buy
       bulk_orientation: trait('scale', 'LMH'),
       trial_first: trait('procurement_model', 'bool'),
       multi_category_buyer: clustersSrc.length > 1 ? { value: true, confidence: 70, trait_stability: 60, contradictions_count: 0, last_seen: ctx.lastSignalAt || '', evidence: [] } : undefined,
-      current_active_intent: activeIntentVal ? { value: activeIntentVal, confidence: conf('current_active_intent') || conf('products_of_interest') || conf('buyer_persona') || 50, trait_stability: 50, contradictions_count: 0, last_seen: ctx.lastSignalAt || '', evidence: evOf('products_of_interest') } : undefined,
+      current_active_intent: activeIntentVal ? { value: activeIntentVal, confidence: conf('buyer_intent') || conf('products_of_interest') || conf('business_persona') || 50, trait_stability: 50, contradictions_count: 0, last_seen: ctx.lastSignalAt || '', evidence: evOf('products_of_interest') } : undefined,
       attribution_confidence: { inferred_product_mapping: val('products_of_interest') || null, confidence: conf('products_of_interest') },
     },
     observed_external: ctx.observed_external,
@@ -119,13 +120,14 @@ export function finalsToBuyerProfile(finals: FinalAttr[], ctx: TwinAdapterCtx): 
   const cf = (k: string): number | undefined => { const f = byKey.get(k); return f ? f.confidence : undefined; };
   const shown = (finals || []).filter((f) => f && f.state && f.state !== 'Unknown');
   const profile: BuyerProfile = {
-    persona: v('buyer_persona') || v('business_type'),
-    maturity: v('maturity') || v('buyer_stage'),
+    // audit 2026-07-13 (P1 drift): extract-v41 key names — the pre-rename keys silently returned undefined for all of these.
+    persona: v('business_persona') || v('business_type'),
+    maturity: v('buyer_maturity') || v('business_stage'),
     procurementModel: v('procurement_model'),
-    supplierPreference: v('supplier_preference'),
+    supplierPreference: v('preferred_suppliers'),
     localityPreference: v('location_sourcing_preference'),
-    engagement: v('preferred_channel'),
-    responseSensitivity: v('responsiveness'),
+    engagement: v('communication'),
+    responseSensitivity: undefined,                                     // no extract-v41 equivalent — omit rather than read a dead key
     multiSku: undefined,
     summary: ctx.summary,
     confidence: shown.length ? Math.round(shown.reduce((s, a) => s + a.confidence, 0) / shown.length) / 100 : undefined,

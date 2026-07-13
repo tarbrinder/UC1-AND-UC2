@@ -11,7 +11,7 @@ import { waitForMergedTwin } from './mergedTwinStore';
 import { finalsToBuyerTwin, finalsToBuyerProfile, type TwinAdapterCtx } from './twinAdapter';
 import type { BuyerTwin, BuyerProfile } from './enrichment';
 
-export const EXTRACT_TWIN_ON = ((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_EXTRACT_PROFILE) !== '0'; // DEFAULT ON (direct-LLM extract twin); set VITE_EXTRACT_PROFILE=0 to fall back to the legacy deriveBuyerProfile/Twin path
+export const EXTRACT_TWIN_ON = ((import.meta.env as unknown as Record<string, string | undefined>).VITE_EXTRACT_PROFILE) !== '0'; // DEFAULT ON (direct-LLM extract twin); set VITE_EXTRACT_PROFILE=0 to fall back to the legacy path. audit 2026-07-13: static per-var read (never the whole import.meta.env object → no secret leak into the bundle)
 
 // Most-recent dated signal → drives twin freshness/last_signal_at. Parses ISO + the "25-MAY-26" form (matches deriveBuyerTwin).
 export function lastSignalAt(signals?: Array<{ date?: string }>): string {

@@ -13,11 +13,21 @@ export interface ExportRecord { label: string; model: string; ms: number; prompt
 export interface ExportEval { kind: string; pct: number; at: number }
 export interface LangfuseEvent { id: string; type: string; timestamp: string; body: Record<string, unknown> }
 
-// Read Vite env at runtime (browser). Absent → export disabled (no-op). Pure config read.
+// SECURITY (audit 2026-07-13, P0): the Langfuse SECRET key must NEVER be read in browser code — doing so compiles it
+// into the JS bundle AND every downloaded offline HTML. Reading the whole `import.meta.env` object was worse: Vite
+// inlines ALL VITE_ vars when the bare env object is referenced. We now read ONLY the two non-secret vars via static
+// per-var access (so Vite inlines only those), and NEVER the secret. Client-side export therefore no-ops; real
+// ingestion must run server-side (an n8n webhook that injects LANGFUSE_SECRET_KEY from a non-VITE_ env var).
+// ACTION: rotate the Langfuse secret + public keys, since prior builds shipped them.
 export function langfuseConfig(): LangfuseEnv {
-  const env = (import.meta as unknown as { env?: Record<string, string> }).env || {};
-  return { publicKey: env.VITE_LANGFUSE_PUBLIC_KEY, secretKey: env.VITE_LANGFUSE_SECRET_KEY, host: env.VITE_LANGFUSE_HOST || 'https://cloud.langfuse.com' };
+  return {
+    publicKey: import.meta.env.VITE_LANGFUSE_PUBLIC_KEY as string | undefined,
+    secretKey: undefined,                                                    // never in the browser — server-side only
+    host: (import.meta.env.VITE_LANGFUSE_HOST as string | undefined) || 'https://cloud.langfuse.com',
+  };
 }
+// Client build cannot authenticate to Langfuse without the secret (by design). isExportEnabled stays false in the
+// browser so the exporter is inert; a server-side ingester supplies the secret. buildLangfuseBatch remains pure/harnessed.
 export function isExportEnabled(cfg: LangfuseEnv): boolean {
   return !!(cfg.publicKey && cfg.secretKey);
 }

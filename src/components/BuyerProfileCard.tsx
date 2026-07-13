@@ -5,8 +5,10 @@
 // "Not available" state when a field has no source. NO fabricated data reaches the screen.
 // Icons are lucide-react SVGs (v1.17.0 has no brand icons → the 4 socials use tiny inline brand glyphs).
 import { useMemo } from 'react';
-import { User, Building2, Calendar, MapPin, Factory, Globe, Star, IndianRupee, CreditCard, CircleDot, ShoppingBag, ShieldCheck, ExternalLink, Mail, Users, Fingerprint, FileText, type LucideIcon } from 'lucide-react';
-import { parseBuyerProfile, type BuyerProfileModel, type Field, type LabeledField, type IdentitySignals, type PanBlock, type MobileRow } from '../lib/buyerProfileModel';
+import { User, Building2, Calendar, MapPin, Factory, Globe, Star, IndianRupee, CreditCard, CircleDot, ShieldCheck, ExternalLink, Mail, Users, Fingerprint, FileText, type LucideIcon } from 'lucide-react';
+import { parseBuyerProfile, bucketPlatforms, type BuyerProfileModel, type Field, type LabeledField, type IdentitySignals, type PanBlock, type MobileRow } from '../lib/buyerProfileModel';
+import { deriveEnrichmentSignals } from '../lib/enrichmentSignals';
+import { runInference } from '../lib/inferenceEngine';
 
 // ── provenance markers ───────────────────────────────────────────────────────────────────────────────────────
 function Marker({ f }: { f: Field }) {
@@ -81,9 +83,10 @@ function Section({ title, rows, extra }: { title: string; rows: LabeledField[]; 
 // Only non-empty buckets render. (Business-presence socials are rendered as rows above.) ───────────────────────────
 function FootprintChips({ m }: { m: BuyerProfileModel }) {
   const gov = [m.company.gst.present && 'GST', m.company.udyam.present && 'Udyam', m.epfo?.present && 'EPFO'].filter(Boolean) as string[];
-  const CONSUMER = ['AMAZON', 'FLIPKART', 'SNAPDEAL', 'MYNTRA'];
-  const consumer = m.socialPlatforms.filter((p) => CONSUMER.includes(p));
-  const b2b = [m.catalogueLink.present && 'IndiaMART'].filter(Boolean) as string[];
+  // audit BPC-84: shared bucket map → the card + BuyLead surface the same set from identical social_platforms data.
+  const pb = bucketPlatforms(m.socialPlatforms);
+  const consumer = pb.consumer;
+  const b2b = [m.catalogueLink.present && 'IndiaMART', ...pb.b2b].filter(Boolean) as string[];
   if (!gov.length && !consumer.length && !b2b.length) return null;
   const chip = (label: string, tone: string) => <span key={label} className={`text-[9px] px-1.5 py-px rounded border ${tone}`}>{label}</span>;
   const Row = ({ label, items, tone }: { label: string; items: string[]; tone: string }) => items.length ? (
@@ -133,25 +136,49 @@ function ActivityChart({ months, note }: { months: { month: string; count: numbe
   );
 }
 
-// ── Conflict A — Identity Signals ────────────────────────────────────────────────────────────────────────────
+// ── Identity Signals — structured two-name reconciliation (owner 2026-07-12: no paragraphs on the card).
+// Two aligned name rows + a computed match verdict ("likely same person ✓" when one name contains the other's
+// tokens, else the family/account-holder caution) + the verified-mobile chips. ─────────────────────────────────
 function IdentityPanel({ sig, mobiles }: { sig: IdentitySignals | null; mobiles: MobileRow[] }) {
   if (!sig && !mobiles.length) return null;
+  const toks = (s?: string) => (s || '').toUpperCase().split(/[^A-Z]+/).filter((t) => t.length >= 3);
+  const a = toks(sig?.registered?.name), b = toks(sig?.bankLinked?.name);
+  // audit BPC-143: SYMMETRIC token-subset (either direction) — one verdict drives BOTH the chip and the container, so a
+  // green "same person" chip can never sit inside an amber conflict box (and vice-versa).
+  const samePerson = a.length > 0 && b.length > 0 && (a.every((t) => b.includes(t)) || b.every((t) => a.includes(t)));
+  const verdict = (sig?.registered && sig?.bankLinked)
+    ? (samePerson
+      ? { text: 'likely the same person ✓', cls: 'bg-emerald-50 text-emerald-700 border-emerald-300', warn: false }
+      : { text: '⚠ verify — phone may belong to a family member / account-holder', cls: 'bg-amber-50 text-amber-800 border-amber-300', warn: true })
+    : null;
+  // container is amber only when the verdict warns (or, absent a verdict, when the model flagged a conflict).
+  const amber = verdict ? verdict.warn : !!sig?.conflict;
   return (
-    <div className={`mt-2 rounded-lg border p-2 ${sig?.conflict ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200 bg-gray-50/60'}`}>
-      <div className="text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1 flex items-center gap-1">
-        Identity Signals{sig?.conflict && <span className="text-[9px] font-semibold text-amber-700 normal-case">⚠ same mobile, two names — shown, not auto-resolved</span>}
+    <div className={`mt-2 rounded-lg border p-2 ${amber ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200 bg-gray-50/60'}`}>
+      <div className="text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1 flex items-center gap-1.5 flex-wrap">
+        Identity
       </div>
-      {sig?.registered && <div className="text-[11px] text-gray-700"><span className="text-gray-400">Registered business contact:</span> <b>{sig.registered.name}</b> <span className="text-[9px] text-gray-400">({sig.registered.source})</span></div>}
-      {sig?.bankLinked && <div className="text-[11px] text-gray-700"><span className="text-gray-400">Phone-linked bank identity:</span> <b>{sig.bankLinked.name}</b> <span className="text-[9px] text-gray-400">({sig.bankLinked.source}{sig.bankLinked.confidence ? ` · confidence ${sig.bankLinked.confidence}` : ''})</span></div>}
-      {mobiles.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-1">
-          {mobiles.map((m) => (
-            <span key={m.value} title={`found by: ${m.foundBy.join(', ') || 'unknown'}`} className={`text-[9.5px] font-mono px-1.5 py-px rounded border cursor-help ${m.agreementCount >= 2 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>
-              {m.value}{m.primary ? ' ·primary' : ''} {m.agreementCount >= 2 ? `✓✓ ${m.foundBy.join('+')}` : `single · ${m.foundBy.join('+') || '?'}`}
-            </span>
-          ))}
-        </div>
-      )}
+      <div className="space-y-0.5">
+        {sig?.registered && (
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="w-32 shrink-0 text-gray-400">Business contact</span>
+            <b className="text-gray-800">{sig.registered.name}</b>
+          </div>
+        )}
+        {sig?.bankLinked && (
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="w-32 shrink-0 text-gray-400">Phone-linked bank</span>
+            <b className="text-gray-800">{sig.bankLinked.name}</b>
+          </div>
+        )}
+        {mobiles.map((m) => (
+          <div key={m.value} className="flex items-center gap-2 text-[11px]">
+            <span className="w-32 shrink-0 text-gray-400">📱 Mobile{m.primary ? ' (primary)' : ''}</span>
+            <span className="font-mono text-[11px] text-gray-800">{m.value}</span>
+            {m.agreementCount >= 2 && <span title="Confirmed by 2+ independent sources" className="text-[9px] text-emerald-600 cursor-help">✓✓</span>}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -167,9 +194,7 @@ function PanPanel({ pans }: { pans: PanBlock | null }) {
         {pans.primary && (
           <div className="flex items-center gap-1.5">
             <span className="font-mono text-gray-800">{pans.primary.value}</span>
-            {(pans.primary.agreementCount ?? 0) >= 2
-              ? <span title={`found by ${pans.primary.foundBy?.join(', ')}`} className="text-[9px] px-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-help">✓✓ {pans.primary.foundBy && pans.primary.foundBy.length ? pans.primary.foundBy.join(' + ') : `${pans.primary.agreementCount} vendors`}</span>
-              : <span className="text-[9px] px-1 rounded bg-amber-50 text-amber-700 border border-amber-200">single source</span>}
+            {(pans.primary.agreementCount ?? 0) >= 2 && <span title="Confirmed by 2+ independent sources" className="text-[9px] text-emerald-600 cursor-help">✓✓</span>}
           </div>
         )}
         {pans.alternates.map((a) => (
@@ -186,13 +211,19 @@ function PanPanel({ pans }: { pans: PanBlock | null }) {
 // ── main card ────────────────────────────────────────────────────────────────────────────────────────────────
 export default function BuyerProfileCard({ rich, glid, pending, persona }: { rich: unknown; glid: string; pending?: boolean; persona?: string }) {
   const m: BuyerProfileModel = useMemo(() => parseBuyerProfile(rich), [rich]);
+  // HOD P-6/P-7/P-8 (2026-07-13): Identity Signals ("how genuine is this buyer?") + What We Enriched ("what NEW value
+  // did WE add?") + multi-source validation — derived deterministically from the model, no fabrication.
+  const signals = useMemo(() => deriveEnrichmentSignals(m), [m]);
+  // HOD P-9/P-10: cook composite intelligence (Trust · Maturity · Readiness · Stability · Growth · Expansion) + trajectory.
+  const inference = useMemo(() => runInference(m, signals), [m, signals]);
   if (!m.available) {
     return <div className="rounded-xl border border-gray-200 bg-white p-6 text-center text-[12px] text-gray-400">TrustSEAL Buyer Profile — pull a GLID to populate.</div>;
   }
   const tileTones = ['bg-blue-500', 'bg-emerald-500', 'bg-violet-500'];
   const tenure = m.header.tenureYears;
-  const lr = m.latestRequirement;
+  const enrichedAdded = signals.enriched.filter((e) => e.added);
   return (
+    <>
     <div className="rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm">
       {pending && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-1.5 text-[11px] text-amber-800 flex items-center gap-2">
@@ -211,7 +242,7 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
           </div>
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Overall Activity (Last 6 Months)</div>
+          <div className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Overall Activity <span className="normal-case text-gray-300">· lifetime totals</span></div>
           <div className="flex items-stretch divide-x divide-gray-100 rounded-lg border border-gray-100 bg-gray-50/60">
             {m.header.tiles.map((t, i) => <StatTile key={t.label} label={t.label} value={t.value} note={t.sourceNote} tone={tileTones[i] || 'bg-gray-400'} />)}
           </div>
@@ -232,7 +263,9 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
         </div>
         {/* Amit (demo): "kis cheez ka dhandha hai" — the ONE plain-language line, front & centre. Prefer the extract-LLM
             business_persona (richest phrasing) when the debug view passes it; else the deterministic headline. */}
-        {((persona && persona.trim()) || m.headline) && <p className="mt-1.5 text-[15px] font-bold text-indigo-900 leading-snug bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">{(persona && persona.trim()) || m.headline}</p>}
+        {(() => { const pc = (persona && persona.trim() && !/^(unknown|n\/?a|none|null|undefined|-+|not available)$/i.test(persona.trim())) ? persona.trim() : ''; const head = pc || m.headline; return head ? <p className="mt-1.5 text-[15px] font-bold text-indigo-900 leading-snug bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">{head}</p> : null; })()}
+        {/* meta line — contact · member-since · GLID · location, directly under the persona (owner 2026-07-13: group the
+            "who + how long + where" identity line with the name/persona at the very top). */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[12px] text-gray-600">
           <span className="inline-flex items-center gap-1"><Icon Ic={User} />{m.header.contactName.present ? m.header.contactName.value : <span className="text-gray-300 italic">—</span>}</span>
           <span className="text-gray-300">|</span>
@@ -241,6 +274,35 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
           <span className="inline-flex items-center gap-1">GLID: <span className="text-blue-600 font-semibold">{glid || m.glid}</span></span>
           {m.header.registeredLocation.present && <><span className="text-gray-300">|</span><span className="inline-flex items-center gap-1" title="Registered operating location (glusr) — the buyer's original city; sourcing cities are listed separately on the requirement"><Icon Ic={MapPin} />{m.header.registeredLocation.value}</span></>}
         </div>
+        {/* HOD P-9/P-10/P-12 · SMART INSIGHTS — the top-line "so what?" read, grouped with the name/persona/meta above
+            (owner 2026-07-13). Each score is a composite of ≥2 signal families with its evidence in the tooltip; a
+            trajectory narrative sits on top. This is the "what NEW insight did AI add?" layer. */}
+        {m.available && (inference.scores.length > 0 || inference.trajectory) && (
+          <div className="mt-2 rounded-lg border border-indigo-200 bg-indigo-50/40 px-3 py-2">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-indigo-700 flex items-center gap-1 mb-1"><Icon Ic={CircleDot} />Smart Insights</div>
+            {inference.trajectory && <p className="text-[11.5px] text-gray-700 leading-snug mb-1.5" title={inference.trajectory.cookedFrom.join(' · ')}>{inference.trajectory.text}</p>}
+            <div className="flex flex-wrap gap-1.5">
+              {inference.scores.map((s) => (
+                <span key={s.key} title={`${s.verdict} — cooked from: ${s.cookedFrom.join(' · ')}`} className={`text-[10.5px] px-2 py-0.5 rounded border ${s.band === 'High' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : s.band === 'Medium' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>{s.label}: <b>{s.band}</b></span>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* HOD P-6 · IDENTITY SIGNALS — "how genuine is this buyer?" A verification grid + a count-grounded read (no
+            fabricated score). Kept ON the card (owner 2026-07-13), directly below the top insight block. */}
+        {m.available && (
+          <div className="mt-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <span className="text-[11px] font-bold uppercase tracking-wide text-gray-600 flex items-center gap-1"><Icon Ic={ShieldCheck} />Identity Signals</span>
+              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${signals.genuineness.verifiedAnchors >= 4 ? 'bg-emerald-50 text-emerald-700' : signals.genuineness.verifiedAnchors >= 2 ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'}`} title={signals.genuineness.basis}>{signals.genuineness.label} · {signals.genuineness.verifiedAnchors}/{signals.identity.length}</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {signals.identity.map((s) => (
+                <span key={s.label} title={s.detail} className={`text-[10.5px] px-2 py-0.5 rounded border ${s.state === 'verified' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : s.state === 'present' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-50 text-gray-400 border-gray-200'}`}>{s.state === 'verified' ? '✓ ' : s.state === 'present' ? '• ' : '– '}{s.label}</span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 3-column body */}
@@ -261,18 +323,40 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
               · Procurement: drop Sourcing Channel (folds into Sourcing cities), Purchase Frequency + Procurement Challenge (→ requirement side on the BuyLead card), Price vs Quality (already covered); MERGE Procurement Approach into Procurement Model.
               · Market: drop Sales Geography (sourcing already covers geography). */}
           {(() => {
-            const snapDrop = new Set(['Business Objective', 'Buyer Maturity']);
+            // owner UI-3 / HOD P-2 (2026-07-13): the leftmost SUMMARY (headline + Business Story) must NOT be repeated
+            // as key rows. Build the summary text once; drop any key row whose value the summary already states.
+            // Conservative: matches only a near-verbatim restatement (normalized substring of the value's lead phrase),
+            // so genuinely-new detail is kept.
+            const _norm = (x: unknown) => String(x || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+            const _summaryText = _norm(`${(persona && persona.trim()) || m.headline || ''} ${m.businessStory?.text || ''}`);
+            const _saidInSummary = (val: unknown) => { const v = _norm(String(val).split('·')[0]); return v.length >= 4 && _summaryText.includes(v); };
+            const dedupeVsSummary = <T extends { field: { present: boolean; value?: unknown } }>(rows: T[]): T[] => rows.filter((r) => !(r.field?.present && _saidInSummary(r.field.value)));
+            // Buyer Snapshot: drop Objective + Maturity (Stage keeps the maturity value) + MERGE Intent+Readiness
+            // (owner #8: one row — readiness temperature leads, intent stage follows).
+            const snapDrop = new Set(['Business Objective', 'Buyer Maturity', 'Deal Readiness']);
             const maturity = m.buyerDetails.find((r) => r.label === 'Buyer Maturity');
-            const snapRows = m.buyerDetails.filter((r) => !snapDrop.has(r.label)).map((r) => (r.label === 'Business Stage' && maturity?.field.present) ? { label: 'Business Stage', field: maturity.field } : r);
+            const readiness = m.buyerDetails.find((r) => r.label === 'Deal Readiness');
+            const snapRows = m.buyerDetails.filter((r) => !snapDrop.has(r.label)).map((r) => {
+              if (r.label === 'Business Stage' && maturity?.field.present) return { label: 'Business Stage', field: maturity.field };
+              // TRUE MERGE (owner): ONE value — the descriptive intent stage wins; the readiness temperature is a
+              // synonym (Hot ≈ Ready-to-buy), never concatenated alongside it.
+              if (r.label === 'Buyer Intent' && r.field.present && readiness?.field.present) { const stage = String(r.field.value).split('·').map((s) => s.trim()).filter((s) => s && !/^(hot|warm|cold)\b/i.test(s)).join(' · '); return { label: 'Buyer Intent', field: { ...r.field, value: stage || String(readiness.field.value).trim() } }; }
+              if (r.label === 'Buyer Intent' && !r.field.present && readiness?.field.present) return { label: 'Buyer Intent', field: readiness.field };
+              return r;
+            });
+            // Business Overview: MERGE B2B/B2C ("Business Model") + Retail/Wholesale into ONE classification row (owner #7).
+            const rw = m.overview.find((r) => r.label === 'Retail / Wholesale');
+            const ovRows = m.overview.filter((r) => r.label !== 'Retail / Wholesale').map((r) => (r.label === 'Business Model' && r.field.present && rw?.field.present) ? { label: 'Business Model', field: { ...r.field, value: `${r.field.value} — ${String(rw.field.value).charAt(0).toLowerCase()}${String(rw.field.value).slice(1)}` } } : (r.label === 'Business Model' && !r.field.present && rw?.field.present) ? { label: 'Business Model', field: rw.field } : r);
             const procDrop = new Set(['Sourcing Channel', 'Purchase Frequency', 'Procurement Challenge', 'Price vs Quality', 'Procurement Approach']);
             const approach = m.procurement.find((r) => r.label === 'Procurement Approach');
-            const procRows = m.procurement.filter((r) => !procDrop.has(r.label)).map((r) => { if (r.label === 'Procurement Model' && r.field.present && approach?.field.present) return { label: 'Procurement Model', field: { ...r.field, value: `${r.field.value} · ${approach.field.value}` } }; return r; });
+            // TRUE MERGE: the approach (richer phrasing, e.g. "planned & recurring") IS the model statement — one value.
+            const procRows = m.procurement.filter((r) => !procDrop.has(r.label)).map((r) => { if (r.label === 'Procurement Model' && approach?.field.present) return { label: 'Procurement Model', field: approach.field }; return r; });
             const mktRows = m.market.filter((r) => r.label !== 'Sales Geography');
             return (<>
-              <Section title="Buyer Snapshot" rows={snapRows} />
-              <Section title="Business Overview" rows={m.overview} extra={m.businessNature.present ? <KV Ic={Factory} label="Business Nature" f={m.businessNature} /> : null} />
-              <Section title="Procurement Profile" rows={procRows} />
-              <Section title="Market Focus" rows={mktRows} />
+              <Section title="Buyer Snapshot" rows={dedupeVsSummary(snapRows)} />
+              <Section title="Business Overview" rows={dedupeVsSummary(ovRows)} extra={m.businessNature.present ? <KV Ic={Factory} label="Business Nature" f={m.businessNature} /> : null} />
+              <Section title="Procurement Profile" rows={dedupeVsSummary(procRows)} />
+              <Section title="Market Focus" rows={dedupeVsSummary(mktRows)} />
             </>);
           })()}
         </div>
@@ -286,7 +370,7 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
             <span className="w-40 shrink-0 text-[12px] font-semibold text-gray-700">GST Verification Status</span>
             <span className="flex-1 min-w-0 text-[12px]">
               {m.company.gstStatus.present
-                ? <span className={/active|verified/i.test(String(m.company.gstStatus.value)) ? 'text-emerald-600 font-semibold' : 'text-amber-600 font-semibold'}>{/active|verified/i.test(String(m.company.gstStatus.value)) ? '✓ ' : ''}{m.company.gstStatus.value}</span>
+                ? (() => { const st = String(m.company.gstStatus.value).trim().toLowerCase(); const ok = /^(active|verified)\b/.test(st) && !/\b(in-?active|cancel|suspend|not\s+active|not\s+verified|deactivat)/.test(st); return <span className={ok ? 'text-emerald-600 font-semibold' : 'text-amber-600 font-semibold'}>{ok ? '✓ ' : '⚠ '}{m.company.gstStatus.value}</span>; })()
                 : <span className="text-gray-300 italic">Not available</span>}
             </span>
           </div>
@@ -335,7 +419,7 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
           <KV Ic={Mail} label="Email" f={m.contact.email} />
           {m.contact.altEmail.present && <KV Ic={Mail} label="Alt Email" f={m.contact.altEmail} />}
           <KV Ic={MapPin} label="Full Address" f={m.contact.fullAddress} />
-          {(m.contact.district.present || m.contact.pincode.present) && (
+          {(m.contact.city.present || m.contact.district.present || m.contact.state.present || m.contact.pincode.present) && (
             <div className="ml-6 text-[9.5px] text-gray-500 flex flex-wrap gap-x-2">{m.contact.city.present && <span>{m.contact.city.value}</span>}{m.contact.district.present && <span>· {m.contact.district.value}</span>}{m.contact.state.present && <span>· {m.contact.state.value}</span>}{m.contact.pincode.present && <span>· {m.contact.pincode.value}</span>}</div>
           )}
           {(m.contact.dob.present || m.contact.gender.present || m.contact.age.present || m.contact.incomeBand.present) && (
@@ -369,7 +453,7 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
             </details>
           )}
 
-          <SectionTitle>Requirement Activity (Last 6 Months) {m.requirementActivity.total != null && <span className="float-right normal-case text-gray-500 font-normal">Total: {m.requirementActivity.total}</span>}</SectionTitle>
+          <SectionTitle>Requirement Activity <span className="normal-case text-gray-400 font-normal">· recent months</span> {m.requirementActivity.total != null && <span className="float-right normal-case text-gray-500 font-normal">Total (lifetime): {m.requirementActivity.total}</span>}</SectionTitle>
           <ActivityChart months={m.requirementActivity.months} note={m.requirementActivity.note} />
         </div>
 
@@ -387,9 +471,13 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
           )}
           {/* segmented footprint buckets from deterministic signals (Government / B2B marketplace / Consumer) */}
           <FootprintChips m={m} />
+          {/* audit P2: surface EVERY Sign3 phone-linked platform (not just the 4 CONSUMER + 4 social ones) so a buyer with
+              only e.g. a Paytm/WhatsApp presence isn't a Digital-Footprint title over nothing, and the empty-state stays honest. */}
+          {/* audit (workflow regression catch): exclude the B2B-bucket keys too — FootprintChips already renders them in
+              the 'B2B marketplace' row via bucketPlatforms, so without this they double-render (chip + 'also linked'). */}
+          {(() => { const shown = new Set(['FACEBOOK', 'INSTAGRAM', 'LINKEDIN', 'TWITTER', 'X', 'AMAZON', 'FLIPKART', 'SNAPDEAL', 'MYNTRA', 'TRADEINDIA', 'EXPORTERSINDIA', 'ALIBABA']); const other = m.socialPlatforms.filter((p) => !shown.has(p)); return other.length ? (<div className="flex flex-wrap gap-1 mt-1"><span className="text-[9px] text-gray-400 self-center">also linked:</span>{other.map((p) => <span key={p} className="text-[10px] px-1.5 py-0.5 rounded border border-gray-200 bg-gray-50 text-gray-600 capitalize">{p.toLowerCase()}</span>)}</div>) : null; })()}
           {!m.social.website.present && !m.social.facebook.present && !m.social.instagram.present && !m.social.linkedin.present && !m.social.twitter.present && !(m.googleBusiness?.exists && m.googleBusiness.rating) && !m.company.gst.present && !m.company.udyam.present && !m.epfo?.present && !m.catalogueLink.present && !m.socialPlatforms.length && <div className="text-[11px] text-gray-300 italic">No web / social / registry footprint detected.</div>}
 
-          {m.socialPresenceCount != null && m.socialPresenceCount > 0 && <div className="text-[9px] text-gray-400 mt-0.5">{m.socialPresenceCount} phone-linked account{m.socialPresenceCount === 1 ? '' : 's'} detected (Sign3)</div>}
 
           <SectionTitle>Products of Interest</SectionTitle>
           {m.products.length ? (
@@ -397,32 +485,13 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
               {m.products.map((p, i) => <div key={`${p}-${i}`} className="text-[11px] text-gray-700 flex items-start gap-1"><span className="text-gray-300">•</span><span className="break-words">{p}</span></div>)}
             </div>
           ) : <div className="text-[11px] text-gray-300 italic">Not available</div>}
-          {m.productsOffered.length > 0 && <div className="text-[9px] text-gray-400 mt-1">({m.productsOffered.length} products offered-to-buyer also on file — hidden by default; enquired-only shown to reflect buyer intent)</div>}
 
-          {/* Latest requirement — BuyLead-page fields (order value / type / specs), consistent with the BuyLead view (#4) */}
-          {lr && (
-            <>
-              {/* N1 — a fully-expired buyer must NOT read as having a live lead: reframe the title + show an Expired pill + a browse-only note */}
-              <SectionTitle>{lr.isExpired ? 'Last Requirement (expired)' : 'Latest Requirement'}</SectionTitle>
-              <div className="rounded-lg border border-gray-100 bg-gray-50/50 p-2 text-[11px] text-gray-700 space-y-0.5">
-                <div className="font-semibold text-gray-800 break-words flex items-start gap-1"><ShoppingBag className="w-3.5 h-3.5 shrink-0 text-gray-400 mt-px" /><span className="flex-1">{lr.title || '—'}</span>{lr.isExpired && <span className="shrink-0 rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide bg-red-50 text-red-600 border border-red-100" title={`This BuyLead is expired${lr.expiry ? ` (expiry ${lr.expiry})` : ''} — it is not a live requirement`}>Expired{lr.expiry ? ` · ${lr.expiry}` : ''}</span>}</div>
-                {lr.category.present && <div className="text-gray-500 ml-5">Category: {lr.category.value}</div>}
-                <div className="flex items-center gap-1"><span className="text-gray-500">Order value:</span> <Val f={lr.orderValue} /></div>
-                <div className="flex items-center gap-1"><span className="text-gray-500">Requirement type:</span> <Val f={lr.requirementType} /></div>
-                {lr.specs.length > 0 && <div className="text-gray-500">Specs: <span className="text-gray-700">{lr.specs.map((s) => `${s.k}: ${s.v}`).join(' · ')}</span></div>}
-                {lr.posted && <div className="text-[9px] text-gray-400">Posted {lr.posted}</div>}
-                {lr.isExpired && !m.hasActiveRequirement && <div className="text-[9px] text-amber-600 mt-0.5">No live BuyLead — the buyer is currently browsing, with no open requirement.</div>}
-              </div>
-            </>
-          )}
+          {/* Latest-requirement section REMOVED from the GLADMIN card (owner 2026-07-12) — the requirement lives on
+              the BuyLead card; this card is the buyer, not the lead. */}
 
-          {/* TrustSEAL Buyer Plan — dummy placeholder (no plan data in pipeline yet); ellipsis so it never over-elongates (#6) */}
-          <SectionTitle>TrustSEAL Buyer Plan</SectionTitle>
-          <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50/50 p-2.5">
-            <div className="flex items-center justify-between gap-2"><span className="text-[11px] text-gray-500 shrink-0">Plan Type</span><span className="text-[11px] font-semibold text-gray-700 truncate" title="TrustSEAL Verified (sample)">TrustSEAL Verified</span></div>
-            <div className="flex items-center justify-between gap-2 mt-1"><span className="text-[11px] text-gray-500 shrink-0">Activated On</span><span className="text-[11px] text-gray-400 truncate">—</span></div>
-            <div className="text-[8px] text-gray-400 mt-1 italic">placeholder · no plan data in the pipeline yet</div>
-          </div>
+          {/* TrustSEAL Buyer Plan REMOVED (audit 2026-07-13, P1 + HOD no-fabrication): the card was rendering a fabricated
+              "Plan Type: TrustSEAL Verified" for EVERY buyer, contradicting the model's plan:null contract. There is no
+              plan data in the pipeline, so we show nothing rather than a sample value. Re-add only when a real plan feed exists. */}
         </div>
       </div>
 
@@ -431,5 +500,24 @@ export default function BuyerProfileCard({ rich, glid, pending, persona }: { ric
         <span className="text-emerald-600">✓✓</span> = agreed by ≥2 sources · <span className="italic">Not available</span> = no source field (never fabricated)
       </div>
     </div>
+
+      {/* HOD P-7/P-8 · WHAT WE ENRICHED — deliberately OUTSIDE the card (owner 2026-07-13): a collapsed, muted "receipt"
+          of what NEW value WE generated this pull (not raw DB fields) + multi-source verification. Not part of the main
+          card body; open it only to audit what enrichment ran. */}
+      {m.available && (enrichedAdded.length > 0 || signals.multiSource.length > 0) && (
+        <details className="mt-2 rounded-lg border border-dashed border-violet-200 bg-violet-50/30 px-3 py-2">
+          <summary className="cursor-pointer list-none text-[11px] font-bold uppercase tracking-wide text-violet-600 flex items-center gap-1"><Icon Ic={Star} />What We Enriched <span className="text-[10px] font-normal text-violet-400">· {enrichedAdded.length} sources added intelligence · click to expand</span></summary>
+          <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5">
+            {enrichedAdded.map((e) => (<div key={e.label} className="text-[10.5px] text-gray-700 flex items-baseline gap-1"><span className="text-emerald-600">✓</span><span className="font-medium">{e.label}</span><span className="text-gray-400 truncate" title={e.note}>— {e.note}</span></div>))}
+          </div>
+          {signals.multiSource.length > 0 && (
+            <div className="mt-2 pt-1.5 border-t border-violet-200/60">
+              <div className="text-[9px] uppercase tracking-wide text-violet-600 font-semibold mb-0.5">Multi-source verified</div>
+              {signals.multiSource.map((f) => (<div key={f.fact} className="text-[10.5px] text-gray-700"><b>{f.fact}:</b> {f.value} <span className="text-emerald-700 font-semibold">✓✓ verified from {f.sources.length} independent sources</span> <span className="text-gray-400">({f.sources.join(' · ')})</span></div>))}
+            </div>
+          )}
+        </details>
+      )}
+    </>
   );
 }

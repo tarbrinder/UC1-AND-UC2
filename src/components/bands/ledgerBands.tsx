@@ -11,10 +11,9 @@
 // (which holds the in-closure renderers). Props are minimal local shapes so these stay pure + independently testable.
 
 import { useState, type ReactNode } from 'react';
+import { Smartphone, Mail, Building2, CreditCard, ReceiptText, MessageCircle, User, Cake, Landmark, Factory, type LucideIcon } from 'lucide-react';
 import { Band, KV, StatePill, MiniBar, Expand, BandEmpty, type BandTone } from './Band';
 import type { UC2Enrichment, UC2Edit, UC2EditFull, UC2Eval } from '../../lib/uc2Enrichment';
-import { hasCrawlerKey } from '../../lib/sellerVerify';
-import { runOsintEnrichment, type OsintEnrichment, type OsintSeed } from '../../lib/osintEnrich';
 
 const fmtUsd = (n: number) => (n >= 0.01 ? `$${n.toFixed(3)}` : n > 0 ? `$${n.toFixed(5)}` : '$0');
 
@@ -126,8 +125,10 @@ export function L1Band({ nodes, cov, endpoint, drill, defaultOpen }: {
   nodes: L1NodeRow[]; cov?: { sent: number; cited: number; noise: number } | null;
   endpoint?: string; drill?: ReactNode; defaultOpen?: boolean;
 }) {
-  const okCount = nodes.filter((n) => n.ok === true).length;
-  const known = nodes.filter((n) => n.ok != null).length;
+  // audit ENR-698 / v47: a tier-skipped transcription source (status 'skipped') is NEITHER ok NOR failed — it's neutral,
+  // excluded from the ok/known tally so "N/M ok" isn't inflated by a source that deliberately didn't run this tier.
+  const okCount = nodes.filter((n) => n.ok === true && n.status !== 'skipped').length;
+  const known = nodes.filter((n) => n.ok != null && n.status !== 'skipped').length;
   const allOk = known > 0 && okCount === known;
   const covLine = cov ? <>{cov.sent} lines sent to LLM · <span className="text-emerald-700">{cov.cited} cited</span>{cov.noise > 0 && <> · {cov.noise} plumbing excluded</>}</> : null;
   return (
@@ -141,7 +142,7 @@ export function L1Band({ nodes, cov, endpoint, drill, defaultOpen }: {
             return (
               <details key={n.key} className="rounded-lg border border-gray-150 bg-gray-50/50">
                 <summary className="cursor-pointer list-none flex items-center gap-2 px-2 py-1.5 text-[11px] hover:bg-gray-50">
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${n.ok === false ? 'bg-rose-500' : n.ok === true ? 'bg-emerald-500' : 'bg-gray-300'}`} title={n.ok === false ? 'failed' : n.ok === true ? 'ok' : 'no n8n health signal for this node'} />
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${n.status === 'skipped' ? 'bg-gray-300' : n.ok === false ? 'bg-rose-500' : n.ok === true ? 'bg-emerald-500' : 'bg-gray-300'}`} title={n.status === 'skipped' ? 'skipped for this tier — not run' : n.ok === false ? 'failed' : n.ok === true ? 'ok' : 'no n8n health signal for this node'} />
                   <span className="flex-1 min-w-0 text-gray-700 truncate font-medium">{n.label}</span>
                   {n.status && n.status !== 'ok' && n.status !== 'success' && <span className={`shrink-0 text-[8.5px] px-1 rounded border ${n.status === 'error' ? 'bg-rose-50 text-rose-600 border-rose-200' : n.status === 'timeout' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>{n.status}</span>}
                   {typeof n.output_count === 'number' && <span className="text-gray-400 shrink-0">{n.output_count} out</span>}
@@ -288,7 +289,7 @@ export function L5Band({ attrs, evalRows, evalDrill, prune, status, drillFor, de
   const groups = [...new Set(shown.map((a) => a.group || 'attributes'))];
   return (
     <Band code="L5" title="LLM output — the Buyer Twin" subtitle="reasoning · eval · governance · provenance" tone="emerald" defaultOpen={defaultOpen}
-      status={status === 'done' ? `${shown.length} held` : status} statusTone={status === 'done' ? 'emerald' : 'amber'}>
+      status={status === 'done' ? `${shown.length} shown${held.length ? ` · ${held.length} held` : ''}` : status} statusTone={status === 'done' ? 'emerald' : 'amber'}>
       {drillFor && shown.length > 0 && <button type="button" onClick={() => setAllOpen((v) => !v)} className="mb-1 text-[10px] text-emerald-700 hover:underline">{allOpen ? '▾ collapse all reasoning' : '▸ expand all reasoning (raw + evidence)'}</button>}
       {(evalRows && evalRows.length > 0) || prune ? (
         <div className="mb-2">
@@ -347,7 +348,9 @@ export interface L6ProfileRow { label: string; value: string; drill?: ReactNode;
 export interface L6BuyerDetails { name?: string; company?: { value: string; verified: boolean; drill?: ReactNode }; memberSince?: string; memberSinceDrill?: ReactNode; device?: { value: string; note: string; source?: string }; responseCalls?: number; responseReplies?: number; ageGender?: string; ageGenderDrill?: ReactNode; availability: L6Availability[]; identityConfidence?: { value: string; drill?: ReactNode }; profileRows: L6ProfileRow[]; pii?: { label: string; value: string }[]; footprint?: { bucket: string; items: string[] }[]; allAttrRows?: { label: string; value: string; conf: number; drill?: ReactNode }[] }
 
 // compact channel icons for the "Available" row (matches the classic Buylead-Details card)
-const AVAIL_ICON: Record<string, string> = { mobile: '📱', email: '✉️', address: '🏢', pan: '🪪', gst: '🧾', whatsapp: '💬', name: '👤', age: '🎂', company: '🏛️' };
+// UI-4 (owner 2026-07-13): crisp inline SVGs instead of emoji (emoji rendered blurry / inconsistent across platforms).
+const AVAIL_ICON_SVG: Record<string, LucideIcon> = { mobile: Smartphone, email: Mail, address: Building2, pan: CreditCard, gst: ReceiptText, whatsapp: MessageCircle, name: User, age: Cake, company: Landmark, udyam: Factory };
+const availIcon = (key: string): ReactNode => { const Ic = AVAIL_ICON_SVG[key]; return Ic ? <Ic size={14} strokeWidth={2} aria-hidden /> : <span>•</span>; };
 // device icon by resolved value (§F): WhatsApp → 💬 · any app/mobile-site → 📱 · desktop → 🖥
 const deviceIcon = (v: string): string => /whatsapp/i.test(v) ? '💬' : /android|ios|app|mobile/i.test(v) ? '📱' : '🖥';
 
@@ -359,8 +362,10 @@ function DrillRow({ label, value, drill }: { label: ReactNode; value: ReactNode;
   );
 }
 
-export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFrequency, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, locationCorrected, fields, offerEval, enrichControl, enrichInput, gstVerified, stillAsk, needsInput, mode: modeProp, onMode, defaultOpen }: {
+export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFrequency, reqRows, requirementCount, buyerDetails, retailLead, titleDrill, locationDrill, locationCorrected, fields, offerEval, enrichControl, enrichInput, gstVerified, stillAsk, needsInput, mode: modeProp, onMode, defaultOpen, locked }: {
   picker?: ReactNode; selectedReq?: L6Requirement | null; uc2?: UC2Enrichment | null;
+  /** requirement-side buying-behaviour rows (owner 2026-07-12): Use Case · Procurement · Sourcing · Challenge · Price-vs-Quality · Payment · Delivery — rendered on the LEFT under the specs. */
+  reqRows?: L6ProfileRow[];
   productsOfInterest?: { value: string; changed: boolean; drill?: ReactNode } | null;
   reqFrequency?: { value: string; drill?: ReactNode } | null;
   requirementCount?: number; buyerDetails?: L6BuyerDetails | null; retailLead?: boolean;
@@ -368,6 +373,8 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
   fields: OfferFieldRow[]; offerEval?: { groundedPct: number; hallucinations: number; verdict: string } | null;
   enrichControl?: ReactNode; gstVerified?: { gstin: string; state: string; entity: string; count: number; list: string[]; advance?: { legalName?: string; tradeName?: string; constitution?: string; status?: string; taxpayerType?: string; registeredAddress?: string; registrationDate?: string; natureOfBusiness?: string[]; sac?: { code: string; desc: string }[]; signatories?: string[]; turnover?: string; email?: string; mobile?: string; centralJurisdiction?: string; stateJurisdiction?: string; filing?: { latest?: string; types: string[]; count: number } } | null } | null; stillAsk?: string[]; needsInput?: Array<{ key: string; label: string; reason: string; question: string }>;
   mode?: 'original' | 'profile' | 'requirement'; onMode?: (m: 'original' | 'profile' | 'requirement') => void; defaultOpen?: boolean;
+  /** HOD-UI5: on the dashboard the L6 BuyLead card must be ALWAYS-OPEN (non-collapsible). locked renders a plain container with no open/close control. */
+  locked?: boolean;
   enrichInput?: unknown;
 }) {
   const ACTION_TONE: Record<string, string> = { kept: 'text-gray-400', corrected: 'text-amber-700', added: 'text-emerald-700', dropped: 'text-rose-600 line-through', suggested: 'text-sky-700' };
@@ -389,7 +396,7 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
   // GST Verified ribbon — shown ONLY when the GST node returned a GSTIN; right of the "Buyer Details" heading.
   // Expandable (clickable modes) to the decode; a static badge in Original.
   const gstRibbon = !gstVerified ? null : profileClickable ?(
-    <details className="relative shrink-0">
+    <details name="avail" className="relative shrink-0">
       <summary className="cursor-pointer list-none inline-flex items-center gap-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-300 px-2 py-0.5 text-[10px] font-bold">🧾 GST Verified{gstVerified.count > 1 ? ` (${gstVerified.count})` : ''} ▾</summary>
       <div className="absolute right-0 mt-1 z-20 w-80 max-h-[28rem] overflow-auto rounded-lg bg-white border border-emerald-200 shadow-lg p-2 text-[10.5px] text-gray-700 font-normal">
         <div className="font-mono text-gray-800 break-all">{gstVerified.gstin}</div>
@@ -426,7 +433,7 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
     <details className="inline-block align-middle"><summary className="cursor-pointer list-none inline-flex flex-wrap items-baseline gap-1"><span className="line-through text-rose-400">{e.from}</span><span className="text-violet-700 font-semibold">{e.to}</span><span className="text-[9px] text-gray-300">▾</span></summary><div className="mt-1 rounded bg-gray-50 border border-gray-200 p-2 text-[10px]">{e.drill || <span className="text-violet-900">{e.reason}</span>}</div></details>
   );
   return (
-    <Band code="L6" title="" tone="sky" defaultOpen={defaultOpen}>
+    <Band code="L6" title="" tone="sky" defaultOpen={defaultOpen} locked={locked}>
       {/* the classic blue "Buylead Details" header bar (BuyLead selector tucked right) */}
       <div className="-mx-3 -mt-1 mb-3 px-4 py-2.5 bg-gradient-to-r from-blue-700 to-blue-500 rounded-t-lg flex items-center justify-between gap-2 flex-wrap">
         <span className="text-white font-bold text-[15px]">Buylead Details</span>
@@ -452,9 +459,9 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
               ) : <div className="text-[15px] font-semibold text-indigo-700 break-words">{selectedReq.title}</div>}
               {on && uc2?.title && <div className="text-[12px] mt-0.5 text-gray-600">Title → <Corrected e={uc2.title} /></div>}
               {reqClickable && locationDrill ? (
-                <details className="mt-1"><summary className="cursor-pointer list-none text-[12px] text-gray-600 flex flex-wrap items-center gap-x-1.5">{selectedReq.posted && <span>🕐 {selectedReq.posted}</span>}{locationCorrected ? <span className="text-indigo-600">🇮🇳 <span className="line-through text-rose-400">{locationCorrected.from}</span> <span className="text-violet-700 font-semibold">{locationCorrected.to}</span></span> : selectedReq.location && <span className="text-indigo-600 hover:underline">🇮🇳 {selectedReq.location}</span>}</summary><div className="mt-1 rounded bg-gray-50 border border-gray-200 p-2 text-[11px]">{locationDrill}</div></details>
+                <details className="mt-1"><summary className="cursor-pointer list-none text-[12px] text-gray-600 flex flex-wrap items-center gap-x-1.5">{selectedReq.posted && <span>🕐 {selectedReq.posted}</span>}{selectedReq.isExpired ? <span className="text-[10px] px-1 py-0.5 rounded bg-rose-50 text-rose-600 border border-rose-200 font-semibold">EXPIRED</span> : (typeof selectedReq.recencyDays === 'number' && selectedReq.recencyDays >= 0 ? <span className="text-[10px] text-gray-400">{selectedReq.recencyDays}d old</span> : null)}{locationCorrected ? <span className="text-indigo-600">🇮🇳 <span className="line-through text-rose-400">{locationCorrected.from}</span> <span className="text-violet-700 font-semibold">{locationCorrected.to}</span></span> : selectedReq.location && <span className="text-indigo-600 hover:underline">🇮🇳 {selectedReq.location}</span>}</summary><div className="mt-1 rounded bg-gray-50 border border-gray-200 p-2 text-[11px]">{locationDrill}</div></details>
               ) : (
-                <div className="text-[12px] text-gray-600 mt-1 flex flex-wrap items-center gap-x-1.5">{selectedReq.posted && <span>🕐 {selectedReq.posted}</span>}{selectedReq.location && <span>🇮🇳 {selectedReq.location}</span>}</div>
+                <div className="text-[12px] text-gray-600 mt-1 flex flex-wrap items-center gap-x-1.5">{selectedReq.posted && <span>🕐 {selectedReq.posted}</span>}{selectedReq.isExpired ? <span className="text-[10px] px-1 py-0.5 rounded bg-rose-50 text-rose-600 border border-rose-200 font-semibold">EXPIRED</span> : (typeof selectedReq.recencyDays === 'number' && selectedReq.recencyDays >= 0 ? <span className="text-[10px] text-gray-400">{selectedReq.recencyDays}d old</span> : null)}{selectedReq.location && <span>🇮🇳 {selectedReq.location}</span>}</div>
               )}
               {on && uc2?.location && <div className="text-[12px] mt-0.5 text-gray-600">🇮🇳 <Corrected e={uc2.location} /></div>}
               {selectedReq.category && selectedReq.category.split('\n').filter(Boolean).map((c, i) => (<div key={i} className="text-[12px] text-gray-700 mt-1.5">{c}</div>))}
@@ -485,7 +492,7 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
                 // Original specs render neutral — the old Buyer/Auto/Agent/Predicted fill-colour legend is retired
                 // (owner: not required; the card's own consolidated colour key covers what matters).
                 <div className="mt-2 space-y-0.5">{selectedReq.specs.map((s, j) => (<div key={j} className="text-[12px]"><span className="font-semibold text-gray-700">{s.k}</span> <span className="text-gray-700">: {s.v}</span></div>))}</div>
-              ) : selectedReq.specsStatus && selectedReq.specsStatus !== 'present' && !selectedReq.buyerInfo && !selectedReq.commercials ? (
+              ) : selectedReq.specsStatus && selectedReq.specsStatus !== 'present' ? (   /* audit LB-490: flake/empty status ALWAYS renders (was suppressed when buyerInfo/commercials present, hiding a getisq5 miss) */
                 <div className="mt-2 text-[11px] text-gray-400 italic">{selectedReq.specsStatus === 'getisq5_empty_run' ? '⚠ getisq5 returned NOTHING this pull (specs API empty/timed out) — re-pull to fetch ISQ' : selectedReq.specsStatus === 'beyond_fetch_cap' ? 'ISQ specs not fetched for this lead this pull (beyond the per-offer ISQ fetch cap)' : selectedReq.specsStatus === 'not_fetched' ? "no ISQ on file for this lead (getisq5 didn't return it)" : selectedReq.specsStatus === 'none' ? "no ISQ specs — buyer didn't answer the ISQ for this lead" : `no specs (${selectedReq.specsStatus})`}</div>
               ) : null}
               {/* V10 §D — Purchase frequency MOVED here: it's a per-requirement read (how often THEY buy this line), not a buyer-wide trait. LLM-derived (violet), clickable in Profile/Requirement. */}
@@ -494,6 +501,20 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
                   {profileClickable && reqFrequency.drill ? (
                     <details className="inline-block"><summary className="cursor-pointer list-none"><span className="font-semibold text-violet-700">Purchase frequency</span><span className="text-gray-400">: </span><span className="text-violet-700">{reqFrequency.value}</span><span className="text-[9px] text-gray-300 ml-1">▾</span></summary><div className="mt-1 ml-2 rounded bg-gray-50 border border-gray-200 p-2 text-[10px]">{reqFrequency.drill}</div></details>
                   ) : (<><span className="font-semibold text-violet-700">Purchase frequency</span><span className="text-gray-400">: </span><span className="text-violet-700">{reqFrequency.value}</span></>)}
+                </div>
+              )}
+              {/* HOW THIS BUYER BUYS (owner 2026-07-12) — requirement-side behaviour rows moved here from the buyer
+                  profile column: they describe how the buyer transacts on THIS kind of requirement, not who they are. */}
+              {!isOriginal && reqRows && reqRows.length > 0 && (
+                <div className="mt-2 pt-1.5 border-t border-gray-100 space-y-0.5">
+                  <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">How this buyer buys</div>
+                  {reqRows.map((p, i) => (
+                    <div key={i} className="text-[12px]">
+                      {profileClickable && p.drill ? (
+                        <details className="inline-block w-full"><summary className="cursor-pointer list-none"><span className="font-semibold text-violet-700">{p.label}</span><span className="text-gray-400">: </span><span className="text-violet-700">{p.value || '—'}</span><span className="text-[9px] text-gray-300 ml-1">▾</span></summary><div className="mt-1 ml-2 rounded bg-gray-50 border border-gray-200 p-2 text-[10px]">{p.drill}</div></details>
+                      ) : (<><span className="font-semibold text-violet-700">{p.label}</span><span className="text-gray-400">: </span><span className="text-violet-700">{p.value || '—'}</span></>)}
+                    </div>
+                  ))}
                 </div>
               )}
             </>
@@ -524,13 +545,16 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
                   // V10 §E: a.isNew (anchor discovered via external, absent from profile) → VIOLET border + violet ✦ tick.
                   <details key={a.key} name="avail" className="relative inline-block align-middle mr-1.5">
                     {/* §E: tick keeps ✓ (single) / ✓✓ (cross-source) — VIOLET (border+tick) carries the NEW axis, NOT a different symbol. */}
-                    <summary className={`cursor-pointer list-none relative inline-flex items-center justify-center w-7 h-7 rounded border text-[13px] ${a.isNew ? 'border-violet-300 bg-violet-50' : a.verified ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-gray-50'}`} title={a.label}>{AVAIL_ICON[a.key] || '•'}<span className={`absolute -top-1 -right-1 text-[7px] font-bold ${a.isNew ? 'text-violet-500' : a.verified ? 'text-emerald-600' : 'text-gray-400'}`}>{a.verified ? '✓✓' : '✓'}</span></summary>
+                    <summary className={`cursor-pointer list-none relative inline-flex items-center justify-center w-7 h-7 rounded border ${a.isNew ? 'border-violet-300 bg-violet-50 text-violet-700' : a.verified ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-gray-200 bg-gray-50 text-gray-600'}`} title={a.label}>{availIcon(a.key)}<span className={`absolute -top-1 -right-1 text-[7px] font-bold ${a.isNew ? 'text-violet-500' : a.verified ? 'text-emerald-600' : 'text-gray-400'}`}>{a.verified ? '✓✓' : '✓'}</span></summary>
                     {/* §A: deterministic anchors carry a 100% confidence chip (the value is on-file; ✓/✓✓ conveys corroboration). */}
-                    <div className="absolute left-0 top-full mt-1 z-30 w-52 rounded-lg bg-white border border-gray-200 shadow-lg p-1.5 text-[10px] text-gray-600"><div className="flex items-center gap-1 mb-0.5"><b>{a.label}</b>{confidenceChip(100, false)}{a.isNew && <span className="text-violet-600 font-semibold">NEW</span>}</div>{a.value || '—'}<div className="text-gray-500 mt-0.5">{a.note}</div><div className="text-gray-400">source: {a.source}</div></div>
+                    {/* audit 2026-07-13 (P1): only on-file/verified anchors carry the deterministic 100% chip. An externally-
+                        DISCOVERED anchor (a.isNew) is a lead, not a certainty — its real confidence lives in the note, so
+                        we do NOT stamp a hardcoded 100% that contradicts it. */}
+                    <div className="absolute left-0 top-full mt-1 z-30 w-52 rounded-lg bg-white border border-gray-200 shadow-lg p-1.5 text-[10px] text-gray-600"><div className="flex items-center gap-1 mb-0.5"><b>{a.label}</b>{a.isNew ? <span className="text-violet-600 font-semibold">NEW · lead</span> : (a.verified ? confidenceChip(100, false) : null)}</div>{a.value || '—'}<div className="text-gray-500 mt-0.5">{a.note}</div><div className="text-gray-400">source: {a.source}</div></div>
                   </details>
                 ) : (
                   // Original — static icon, SINGLE tick only (no cross-source ✓✓ and no NEW marker; that's enrichment, shown in Profile)
-                  <span key={a.key} className="relative inline-flex items-center justify-center w-7 h-7 rounded border border-gray-200 bg-gray-50 text-[13px] align-middle mr-1.5" title={`${a.label}: ${a.value || '—'}`}>{AVAIL_ICON[a.key] || '•'}<span className="absolute -top-1 -right-1 text-[7px] font-bold text-gray-400">✓</span></span>
+                  <span key={a.key} className="relative inline-flex items-center justify-center w-7 h-7 rounded border border-gray-200 bg-gray-50 text-gray-600 align-middle mr-1.5" title={a.label}>{availIcon(a.key)}<span className="absolute -top-1 -right-1 text-[7px] font-bold text-gray-400">✓</span></span>
                 ))}
                 {/* V10 §F — device: which surface the buyer transacted on. Same w-7 h-7 icon-square as the other anchors; expandable (clickable modes) to value · source · note, static icon in Original. */}
                 {buyerDetails.device && (profileClickable ? (
@@ -543,8 +567,23 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
                 ))}
               </span>
             </div>
-            {/* AI-EXTRACTED rows (Identity Confidence · profile findings · Needs-input) — hidden in Original (raw view); shown in Buyer Profile / Requirement */}
-            {!isOriginal && buyerDetails.identityConfidence && <DrillRow label={<span className="text-violet-700">Identity Confidence</span>} value={buyerDetails.identityConfidence.value || '—'} drill={profileClickable ?buyerDetails.identityConfidence.drill : undefined} />}
+            {/* DIGITAL FOOTPRINT chips — moved UP next to Available (owner 2026-07-12: "footprint in the available
+                section with logo"). Presence-gated chips; click any chip for what it means + where the evidence lives. */}
+            {!isOriginal && buyerDetails.footprint && buyerDetails.footprint.length > 0 && (
+              <div className="flex items-start gap-2 text-[12px] py-1">
+                <span className="w-40 shrink-0 font-semibold text-teal-700">Footprint</span>
+                <span className="flex-1 min-w-0 flex flex-wrap gap-1"><span className="text-gray-400">: </span>
+                  {buyerDetails.footprint.flatMap((b) => b.items.map((it) => ({ bucket: b.bucket, it }))).map(({ bucket, it }, i) => profileClickable ? (
+                    <details key={`${bucket}-${it}-${i}`} name="avail" className="relative inline-block align-middle">
+                      <summary className="cursor-pointer list-none px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 text-[10.5px]">{it}</summary>
+                      <div className="absolute left-0 top-full mt-1 z-30 w-56 rounded-lg bg-white border border-gray-200 shadow-lg p-1.5 text-[10px] text-gray-600"><b>{it}</b> · {bucket}<div className="text-gray-500 mt-0.5">observed presence on this platform (phone/registry-linked)</div><div className="text-gray-400 mt-0.5">evidence: Debug band → Sign3 social / web / registry nodes</div></div>
+                    </details>
+                  ) : (<span key={`${bucket}-${it}-${i}`} className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 text-[10.5px]" title={bucket}>{it}</span>))}
+                </span>
+              </div>
+            )}
+            {/* AI-EXTRACTED rows (profile findings · Needs-input) — hidden in Original (raw view); shown in Buyer Profile / Requirement.
+                Identity Confidence ROW dropped (owner #18): the badge/drill already lives on the Available anchors. */}
             {buyerDetails.pii && buyerDetails.pii.length > 0 && (
               <div className="mt-1.5 pt-1.5 border-t border-gray-100">
                 <button type="button" onClick={() => setShowPii((v) => !v)} className="text-[10.5px] font-semibold text-teal-700 inline-flex items-center gap-1 hover:underline">
@@ -555,19 +594,6 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
                     {buyerDetails.pii.map((p) => (<div key={p.label} className="flex gap-2 text-[10.5px]"><span className="w-24 shrink-0 text-gray-500">{p.label}</span><span className="flex-1 min-w-0 text-gray-800 font-mono break-words">{p.value}</span></div>))}
                   </div>
                 )}
-              </div>
-            )}
-            {!isOriginal && buyerDetails.footprint && buyerDetails.footprint.length > 0 && (
-              <div className="mt-1.5">
-                <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-0.5">Digital Footprint <span className="normal-case font-normal text-gray-400">· observed presence</span></div>
-                <div className="space-y-1">
-                  {buyerDetails.footprint.map((b) => (
-                    <div key={b.bucket} className="flex items-start gap-1.5 text-[10.5px]">
-                      <span className="w-28 shrink-0 text-gray-400">{b.bucket}</span>
-                      <span className="flex-1 min-w-0 flex flex-wrap gap-1">{b.items.map((it) => <span key={it} className="px-1 rounded bg-sky-50 text-sky-700 border border-sky-200">{it}</span>)}</span>
-                    </div>
-                  ))}
-                </div>
               </div>
             )}
             {!isOriginal && buyerDetails.profileRows.map((p, i) => (<DrillRow key={i} label={<span className={p.prov === 'det' ? 'text-teal-700' : 'text-violet-700'}>{p.label}</span>} value={p.value || '—'} drill={profileClickable ?p.drill : undefined} />))}
@@ -605,34 +631,63 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
           </div>
         )}
       </div>
+      {/* enrich action / outcome banner — always visible (was buried inside the debug expander) */}
+      {enrichControl && <div className="mt-2">{enrichControl}</div>}
       {/* consolidated footer legend (subtext, bottom of card) — colours used above, in one place */}
       <div className="mt-2 pt-1.5 border-t border-gray-100 text-[9.5px] text-gray-400 flex flex-wrap gap-x-3 gap-y-0.5">
         <span><span className="line-through text-rose-400">struck</span> = old · <span className="text-violet-700">violet</span> = AI corrected/added · <span className="text-emerald-700">green</span> = buyer-filled (kept)</span>
         <span><span className="text-violet-700 font-semibold">violet key</span> = LLM-derived · <span className="text-teal-700 font-semibold">teal key</span> = deterministic / verified</span>
       </div>
-      {/* one collapsed debug expander (offer-LLM enrichment + correctness) — off the clean card */}
-      {(fields.length > 0 || offerEval || enrichControl) && (
-        <Expand label="＋ enrichment & correctness (LLM debug)" tone="amber" defaultOpen>
-          {enrichInput !== undefined && <Expand label="raw INPUT — enrichment source fields sent to the offer-LLM" tone="slate" defaultOpen><div className="max-h-72 overflow-auto"><JsonTree data={enrichInput} openDepth={99} /></div></Expand>}
-          <div className="flex items-center gap-2 mb-1.5">
-            {offerEval && (<>
-              <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${offerEval.groundedPct >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}><b>{Math.round(offerEval.groundedPct)}%</b> grounded</span>
-              <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${offerEval.hallucinations ? 'bg-rose-50 text-rose-600 border-rose-200' : 'bg-gray-50 text-gray-500 border-gray-200'}`}><b>{offerEval.hallucinations}</b> hallucination{offerEval.hallucinations === 1 ? '' : 's'}</span>
-              <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${offerEval.verdict === 'strong' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>{offerEval.verdict}</span>
-            </>)}
-            {enrichControl}
-          </div>
-          {fields.map((f, i) => (
-            <div key={`${f.label}-${i}`} className="py-0.5">
-              <div className="flex items-start justify-between gap-3 text-[11px]">
-                <span className="text-gray-400 shrink-0">{f.label}</span>
-                <span className="text-right min-w-0 break-words">{f.before && f.action !== 'kept' && <span className="line-through text-rose-300 mr-1">{f.before}</span>}<span className={ACTION_TONE[f.action] || 'text-gray-700'}>{f.after || '—'}</span><span className="text-[9px] text-gray-300 ml-1">{f.action}</span></span>
+      {/* collapsed run receipt — ONLY what the card itself can't show: eval chips · rejected/dropped edits · raw LLM
+          input. Per-field reasoning lives ON the card (click any struck/violet/green value); the duplicate table is gone. */}
+      {(() => {
+        const appliedRows = fields.filter((f) => f.action === 'corrected' || f.action === 'added');
+        const rejected = fields.filter((f) => f.action === 'dropped' || f.action === 'suggested');
+        if (!offerEval && appliedRows.length === 0 && rejected.length === 0 && enrichInput === undefined) return null;
+        return (
+          <Expand label="⚙ enrichment run details" tone="amber">
+            {offerEval && (
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${offerEval.groundedPct >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}><b>{Math.round(offerEval.groundedPct)}%</b> grounded</span>
+                <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${offerEval.hallucinations ? 'bg-rose-50 text-rose-600 border-rose-200' : 'bg-gray-50 text-gray-500 border-gray-200'}`}><b>{offerEval.hallucinations}</b> hallucination{offerEval.hallucinations === 1 ? '' : 's'}</span>
+                <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${offerEval.verdict === 'strong' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>{offerEval.verdict}</span>
               </div>
-              {f.drill && <Expand label="reasoning → evidence" tone="amber" defaultOpen>{f.drill}</Expand>}
-            </div>
-          ))}
-        </Expand>
-      )}
+            )}
+            {/* audit P1 (ledgerBands:636): the APPLIED corrected/added edits (before→after + reasoning drill) — previously
+                counted in the banner but rendered nowhere in this receipt. */}
+            {appliedRows.length > 0 && (
+              <div className="mb-1.5">
+                <div className="text-[10px] font-semibold text-violet-600">applied to the lead ({appliedRows.length}) — AI corrected/added, grounded in buyer signals</div>
+                {appliedRows.map((f, i) => (
+                  <div key={`ap-${f.label}-${i}`} className="py-0.5">
+                    <div className="flex items-start justify-between gap-3 text-[11px]">
+                      <span className="text-gray-400 shrink-0">{f.label}</span>
+                      <span className="text-right min-w-0 break-words">{f.before && f.action !== 'kept' && <span className="line-through text-rose-300 mr-1">{f.before}</span>}<span className={ACTION_TONE[f.action] || 'text-gray-700'}>{f.after || '—'}</span><span className="text-[9px] text-gray-300 ml-1">{f.action}</span></span>
+                    </div>
+                    {f.drill && <Expand label="reasoning → evidence" tone="amber">{f.drill}</Expand>}
+                  </div>
+                ))}
+              </div>
+            )}
+            {rejected.length > 0 && (
+              <div className="mb-1.5">
+                <div className="text-[10px] font-semibold text-gray-500">not applied to the lead ({rejected.length}) — assessed by the AI but rejected/removed</div>
+                {rejected.map((f, i) => (
+                  <div key={`${f.label}-${i}`} className="py-0.5">
+                    <div className="flex items-start justify-between gap-3 text-[11px]">
+                      <span className="text-gray-400 shrink-0">{f.label}</span>
+                      <span className="text-right min-w-0 break-words">{f.before && <span className="line-through text-rose-300 mr-1">{f.before}</span>}<span className={ACTION_TONE[f.action] || 'text-gray-700'}>{f.after || '—'}</span><span className="text-[9px] text-gray-300 ml-1">{f.action}</span></span>
+                    </div>
+                    {f.drill && <Expand label="reasoning → evidence" tone="amber">{f.drill}</Expand>}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="text-[9.5px] text-gray-400 mb-1">per-field reasoning is on the card itself — click any struck / violet / green value above.</div>
+            {enrichInput !== undefined && <Expand label="raw INPUT — enrichment source fields sent to the offer-LLM" tone="slate"><div className="max-h-72 overflow-auto"><JsonTree data={enrichInput} openDepth={99} /></div></Expand>}
+          </Expand>
+        );
+      })()}
     </Band>
   );
 }
@@ -642,7 +697,7 @@ export function L6Band({ picker, selectedReq, uc2, productsOfInterest, reqFreque
 // · per-edit before→after with cited [fN] evidence. Mirrors the L0 chip style + L6 field-diff. Tone violet (AI accent).
 export function UC2DebugBand({ reqTitle, status, model, promptVersion, usage, evalRes, edits, input, rawOutput, coverage, defaultOpen }: {
   reqTitle?: string;
-  status: 'idle' | 'loading' | 'done' | 'no-key';
+  status: 'idle' | 'loading' | 'done' | 'no-key' | 'failed';   // audit 2026-07-13: a failed LLM call must never read as 'done/clean'
   model?: string; promptVersion?: string;
   usage?: { in: number; out: number; reasoning: number; ms: number; costUsd?: number } | null;
   evalRes?: UC2Eval | null; edits?: UC2EditFull[];
@@ -655,7 +710,7 @@ export function UC2DebugBand({ reqTitle, status, model, promptVersion, usage, ev
   const ed = edits || [];
   const applied = ed.filter((e) => e.applied);   // what actually changed the requirement
   const held = ed.filter((e) => !e.applied);     // assessed but NOT applied (ungrounded / below the confidence gate)
-  const statusTxt = status === 'no-key' ? 'no LLM key — dummy fallback' : status === 'loading' ? 'enriching…' : status === 'done' ? `${applied.length} applied${held.length ? ` · ${held.length} held` : ''}` : 'idle';
+  const statusTxt = status === 'no-key' ? 'no LLM key — dummy fallback' : status === 'failed' ? 'enrichment call failed' : status === 'loading' ? 'enriching…' : status === 'done' ? `${applied.length} applied${held.length ? ` · ${held.length} held` : ''}` : 'idle';
   const KIND_TONE: Record<string, string> = { corrected: 'text-violet-700 font-semibold', added: 'text-violet-700 font-semibold', kept: 'text-gray-400' };
   const editRow = (e: UC2EditFull, i: number, open?: boolean) => (
     <details key={`${e.group}:${e.field}:${e.kind}:${i}`} open={open} className="py-0.5">
@@ -707,7 +762,7 @@ export function UC2DebugBand({ reqTitle, status, model, promptVersion, usage, ev
                 </details>
               )}
             </div>
-          ) : status === 'done' ? <div className="text-[11px] text-gray-400 italic">No corrections/additions — requirement confirmed clean.</div> : <div className="text-[11px] text-gray-400">{status === 'loading' ? 'running enrichment…' : 'idle'}</div>}
+          ) : status === 'failed' ? <div className="text-[11px] text-rose-600 font-medium">⚠ Enrichment call failed — no verdict. This requirement was NOT checked (do not read as “clean”). Retry the enrichment.</div> : status === 'done' ? <div className="text-[11px] text-gray-400 italic">No corrections/additions — requirement confirmed clean.</div> : <div className="text-[11px] text-gray-400">{status === 'loading' ? 'running enrichment…' : 'idle'}</div>}
           {input && (input.system || input.user) && (
             <Expand label="＋ prompt input (system · user — exactly what the LLM saw)" tone="violet" defaultOpen>
               {input.system && <><div className="text-[9px] uppercase tracking-wide text-gray-400 mt-1">system</div><pre className="whitespace-pre-wrap break-words text-[10px] text-gray-600">{input.system}</pre></>}
@@ -726,49 +781,9 @@ export function UC2DebugBand({ reqTitle, status, model, promptVersion, usage, ev
 }
 
 // ── CRAWLER · web-verify (OSINT) — FRONTEND-only async scrape, rendered as its own block BELOW UC2 (owner) ────────
-// On-demand: a button fires runSellerVerify(glid) (fire → poll), kept OUT of the n8n pull so it never stalls the
-// synchronous response. Self-contained state. Raw scrape result shown verbatim (shape captured on first live call).
-export function CrawlerBand({ glid, seed, defaultOpen }: { glid?: string; seed?: OsintSeed; defaultOpen?: boolean }) {
-  const [st, setSt] = useState<OsintEnrichment>({ status: 'idle', queries: [], results: [], signals: [] });
-  const [tick, setTick] = useState({ done: 0, total: 0 });
-  const sd: OsintSeed = seed || { glid };
-  const run = () => { setSt({ status: 'running', queries: [], results: [], signals: [] }); setTick({ done: 0, total: 0 }); runOsintEnrichment(sd, { onTick: (done, total) => setTick({ done, total }) }).then(setSt).catch((e) => setSt({ status: 'failed', queries: [], results: [], signals: [], error: String(e) })); };
-  const statusTxt = st.status === 'idle' ? 'on-demand' : st.status === 'running' ? `searching… (${tick.done}/${tick.total})` : st.status === 'done' ? `${st.signals.length} signals · ${st.results.length} urls${st.ms ? ` · ${(st.ms / 1000).toFixed(0)}s` : ''}` : st.status;
-  return (
-    <Band code="OSINT" title="Web verify (crawler) — on-demand entity scrape" tone="slate" defaultOpen={defaultOpen} status={statusTxt} statusTone={st.status === 'done' ? 'indigo' : 'slate'}>
-      <div className="text-[10.5px] text-gray-500 mb-1.5">Frontend-only OSINT — fires a Firecrawl query-matrix (name·company·mobile·GST·PAN + site-scoped social/B2B) → LLM extracts specific signals. OUT of the n8n pull (V10 lock). 🔒 <b>OBSERVED-ONLY</b> — these LOW-confidence signals are NEVER folded into the profile twin (a fact graduates only when ≥2 sources corroborate). Uses the IndiaMART LLM key.</div>
-      {!hasCrawlerKey() ? <BandEmpty>No LLM key — crawler disabled (set VITE_LLM_KEY).</BandEmpty> : (!glid && !seed) ? <BandEmpty>No GLID / anchors in context.</BandEmpty> : (
-        <>
-          <button type="button" onClick={run} disabled={st.status === 'running'} className="text-[11px] px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50">{st.status === 'running' ? 'Searching…' : st.status === 'done' ? 'Re-run web verify' : `Verify GLID ${glid || ''}`}</button>
-          {st.status === 'failed' && <div className="text-[10.5px] text-rose-500 mt-1">failed: {st.error || 'unknown'}</div>}
-          {st.status === 'no-anchor' && <div className="text-[10.5px] text-amber-600 mt-1">{st.note}</div>}
-          {st.status === 'done' && (
-            <div className="mt-1.5 space-y-1">
-              {/* Layer C — extracted signals (the readable takeaway, each cited to a source URL) */}
-              <Expand label={`signals (${st.signals.length}) — observed-only`} tone="slate" defaultOpen>
-                {st.signals.length === 0 ? <div className="text-[10.5px] text-gray-400">no grounded signals extracted from the results</div> : st.signals.map((s, i) => (
-                  <div key={i} className="flex items-start gap-2 text-[10.5px] py-0.5">
-                    <span className="text-[8px] uppercase font-bold text-slate-500 w-24 shrink-0 pt-0.5">{s.signal_type}</span>
-                    <span className="flex-1 text-gray-700 break-words">{s.value} {confidenceChip(s.confidence, false)}</span>
-                    {s.source_url && <a href={s.source_url} target="_blank" rel="noreferrer" className="text-[9px] text-indigo-500 hover:underline shrink-0">{s.platform || 'src'} ↗</a>}
-                  </div>
-                ))}
-              </Expand>
-              {/* Layer A — the query matrix that ran (transparency on what we searched) */}
-              <Expand label={`queries fired (${st.queries.length})`} tone="slate" defaultOpen>
-                {st.queries.map((q, i) => (<div key={i} className="text-[10px] py-0.5"><span className="text-gray-400">{q.anchor}:</span> <span className="font-mono text-gray-600 break-all">{q.q}</span></div>))}
-              </Expand>
-              {/* Layer B — RAW Firecrawl output, verbatim */}
-              <Expand label={`RAW results (${st.results.length} urls)`} tone="slate" defaultOpen>
-                <pre className="whitespace-pre-wrap break-words text-[10px] font-mono text-gray-600 max-h-[28rem] overflow-auto">{(() => { try { return JSON.stringify(st.results, null, 2); } catch { return String(st.results); } })()}</pre>
-              </Expand>
-            </div>
-          )}
-        </>
-      )}
-    </Band>
-  );
-}
+// CrawlerBand (Firecrawl on-demand OSINT scrape) REMOVED (owner obs-1, 2026-07-13): the crawler is gone entirely —
+// web intelligence now comes ONLY from gweb (Gemini web-search) + Parallel.ai inside the n8n pull. The osintEnrich.ts
+// module + gemini.osintSignalsLLM were deleted with it.
 
 // ── L7 · UC2 · REQUIREMENT ENRICHMENT (3-brain alignment + the subtraction math) ────────────────────────────────
 export interface ReqRow { key: string; value?: string; reasoning: string; suppressed: boolean; suppressionReason?: string; buyerState?: string; categoryState?: string }

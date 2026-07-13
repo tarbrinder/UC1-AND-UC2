@@ -44,6 +44,7 @@ interface LLMOpts {
   maxTokens?: number;
   temperature?: number; // F1/F2: low temp on CLASSIFICATION calls (archetype, twin) → consistent labels across runs
   label?: string; // A4: which logical call this is (e.g. 'deriveIntent') — for the LLM Call Health ring
+  timeoutMs?: number; // audit 2026-07-13: per-call deadline (AbortController) so a hung gateway can't spin the loader forever
 }
 
 // ── A4 (G12): per-call LLM health ring — answers "did each LLM call fire, succeed, how long". ──
@@ -59,8 +60,9 @@ export const PROMPTS_VERSION = '2026.06.14';
 const PROMPT_VER: Record<string, string> = {
   planRequirement: 'plan-v7', deriveIntent: 'intent-v5', refineQuestions: 'refine-v2',
   inferSpecsFromApplication: 'cascade-v3', deriveBuyerTwin: 'twin-v1.2', deriveBuyerProfile: 'profile-v1',
-  getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1', extractBuyerProfile: 'extract-v41', // MUST mirror EXTRACT_PROMPT_VERSION (v41: field-level namesake flags consumed from n8n v44 websearch-parse — flagged web fields reach the LLM as ⚠ unverified leads, never silent facts; v40: ID-first web anchors + PAN-alone gate + jargon ban; v39: identity phone-holder-vs-GST-owner + email-domain institutional + web key-people reconciliation; v38: +company_reg (IndiaMART verified GST/KYB — constitution·nature·turnover-band·reg-year·PAN·partners·reg-IDs, PRIMARY authority) + buyerprofile (business_type·MCAT interests·products-sold[also-seller]·cleaned social·geo·activity·verification) composers+source-defs; trust badge TrustSEAL(6-9)/Verified-Business(4-5)/Verified(mob+email)/Unverified; v37: sourcing_channel names web-found marketplaces; v36: +deal_readiness + primary_language keys, card 360° reorg; v35: +use_case; v34: PNS-location aggregate lock; v33: source-policy architecture; v32: clean sectioned structure; v31: SUPERSET — frontend extract also outputs the dashboard-card slots (business_type/business_stage/annual_turnover/annual_procurements/sourcing_channel/preferred_suppliers/procurement_approach/target_customers/selling_channel/sales_geography/business_story) so one client call fills UC1 + the card; location P0 keeps a PAN-only buyer's registered city. v30: RECHECK MISSES — removed false "GST number not in this pull" clause when GSTIN present (N2); procurement_model=Bulk requires buyer's own commercial-scale QTY not seller/entity status (N4); communication responsiveness grounded in real two-way behavior + language only from buyer-authored signal (N5). v29: LOCATION-LEAK BLOCK — a city appearing ONLY inside an OUR-outbound fN is never a sourcing signal; emit sourcing city only from a buyer-side signal, else operating-city-alone; fixes the live "Sources from New Delhi" fabrication. v27: live-audit hardening — LOCATION sourcing-vs-operating + conflict-stays-unresolved + no-OUR-outbound-citation; COVERAGE carry concrete specs (GSM/machine dims); INTENT-vs-open-blockers; no internal mechanics (fallback/SIM-circle) in values; discrete confidence ladder {50,60,70,85,95}; name-a-vendor-only-if-cited. v26: fast-mode Gemini 2.5 Flash + Google Search grounding web engine self-reports match_confidence/matched_on/turnover_source; composeWebOsint emits a verdict line FIRST + WITHHOLDS unanchored/namesake web from the bundle; webVerified honors match_confidence!=='none'. v25: call evidence = Go-schema structured extraction (products/specs/price/qty · buyer_intent · call_outcome · B2B/persona/order/repeat · deal_readiness · payment · language) from calls[].extraction — n8n v18 audio nodes do full structured extraction per the Go call-extractor, not just transcription; transcript_en fallback kept; v24: prompt hygiene — glossary hoisted to top (define-before-use) + SYNTHESIZE-don't-ECHO + NAME-THE-VENDOR (Befisc vs Sign3) global rules + web_osint reframed to verify-then-use (per-field anchor check, no cap) + composeWebOsint reads basis[]/proofs[] → citations to LLM; v23: noise-strip + curated csl/external/identity/pns composers + widened SKIP_KEY + TIMELINE/NUMBERS/SELLER-GLID rules; v22: web_osint LOW-confidence + strict corroboration-gate (matches verified GST/Udyam/PAN/name/location or IGNORE; caps ~45; never overrides KYB); v21: Udyam/MSME source-def — enterprise_type=size + NIC industry + org type + address triangulation; v20: Web OSINT Parallel.ai deep web-search — footprint/scale/legitimacy, corroboration + identity_confidence, never overrides KYB; v19: Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union/gst_detail_union 3-vendor consensus + agreement→confidence + pan_type authority; v18: IDfy sources live end-to-end — pan_gst_idfy/gst_cert_idfy/epfo now emitted by backend v15; v17: PNS calls source — sourcing basket/persona + circle→location + offer_id⋈BuyLead + transcript→UC2; v16: IDfy triangulation source-defs; v15: PAN/GSTIN entity-char → b2b_b2c; v14: verified-address lock on operating city; v13: Call-recordings source-def + composeCalls; v12: Befisc GST Advanced source-def → B2B/role/sub_industry/hard-city; v11: clean `sources` catalog, never external/profile; v10: recurring guard · req-scoped purchase_frequency · Preferred sourcing city · strip is_expired · retail_wholesale · b2b_b2c)
-  offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v9', // MUST mirror UC2_PROMPT_VERSION in uc2Enrichment.ts (v9: date-matched call transcript; v8: "Preferred sourcing city"; v7: clean values)
+  getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1', extractBuyerProfile: 'extract-v43', // MUST mirror EXTRACT_PROMPT_VERSION (v43: products_of_interest infers brand/colloquial→category+implication; v42: buyer_maturity three-way no-fabricate + requirement-fields omit-without-signal; v41: field-level namesake flags consumed from n8n v44 websearch-parse — flagged web fields reach the LLM as ⚠ unverified leads, never silent facts; v40: ID-first web anchors + PAN-alone gate + jargon ban; v39: identity phone-holder-vs-GST-owner + email-domain institutional + web key-people reconciliation; v38: +company_reg (IndiaMART verified GST/KYB — constitution·nature·turnover-band·reg-year·PAN·partners·reg-IDs, PRIMARY authority) + buyerprofile (business_type·MCAT interests·products-sold[also-seller]·cleaned social·geo·activity·verification) composers+source-defs; trust badge TrustSEAL(6-9)/Verified-Business(4-5)/Verified(mob+email)/Unverified; v37: sourcing_channel names web-found marketplaces; v36: +deal_readiness + primary_language keys, card 360° reorg; v35: +use_case; v34: PNS-location aggregate lock; v33: source-policy architecture; v32: clean sectioned structure; v31: SUPERSET — frontend extract also outputs the dashboard-card slots (business_type/business_stage/annual_turnover/annual_procurements/sourcing_channel/preferred_suppliers/procurement_approach/target_customers/selling_channel/sales_geography/business_story) so one client call fills UC1 + the card; location P0 keeps a PAN-only buyer's registered city. v30: RECHECK MISSES — removed false "GST number not in this pull" clause when GSTIN present (N2); procurement_model=Bulk requires buyer's own commercial-scale QTY not seller/entity status (N4); communication responsiveness grounded in real two-way behavior + language only from buyer-authored signal (N5). v29: LOCATION-LEAK BLOCK — a city appearing ONLY inside an OUR-outbound fN is never a sourcing signal; emit sourcing city only from a buyer-side signal, else operating-city-alone; fixes the live "Sources from New Delhi" fabrication. v27: live-audit hardening — LOCATION sourcing-vs-operating + conflict-stays-unresolved + no-OUR-outbound-citation; COVERAGE carry concrete specs (GSM/machine dims); INTENT-vs-open-blockers; no internal mechanics (fallback/SIM-circle) in values; discrete confidence ladder {50,60,70,85,95}; name-a-vendor-only-if-cited. v26: fast-mode Gemini 2.5 Flash + Google Search grounding web engine self-reports match_confidence/matched_on/turnover_source; composeWebOsint emits a verdict line FIRST + WITHHOLDS unanchored/namesake web from the bundle; webVerified honors match_confidence!=='none'. v25: call evidence = Go-schema structured extraction (products/specs/price/qty · buyer_intent · call_outcome · B2B/persona/order/repeat · deal_readiness · payment · language) from calls[].extraction — n8n v18 audio nodes do full structured extraction per the Go call-extractor, not just transcription; transcript_en fallback kept; v24: prompt hygiene — glossary hoisted to top (define-before-use) + SYNTHESIZE-don't-ECHO + NAME-THE-VENDOR (Befisc vs Sign3) global rules + web_osint reframed to verify-then-use (per-field anchor check, no cap) + composeWebOsint reads basis[]/proofs[] → citations to LLM; v23: noise-strip + curated csl/external/identity/pns composers + widened SKIP_KEY + TIMELINE/NUMBERS/SELLER-GLID rules; v22: web_osint LOW-confidence + strict corroboration-gate (matches verified GST/Udyam/PAN/name/location or IGNORE; caps ~45; never overrides KYB); v21: Udyam/MSME source-def — enterprise_type=size + NIC industry + org type + address triangulation; v20: Web OSINT Parallel.ai deep web-search — footprint/scale/legitimacy, corroboration + identity_confidence, never overrides KYB; v19: Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union/gst_detail_union 3-vendor consensus + agreement→confidence + pan_type authority; v18: IDfy sources live end-to-end — pan_gst_idfy/gst_cert_idfy/epfo now emitted by backend v15; v17: PNS calls source — sourcing basket/persona + circle→location + offer_id⋈BuyLead + transcript→UC2; v16: IDfy triangulation source-defs; v15: PAN/GSTIN entity-char → b2b_b2c; v14: verified-address lock on operating city; v13: Call-recordings source-def + composeCalls; v12: Befisc GST Advanced source-def → B2B/role/sub_industry/hard-city; v11: clean `sources` catalog, never external/profile; v10: recurring guard · req-scoped purchase_frequency · Preferred sourcing city · strip is_expired · retail_wholesale · b2b_b2c)
+  offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v10', // audit 2026-07-13: mirror UC2_PROMPT_VERSION (was stale v9; lib is v10 — telemetry logged the wrong version). v10: plain-layman-English; v9: date-matched call transcript; v8: "Preferred sourcing city"
+
 };
 const promptVer = (label: string): string => PROMPT_VER[label] || PROMPTS_VERSION;
 
@@ -115,9 +117,14 @@ export function onLLMActivity(cb: LLMActivityCb): () => void {
 export const llmActive = (): number => llmInFlight;
 
 async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } }): Promise<string> {
-  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
+  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm', timeoutMs = 240000 } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
+  // audit 2026-07-13 (P1): no timeout meant a hung gateway never resolved — llmInFlight stuck, global 'working…' loader
+  // spun forever with no health record. 240s default comfortably clears the ~100s extract; a truly hung socket now aborts.
+  if (!hasGeminiKey()) { recordLLM({ label, ok: false, ms: 0, status: 0, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) }); throw new Error('no LLM key'); }
   const t0 = Date.now();
   let status = 0;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), Math.max(1000, timeoutMs));
   llmInFlight++; llmLastLabel = label; emitLLMActivity();
   try {
     const res = await fetch(ENDPOINT, {
@@ -133,6 +140,7 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
         ...(typeof temperature === 'number' ? { temperature } : {}),
         max_tokens: maxTokens,
       }),
+      signal: ac.signal,
     });
     status = res.status;
     if (!res.ok) {
@@ -143,7 +151,11 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
     const data = await res.json();
     const content = (data.choices?.[0]?.message?.content ?? '{}') as string;
     // capture truncated raw I/O for the Output-Acceptance ledger (P2) — last call per label
-    try { const msgs = messages as Array<{ role?: string; content?: unknown }>; const inText = msgs.map((m) => String(m.content ?? '')).join(' — '); const sys = msgs.find((m) => m.role === 'system'); const usr = [...msgs].reverse().find((m) => m.role === 'user' || !m.role); LLM_RAW[label] = { input: inText, output: content, system: sys ? String(sys.content ?? '') : undefined, user: usr ? String(usr.content ?? '') : undefined, at: Date.now(), model, maxTokens, temperature, promptVersion: promptVer(label) }; } catch { /* noop */ } // V10 (owner #4/#13): capture FULL prompt+output (was 12000/4000/8000) so L4 'nothing hidden' is literally true. Debug mode, PII ok.
+    // audit 2026-07-13 (P2): multimodal content is an array of parts ({type:'text'|'image_url'|'input_audio'}). String()
+    // on it yielded '[object Object],[object Object]' and blanked the L4 ledger for exactly the voice/image calls. Serialize
+    // text parts and tag binary ones so 'nothing hidden' is literally true for multimodal too.
+    const partStr = (c: unknown): string => Array.isArray(c) ? (c as Array<{ type?: string; text?: string }>).map((p) => p && p.type === 'text' ? String(p.text ?? '') : (p && p.type ? `[${p.type}]` : String(p ?? ''))).join(' ') : String(c ?? '');
+    try { const msgs = messages as Array<{ role?: string; content?: unknown }>; const inText = msgs.map((m) => partStr(m.content)).join(' — '); const sys = msgs.find((m) => m.role === 'system'); const usr = [...msgs].reverse().find((m) => m.role === 'user' || !m.role); LLM_RAW[label] = { input: inText, output: content, system: sys ? partStr(sys.content) : undefined, user: usr ? partStr(usr.content) : undefined, at: Date.now(), model, maxTokens, temperature, promptVersion: promptVer(label) }; } catch { /* noop */ } // V10 (owner #4/#13): capture FULL prompt+output so L4 'nothing hidden' is literally true. Debug mode, PII ok.
     const u = data.usage || {};
     const promptTokens = u.prompt_tokens ?? 0;
     const completionTokens = u.completion_tokens ?? 0;
@@ -153,8 +165,9 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
     return content;
   } catch (e) {
     if (!status) recordLLM({ label, ok: false, ms: Date.now() - t0, status: 0, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) });
-    throw e;
+    throw (ac.signal.aborted ? new Error(`LLM timeout after ${timeoutMs}ms (${label})`) : e);
   } finally {
+    clearTimeout(timer);
     llmInFlight = Math.max(0, llmInFlight - 1); emitLLMActivity();
   }
 }
@@ -206,7 +219,10 @@ export async function extractBuyerProfileLLM(system: string, user: string): Prom
     const attrs = Array.isArray((parsed as { attributes?: unknown }).attributes) ? (parsed as { attributes: unknown[] }).attributes
       : Array.isArray(parsed) ? (parsed as unknown[])
       : (Object.values(parsed || {}).find((v) => Array.isArray(v)) as unknown[] | undefined);
-    return { out: Array.isArray(attrs) ? { attributes: attrs as SynthLLMOut['attributes'] } : null, usage };
+    // audit P1 (gemini:209): carry the LLM's top-level needs_input[] through — the honest "couldn't ground, ask the
+    // buyer" channel the extract prompt mandates; dropping it silently starved the needs-input UI band.
+    const needsInput = Array.isArray((parsed as { needs_input?: unknown }).needs_input) ? (parsed as { needs_input: SynthLLMOut['needs_input'] }).needs_input : undefined;
+    return { out: Array.isArray(attrs) ? { attributes: attrs as SynthLLMOut['attributes'], needs_input: needsInput } : null, usage };
   } catch { applyMeta(); return { out: null, usage }; }
 }
 
@@ -224,33 +240,9 @@ export async function pruneTwinLLM(system: string, user: string): Promise<string
   } catch { return null; }
 }
 
-// OSINT SIGNAL EXTRACTION (Web-verify band) — reads the combined Firecrawl results, returns SPECIFIC grounded
-// signals, each cited to a source URL. Observed-only / LOW-confidence by nature — the caller keeps them SEGREGATED
-// from the twin (they graduate into the profile only via the cross-validation ladder). Structural params (no import
-// cycle with osintEnrich). Empty on no-key / no results / failure.
-export async function osintSignalsLLM(
-  seed: unknown,
-  results: ReadonlyArray<{ url: string; title?: string; description?: string; platform: string; viaAnchors?: string[] }>,
-): Promise<{ signals: Array<{ signal_type: string; value: string; confidence: number; source_url: string; platform: string }> }> {
-  if (!hasGeminiKey() || !results.length) return { signals: [] };
-  const system = [
-    'You are an OSINT analyst building a LOW-CONFIDENCE web footprint for an India-B2B buyer.',
-    'From the web search results, extract ONLY signals you can GROUND in a specific result URL — about THIS buyer/entity.',
-    'Be skeptical: open-web search returns namesakes. If a result is clearly a DIFFERENT entity, DROP it. Never invent.',
-    'Useful signal_type values: entity_match · role (manufacturer/wholesaler/distributor/retailer/reseller/service) ·',
-    'industry · scale (employees/turnover/years/branches) · location_confirm · social_handle · also_a_seller · website · rating · gst_or_pan_match.',
-    'confidence 0-100 = how strongly the result is THIS entity AND how reliable the platform is (LinkedIn/own-site > generic directory).',
-    'Return STRICT JSON: { "signals": [ { "signal_type", "value", "confidence", "source_url", "platform" } ] }. Omit anything ungrounded.',
-  ].join(' ');
-  const user = 'BUYER ANCHORS: ' + JSON.stringify(seed) + '\n\nWEB RESULTS:\n' +
-    results.map((r, i) => `${i + 1}. [${r.platform}] ${r.title || ''} — ${r.description || ''}  (${r.url})`).join('\n');
-  try {
-    const text = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 4000, model: MODEL_FAST, label: 'osintSignals' });
-    const p = JSON.parse(text) as { signals?: unknown };
-    const sigs = Array.isArray(p.signals) ? p.signals : [];
-    return { signals: sigs.map((s) => { const o = (s || {}) as Record<string, unknown>; return { signal_type: String(o.signal_type || o.type || 'signal'), value: String(o.value || ''), confidence: Math.max(0, Math.min(100, Number(o.confidence) || 0)), source_url: String(o.source_url || o.url || ''), platform: String(o.platform || '') }; }).filter((s) => s.value) };
-  } catch { return { signals: [] }; }
-}
+// osintSignalsLLM REMOVED (owner obs-1, 2026-07-13): the Firecrawl crawler was deleted entirely — web intelligence
+// now comes only from gweb (Gemini web-search) + Parallel.ai inside the n8n pull, so this front-end OSINT-extractor
+// (and its lib/osintEnrich.ts caller + the CrawlerBand render) are gone.
 
 // OFFER ENRICHMENT (Case 2) — the authority pass: re-reads the raw BuyLead + the buyer-originated signals and
 // returns the per-field correction verdict ({"fields":[…]}). Null on no-key / failure (caller keeps the raw lead).
@@ -345,7 +337,7 @@ The audio may be in Hindi, English or Hinglish — transcribe faithfully, then e
         },
       ],
     },
-  ], { model: MODEL_RICH, maxTokens: 2048, label: 'voiceToSpecs' });
+  ], { model: MODEL_RICH, maxTokens: 16000, label: 'voiceToSpecs' });   // audit P2: raised from 2048 — a long transcript could clip mid-JSON and lose the whole extraction
   return JSON.parse(text);
 }
 
@@ -407,7 +399,7 @@ Identify this B2B product and its key specs.${useCase} Return JSON:
         { type: 'text', text: prompt },
       ],
     },
-  ], { model: MODEL_RICH, maxTokens: 1024, label: 'analyzeImage' });
+  ], { model: MODEL_RICH, maxTokens: 16000, label: 'analyzeImage' });   // audit P2: raised from 1024 — avoid clipping the JSON on a detailed image read
   return JSON.parse(text);
 }
 
@@ -619,7 +611,7 @@ RULES:
 EXAMPLES (shape only — do NOT hardcode): Cotton Tote Bag → journey "retail" → "What will you use these bags for?" · ["Retail shopping","Corporate gifting","Event giveaway","Resale","Packaging"]. Industrial Filter → "industrial" → "What's driving this requirement?" · ["New plant","Replacement","Capacity expansion","Maintenance"]. Solar Panel → "project" → "Where will these be installed?" · ["Home rooftop","Commercial building","Industrial plant","Government tender"].
 Return ONLY JSON: { "journey":"...", "question":"...", "chips":["..."], "derivedIntent":"", "confidence":0, "intent_candidates":[{"label":"","score":0,"reason":""}] }`;
   try {
-    const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 512, label: 'deriveIntent' });
+    const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 512, temperature: 0, label: 'deriveIntent' });   // audit P2 (F1/F2): low temp on classification → consistent labels across runs
     const p = JSON.parse(text);
     const chips = Array.isArray(p?.chips) ? p.chips.map((c: unknown) => indiaize(String(c).trim())).filter(Boolean).slice(0, 6) : [];
     const question = typeof p?.question === 'string' ? indiaize(p.question.trim()) : '';
@@ -1064,7 +1056,7 @@ Evidence cues: many WhatsApp messages → WhatsApp Friendly; asks for images/cat
 MATURITY — be careful: "Business Setup Phase" is ONLY for a genuinely NEW / just-starting business. If the business description states an ESTABLISHMENT / FOUNDING year (e.g. "Established in 1995…") or shows an existing multi-product catalog, the firm is ESTABLISHED → use "Existing Buyer" or "Execution Phase", NEVER "Business Setup Phase" (exploring a NEW product category is not the same as setting up a new business). Reserve one_time_capex/setup signals for machinery/plant build-outs, not routine sourcing.
 Procurement-model cues (persistent pattern, NOT today's order): one-off build/site → Project-based; steady repeat buying of the same goods → Recurring Supply; big one-time machinery/plant → Capex; spares/consumables to keep things running → Maintenance/MRO; replacing worn/old equipment → Replacement; adding capacity/new line → Expansion. Pick "Unknown" if the history doesn't show a clear pattern — do NOT guess.`;
   try {
-    const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 700, label: 'deriveBuyerProfile' });
+    const text = await callLLM([{ role: 'user', content: prompt }], { model: MODEL_FAST, maxTokens: 700, temperature: 0, label: 'deriveBuyerProfile' });   // audit P2 (F1/F2): low temp on classification
     const p = JSON.parse(text) as Record<string, unknown>;
     // Reject unfilled placeholders ("<one of: …>") and echoed option lists ("a | b")
     // — store a clean single value or nothing (never junk).
@@ -1540,7 +1532,7 @@ For the product "${productName}", classify each ISQ (IndiaMART Spec Questions �
 - "preference" = a SELLER/BRAND choice that would NARROW the supplier pool if we assumed it — Brand, Make, Manufacturer, OEM, Model name, proprietary/branded variant. The marketplace must NEVER guess these.
 - "objective" = a physical/measurable buyer-owned attribute (size, material, capacity, grade, application, usage, colour, type, dimension).
 Fields: ${JSON.stringify(isqSpecNames)}
-Return ONLY JSON: { "preference": ["exact field names"], "objective": ["exact field names"] }` }], { maxTokens: 500, label: 'classifyFieldTypes' });
+Return ONLY JSON: { "preference": ["exact field names"], "objective": ["exact field names"] }` }], { maxTokens: 500, temperature: 0, label: 'classifyFieldTypes' });   // audit P2 (F1/F2): low temp on classification
     const p = JSON.parse(text) as { preference?: unknown };
     const fromLLM = Array.isArray(p.preference) ? p.preference.map((x) => String(x)) : [];
     const prefSet = new Set(isqSpecNames.filter((n) => PREFERENCE_KEYWORDS.test(n) || fromLLM.some((f) => f.toLowerCase() === n.toLowerCase())));

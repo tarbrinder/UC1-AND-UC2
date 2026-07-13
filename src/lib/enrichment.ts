@@ -625,10 +625,10 @@ export function getBuyerUnified(): unknown { return lastUnified; }
 // (safe during a canary window where both endpoints are live). The EXTRACT path does NOT use this — it reads the
 // rich {sources} directly via buyerProfileExtract.bundleFromResponse (no regex). derived_anchors are stored
 // separately (identity prefill HINT) and NEVER injected into facts (keeps the ledger deterministic).
-let lastAnchors: Record<string, unknown> | null = null;
-export function getEnrichmentAnchors(): Record<string, unknown> | null { return lastAnchors; }
+// lastAnchors/getEnrichmentAnchors REMOVED (audit ENR-629): the getter had zero consumers and the value was excluded
+// from the per-tier cache restore (would have served the wrong pull's anchors), so it was write-only dead code.
 export function isNewUserInsightsShape(raw: unknown): raw is { sources: Record<string, { summary?: unknown; raw?: unknown }>; derived_anchors?: Record<string, unknown> } {
-  return !!raw && typeof raw === 'object' && !Array.isArray(raw) && 'sources' in (raw as Record<string, unknown>) && typeof (raw as { sources?: unknown }).sources === 'object';
+  return !!raw && typeof raw === 'object' && !Array.isArray(raw) && 'sources' in (raw as Record<string, unknown>) && !!(raw as { sources?: unknown }).sources && typeof (raw as { sources?: unknown }).sources === 'object';
 }
 // Helpers shared by normalizeNewUserInsights + the inline copy in mergedTwinStore.richToLegacy — keep them in sync.
 const _obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
@@ -650,9 +650,8 @@ export function isqOffersToLegacy(isqSummary: unknown): Array<Record<string, unk
 // rfq.raw.RESPONSE.DATA.Listing / wa.raw.data.records. profile/whatsapp_inbound/befisc/sign3 are already the right
 // shape. Verified against deriveEnrichment + ledger.buildLedger field reads. NOTE: the EXTRACT path does NOT use this.
 export function normalizeNewUserInsights(raw: unknown): unknown {
-  if (!isNewUserInsightsShape(raw)) { lastAnchors = null; return raw; }            // old shape → identity passthrough
+  if (!isNewUserInsightsShape(raw)) return raw;            // old shape → identity passthrough
   const s = raw.sources as Record<string, { summary?: unknown; raw?: unknown } | undefined>;
-  lastAnchors = (raw.derived_anchors && typeof raw.derived_anchors === 'object') ? raw.derived_anchors : null;
   const rawOf = (k: string) => { const v = s[k]; return v && typeof v === 'object' && 'raw' in v ? (v as { raw?: unknown }).raw : v; };
   const sumOf = (k: string) => { const v = s[k]; return v && typeof v === 'object' && 'summary' in v ? (v as { summary?: unknown }).summary : undefined; };
   const pnsCalls = _arr(_obj(rawOf('pns')).data);                                                  // pns.raw = {Code,data:[calls]}
@@ -732,8 +731,21 @@ const enrichResultCache = new Map<string, { profile: EnrichmentProfile | null; l
 export function clearEnrichResultCache(): void { enrichResultCache.clear(); }
 // v42 — per-tier cache visibility for the tier selector (✓ = this glid+tier already pulled this session)
 export function hasCachedTier(glid: string, tier: string): boolean { return enrichResultCache.has(`${String(glid).trim()}:${tier}`); }
-export async function fetchEnrichment(glid: string, opts?: { fast?: boolean; tier?: 'superfast' | 'fast' | 'normal'; fresh?: boolean }): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> {
+// audit 2026-07-13 (P1): "latest-wins" guard. The module globals (lastRich/lastRaw/lastHealth/lastServerTrace) are a
+// single "currently-displayed pull" slot; a stale/late pull (e.g. buyer-A normal resolving after buyer-B superfast
+// started) must NOT clobber them. Each fetch stamps a monotonic id and records itself as the latest STARTED run; on
+// resolve, a run commits the globals ONLY if it is still the latest. The per-key result cache is always written (keyed,
+// safe). getEnrichmentRich() etc. therefore never flip to an older buyer's/pull's data mid-render.
+let _runSeq = 0;
+let _latestRun = 0;
+export async function fetchEnrichment(glid: string, opts?: { fast?: boolean; tier?: 'superfast' | 'fast' | 'normal'; fresh?: boolean; background?: boolean }): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> {
   if (!glid?.trim()) return { profile: null, raw: null };
+  // audit 2026-07-13 (empty-first-run fix): a `background` pre-warm pull (a NON-displayed tier being warmed for instant
+  // switching) must NEVER enter the latest-wins race. It starts AFTER the displayed pull, so if it bumped _latestRun the
+  // displayed pull's commit (line "_my === _latestRun") would be skipped and lastRich would stay stale/null — the card
+  // renders EMPTY on first load until a tier switch. So background pulls take a run id but do NOT claim latest, and they
+  // never write the module globals (cache-only). Only the foreground (displayed-tier) pull commits + wins.
+  const _my = ++_runSeq; if (!opts?.background) _latestRun = _my;
   // 3 SPEED TIERS (2026-07-09): superfast (DEFAULT) = registries + PNS-insights API + Udyam + gweb, NO Redash transcripts /
   // NO Parallel.ai; fast = superfast + the 2 Redash audio transcripts; normal = fast + Parallel.ai deep web. Server-side
   // t0 resolves ?tier=; deduped per-tier so tiers can be fetched independently. Back-compat: opts.fast → 'fast'.
@@ -746,11 +758,23 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean; tie
   if (_fresh) enrichResultCache.delete(_key);
   const _cached = _fresh ? undefined : enrichResultCache.get(_key);
   if (_cached) { // instant switch-back — restore this tier's globals so the card/extract re-render from ITS data
-    lastRich = _cached.rich; lastRaw = _cached.legacy; lastHealth = _cached.health; lastServerTrace = _cached.serverTrace;
+    // background warm of an already-cached tier: don't touch the displayed tier's globals (cache-only, see note above).
+    if (!opts?.background) { lastRich = _cached.rich; lastRaw = _cached.legacy; lastHealth = _cached.health; lastServerTrace = _cached.serverTrace; }
     return { profile: _cached.profile, raw: _cached.legacy };
   }
   const _inflight = _fresh ? undefined : enrichInFlight.get(_key);
-  if (_inflight) return _inflight; // a pull for this GLID is already running — share it, don't fire a 2nd execution (a fresh pull never shares a possibly-cached in-flight one)
+  if (_inflight) {
+    // a pull for this glid:tier is already running — share it, don't fire a 2nd execution.
+    // BUG FIX (2026-07-13, workflow regression catch): the in-flight run may be a BACKGROUND pre-warm that will NOT
+    // commit the module globals. If THIS caller is FOREGROUND (a real tier-select), it must commit the result to the
+    // displayed globals on resolve — else getEnrichmentRich()/health/trace stay on the previously-shown tier and the
+    // card/extract/L1-health render stale until a switch-away-and-back. Commit only if we're still the latest run.
+    if (opts?.background) return _inflight;
+    return _inflight.then((r) => {
+      if (_my === _latestRun) { const c = enrichResultCache.get(_key); if (c) { lastRich = c.rich; lastRaw = c.legacy; lastHealth = c.health; lastServerTrace = c.serverTrace; } }
+      return r;
+    });
+  }
   const _run = (async (): Promise<{ profile: EnrichmentProfile | null; raw: unknown }> => {
   try {
     // `-advanced` is the v12 path: same 7 buyer sources PLUS the appended `requirement_brain`
@@ -765,7 +789,7 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean; tie
     // client pull — a 3-minute blocking loader is the UX bug, not the timeout.
     // ENDPOINT (flag-gated): default = -advanced (current). VITE_BI_USER_INSIGHTS='1' → the new lean-CSL flow,
     // whose response is the rich {sources:{…}} shape. Default OFF = byte-for-byte current behaviour.
-    const BI = ((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BI_USER_INSIGHTS) !== '0'; // DEFAULT ON (v9 is the live flow); set VITE_BI_USER_INSIGHTS=0 to fall back to -advanced
+    const BI = ((import.meta.env as unknown as Record<string, string | undefined>).VITE_BI_USER_INSIGHTS) !== '0'; // DEFAULT ON (v9 is the live flow); set VITE_BI_USER_INSIGHTS=0 to fall back to -advanced. audit 2026-07-13: static per-var read (no whole-env → no secret leak)
     const path = N8N_HOOK; // owner consolidated every n8n call onto one hook (api.ts N8N_HOOK); BI now only switches response-shape handling, not the URL
     const g = encodeURIComponent(glid.trim());
     // SINGLE FETCH (v11) — the dual-fetch is GONE (fixes the "4 executions"). The old second call hit the IDENTICAL
@@ -784,10 +808,12 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean; tie
     // flag-on → normalize the rich shape to legacy for ALL getTop() consumers (deriveEnrichment, lineage), but feed
     // the RICH response to ensureMergedTwin so the LLM extract path can read the per-source summaries.
     const legacy = BI ? normalizeNewUserInsights(rich) : rich; // normalizeNewUserInsights appends the response's top-level requirement_brain (no dual-fetch)
-    lastRich = BI ? rich : null;                   // original rich {sources} → the LLM-native extract path
-    lastRaw = legacy;                              // legacy shape → lineage resolver + getTop consumers unaffected
-    lastServerTrace = extractServerTrace(legacy); // capture n8n E1 `_trace` if present (null otherwise)
-    lastHealth = extractHealth(rich);              // L1 — per-node __health (BI path only; [] on -advanced)
+    // Compute into LOCALS, then commit to the module globals ONLY if this run is still the latest (audit P1 latest-wins);
+    // the per-key cache below always stores the locals so a switch-back is correct regardless.
+    const _richVal = BI ? rich : null;             // original rich {sources} → the LLM-native extract path
+    const _trace = extractServerTrace(legacy);     // capture n8n E1 `_trace` if present (null otherwise)
+    const _health = extractHealth(rich);           // L1 — per-node __health (BI path only; [] on -advanced)
+    if (_my === _latestRun) { lastRich = _richVal; lastRaw = legacy; lastServerTrace = _trace; lastHealth = _health; }
     // EAGER synthesis — fired here so EVERY real pull (V3/V4/Observatory) builds the twin once, cached per GLID.
     // Dashboard = purely FRONTEND LLM (owner): the eager extract twin is built client-side from the raw pull. The unified
     // n8n LLM (bi-buyer-unified) is NOT used here — it powers ONLY the standalone (pure-backend replica).
@@ -799,14 +825,16 @@ export async function fetchEnrichment(glid: string, opts?: { fast?: boolean; tie
     let profile: EnrichmentProfile | null = null;
     try { profile = deriveEnrichment(legacy, new Date().toISOString()); } catch { profile = null; }
     // cache this tier's full result (+ the module globals it implies) so a later switch-back is instant, not a re-pull.
-    try { enrichResultCache.set(_key, { profile, legacy, rich: BI ? rich : null, health: lastHealth, serverTrace: lastServerTrace }); } catch { /* noop */ }
+    try { enrichResultCache.set(_key, { profile, legacy, rich: _richVal, health: _health, serverTrace: _trace }); } catch { /* noop */ }
     return { profile, raw: legacy };
   } catch {
     return { profile: null, raw: null };
   }
   })();
   enrichInFlight.set(_key, _run);
-  try { return await _run; } finally { enrichInFlight.delete(_key); }
+  // audit 2026-07-13 (P2): only deregister if the map still points to THIS run — a fresh pull overwrites the entry
+  // (fresh skips the in-flight check), so an unconditional delete by the older run would drop the newer in-flight.
+  try { return await _run; } finally { if (enrichInFlight.get(_key) === _run) enrichInFlight.delete(_key); }
 }
 
 // ── B · independent server-side-LLM buyer-profile endpoint (bi-buyer-profile-CARD) ────────────────────────────

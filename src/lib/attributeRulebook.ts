@@ -56,7 +56,7 @@ export interface RulebookEntry {
   note?: string;
 }
 
-// Attribute → { policy, rule? }. The 32 emitted attributes, grouped WHO/WHAT/HOW/WHERE/WHY/RISK.
+// Attribute → { policy, rule? }. Covers every emitted attribute (kept 1:1 with the extract key enum — no fixed count in the comment so it can't drift), grouped WHO/WHAT/HOW/WHERE/WHY/RISK.
 export const ATTR_POLICY: Record<string, { policy: PolicyId; rule?: AttributeRuleId }> = {
   // ── WHO · Identity ──────────────────────────────────────────────────────
   business_persona: { policy: 'IDENTITY' },

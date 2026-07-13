@@ -2675,7 +2675,7 @@ export default function RFQModalV4({ onClose, variantLabel, initialGlid, autoPul
       reader.readAsDataURL(blob);
       reader.onloadend = async () => {
         if (!hasGeminiKey()) {
-          toast.show('Add VITE_GEMINI_API_KEY in .env to enable voice extraction', 'warning');
+          toast.show('Add VITE_LLM_KEY in .env to enable voice extraction', 'warning');
           setVoiceProcessing(false);
           return;
         }
