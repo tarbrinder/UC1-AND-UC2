@@ -232,7 +232,12 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // Requirements · Calls · Messages. "Campaigns Received" REMOVED (it's an outbound-to-buyer count, not buyer activity).
   const _cs = obj(obj(sources.calls).summary); const _ps = obj(obj(sources.pns_calls).summary);   // total connected calls across both call sources
   const _cn = (Number(_cs.call_count) || (Array.isArray(_cs.calls) ? _cs.calls.length : 0)) + (Number(_ps.call_count) || (Array.isArray(_ps.calls) ? _ps.calls.length : 0));
-  const callCount = _cn > 0 ? _cn : null;
+  // audit 2026-07-14: on tiers without transcripts the calls/pns_calls arrays are empty → fall back to the buyerprofile
+  // aggregate PNS-call counters (pns_call_cnt + call_back_cnt) so the "Total Calls" tile still populates. (bp.total_calls
+  // is the ENQUIRIES count per the owner mapping — NOT used here.)
+  const _bpAct0 = obj(bpSum.activity);
+  const _bpCn = (Number(_bpAct0.pns_call_cnt) || 0) + (Number(_bpAct0.call_back_cnt) || 0);
+  const callCount = _cn > 0 ? _cn : (_bpCn > 0 ? _bpCn : null);
   // OVERALL ACTIVITY tiles (owner 2026-07-14, mockup parity): Sellers Connected · Enquiries Posted · BuyLeads Posted.
   // "Sellers Connected" has NO field in the pull → owner substitutes Total Calls. Enquiries Posted ← activity.enq_count,
   // BuyLeads Posted ← activity.total_requirement (fallback: this-pull requirement count).
@@ -505,7 +510,7 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     // owner 2026-07-14: split ONLY on the bullet/pipe delimiters — NOT commas. A comma lives INSIDE a product name
     // ("Electronic components (Piezo Buzzers, Audio ICs)", "Speakers (Bluetooth, Loud, Cabinets)"); splitting on it
     // shredded one product into broken fragments. The extract emits a ' · '-joined ranked list, so · is the separator.
-    ? dedupeProducts(llmPoi.split(/\s*[·;|]\s*/).map(str).filter(Boolean))
+    ? dedupeProducts(llmPoi.split(/\s+·\s+/).map(str).filter(Boolean))
     : dedupeProducts([...reqs.map((r) => str(r.title)), ...(wa?.meta?.productsEnquired || []).map(str)].filter(Boolean)).slice(0, 6);
 
   // #4 — most-recent requirement's BuyLead-page fields (order value / requirement type / category / specs). Prefer the

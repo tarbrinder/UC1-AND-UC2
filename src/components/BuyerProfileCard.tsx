@@ -4,7 +4,7 @@
 // provenance/ticks/validation chrome (a compact traffic-light strip only). PII + demographics under the name.
 import { useMemo } from 'react';
 import { User, Building2, Calendar, MapPin, Factory, Globe, IndianRupee, CreditCard, ShieldCheck, Mail, Phone, Users, Target, ShoppingCart, TrendingUp, Store, BadgeCheck, type LucideIcon } from 'lucide-react';
-import { parseBuyerProfile, bucketPlatforms, type BuyerProfileModel, type Field, type LabeledField } from '../lib/buyerProfileModel';
+import { parseBuyerProfile, type BuyerProfileModel, type Field, type LabeledField } from '../lib/buyerProfileModel';
 
 // ── exact mockup brand glyphs (brand-coloured, matching the reference) ────────────────────────────────────────
 type BrandIcon = (p: { className?: string }) => React.ReactElement;
@@ -79,18 +79,14 @@ export default function BuyerProfileCard({ rich, glid }: { rich: unknown; glid: 
   const phoneF = F(allMobiles.join(', '));
   const nameF = F(names.join(' / '));
 
-  // sourcing / selling channels — composed deterministically, NO LLM slop (owner). IndiaMART is always a sourcing
-  // channel; add external B2B marketplaces / directories found via web. Selling = the IndiaMART catalogue (linked) +
-  // any consumer (Amazon/Flipkart) / B2B platforms detected.
-  const pb = bucketPlatforms(m.socialPlatforms);
-  const sourcing = [...new Set(['IndiaMART', ...pb.b2b, ...pb.discovery])];
-  const sellingPlatforms = [...new Set([...pb.consumer, ...pb.b2b])];
-  const sourcingF = F(sourcing.join(' · '));
+  // Sourcing / Selling channels — kept HONEST (audit 2026-07-14): Sign3 phone-linked "platform present" flags are
+  // ordinary CONSUMER accounts on the phone owner (Flipkart present on ~86% of buyers; Amazon isn't even probed) — they
+  // are NOT sourcing/selling evidence and would be slop. So: Sourcing = IndiaMART (the confirmed platform). Selling =
+  // the IndiaMART storefront (catalogue link) ONLY when the buyer is actually a listed seller; else nothing. A real
+  // external channel needs a seller-storefront URL from web OSINT / is_also_seller — never a phone-presence flag.
+  const sourcingF = F('IndiaMART');
   const catUrl = m.catalogueLink.present ? String(m.catalogueLink.value) : '';
-  // e-commerce hint (owner): a buyer with a consumer-marketplace presence (Amazon/Flipkart…) IS an e-commerce seller —
-  // surface it as the Business Type when the extract left it blank, rather than dropping the signal.
-  const btPick = pick(m.overview, 'Business Type');
-  const businessTypeF = btPick.present ? btPick : (pb.consumer.length ? F(`E-commerce Seller (${pb.consumer.join(', ')})`) : btPick);
+  const businessTypeF = pick(m.overview, 'Business Type');
 
   // Turnover moves to Company Details (owner: it's GST-derived) — prefer the GST-declared band, else the extract value.
   const turnoverF = m.company.turnoverBand.present ? m.company.turnoverBand : pick(m.overview, 'Annual Turnover');
@@ -185,11 +181,8 @@ export default function BuyerProfileCard({ rich, glid }: { rich: unknown; glid: 
           <SectionTitle>Market Focus</SectionTitle>
           <Row Ic={Users} label="Target Customers" f={pick(m.market, 'Target Customers')} />
           <Row Ic={Store} label="Selling Channel">
-            {catUrl || sellingPlatforms.length ? (
-              <span className="text-gray-800">
-                {catUrl && <a href={/^https?:/.test(catUrl) ? catUrl : `https://${catUrl}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">IndiaMART</a>}
-                {catUrl && sellingPlatforms.length ? ' · ' : ''}{sellingPlatforms.join(' · ')}
-              </span>
+            {catUrl ? (
+              <a href={/^https?:/.test(catUrl) ? catUrl : `https://${catUrl}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">IndiaMART</a>
             ) : <span className="text-gray-400">Not Specified</span>}
           </Row>
           <Row Ic={Globe} label="Sales Geography" f={pick(m.market, 'Sales Geography')} />
