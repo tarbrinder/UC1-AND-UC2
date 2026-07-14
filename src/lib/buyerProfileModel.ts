@@ -233,10 +233,19 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const _cs = obj(obj(sources.calls).summary); const _ps = obj(obj(sources.pns_calls).summary);   // total connected calls across both call sources
   const _cn = (Number(_cs.call_count) || (Array.isArray(_cs.calls) ? _cs.calls.length : 0)) + (Number(_ps.call_count) || (Array.isArray(_ps.calls) ? _ps.calls.length : 0));
   const callCount = _cn > 0 ? _cn : null;
+  // OVERALL ACTIVITY tiles (owner 2026-07-14, mockup parity): Sellers Connected · Enquiries Posted · BuyLeads Posted.
+  // "Sellers Connected" has NO field in the pull → owner substitutes Total Calls. Enquiries Posted ← activity.enq_count,
+  // BuyLeads Posted ← activity.total_requirement (fallback: this-pull requirement count).
+  const _act = obj(bpSum.activity);
+  // owner 2026-07-14 (VERBATIM mapping): the bp field `total_calls` IS the enquiries-posted count (misnamed in the raw);
+  // `total_requirement` is the buyleads count. "Sellers Connected" has no field → substituted with real connected calls.
+  const enqCount = Number(_act.total_calls) > 0 ? Number(_act.total_calls) : null;
+  void buyerMsgs;   // retained (WhatsApp buyer-message count) — no longer a top tile; referenced to keep the binding
+  const blCount = Number(_act.total_requirement) > 0 ? Number(_act.total_requirement) : (reqs.length || null);
   const tiles: StatTile[] = [
-    { label: 'Total Requirements', value: (sources as Record<string, unknown>).requirement ? reqs.length : (reqs.length || null), sourceNote: 'requirement.summary.requirements[].length' },
-    { label: 'Total Calls', value: callCount, sourceNote: 'calls/pns_calls summary · total connected calls' },
-    { label: 'Buyer Messages', value: buyerMsgs, sourceNote: 'whatsapp.summary.timeline · buyer-side count' },
+    { label: 'Total Calls', value: callCount, sourceNote: 'calls/pns_calls summary · total connected calls (shown in place of Sellers Connected, which the pull does not provide)' },
+    { label: 'Enquiries Posted', value: enqCount, sourceNote: 'buyerprofile.activity.total_calls (this field holds the enquiries-posted count)' },
+    { label: 'BuyLeads Posted', value: blCount, sourceNote: 'buyerprofile.activity.total_requirement (fallback: this-pull requirement count)' },
   ];
 
   // ── business overview ───────────────────────────────────────────────────────────────────────────────────────
@@ -396,6 +405,11 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const gstinVal = str(cert0.gstin) || str(gd0.gstin) || str(gstinUnion.primary) || str(arr(gstinUnion.gstins).map(obj).map((g) => str(g.gstin)).filter(Boolean)[0]);
   const gstSrc = str(cert0.gstin) ? 'IDfy GST certificate' : (str(gd0.gstin) ? 'GST 3-vendor consensus (Sign3⊕IDfy⊕Befisc)' : 'GSTIN union');
   const gstStatusVal = str(cert0.gstin_status) || gdVal('gstin_status');
+  // GST verification METHOD label (owner 2026-07-14) — from buyerprofile is_gst_verified CODE: 2 = Tactical, 3 = OTP,
+  // 1/4/5 = Matchmaking. (bp-parse collapses is_gst_verified to a boolean today; n8n v48 passes the raw code as
+  // buyerprofile.gst_verify_code. Falls back to the literal gstin_status below when the code is absent.)
+  const _gstCode = Number((bpSum as Record<string, unknown>).gst_verify_code);
+  const gstVerifyLabel = _gstCode === 2 ? 'Verified (Tactical)' : _gstCode === 3 ? 'Verified (OTP)' : (_gstCode === 1 || _gstCode === 4 || _gstCode === 5) ? 'Verified (Matchmaking)' : '';
   const tradeNameVal = str(cert0.trade_name) || str(cert0.legal_name) || gdVal('trade_name') || gdVal('legal_name');
   const constitutionVal = str(cert0.constitution_of_business) || gdVal('constitution_of_business');
   const regDateVal = str(cert0.date_of_registration) || gdVal('date_of_registration');
@@ -406,7 +420,7 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const crGst = str(crSum.gst), crConstitution = str(crSum.constitution), crRegYear = str(crSum.gst_reg_year), crGstStatus = str(crSum.gst_verified);
   const cmp = {
     gst: gstinVal ? field(gstinVal, 'registry', gstSrc) : (crGst ? field(crGst, 'registry', 'IndiaMART verified GST record (company_reg)') : absentField('no GSTIN discovered across IDfy / consensus / union / IndiaMART')),
-    gstStatus: gstStatusVal ? { value: gstStatusVal, present: true, provenance: 'registry' as Provenance, source: kybSrc, note: 'literal gstin_status (not a hardcoded label)' } : (crGstStatus ? field(crGstStatus, 'registry', 'IndiaMART verified GST record') : absentField('GST cert / consensus')),
+    gstStatus: gstVerifyLabel ? { value: gstVerifyLabel, present: true, provenance: 'registry' as Provenance, source: 'IndiaMART buyerprofile · is_gst_verified method code', note: 'GST-verify method: 2=Tactical · 3=OTP · 1/4/5=Matchmaking' } : (gstStatusVal ? { value: gstStatusVal, present: true, provenance: 'registry' as Provenance, source: kybSrc, note: 'literal gstin_status (not a hardcoded label)' } : (crGstStatus ? field(crGstStatus, 'registry', 'IndiaMART verified GST record') : absentField('GST cert / consensus'))),
     tradeName: tradeNameVal ? field(tradeNameVal, 'registry', kybSrc) : absentField('GST cert / consensus'),
     constitution: constitutionVal ? field(constitutionVal, 'registry', kybSrc) : (crConstitution ? field(crConstitution, 'registry', 'IndiaMART verified GST record (legal status)') : absentField('GST cert / consensus / IndiaMART')),
     regDate: regDateVal ? field(regDateVal, 'registry', kybSrc) : (crRegYear ? field(crRegYear, 'registry', 'IndiaMART verified GST record (registration year)') : absentField('GST cert / consensus')),
@@ -541,12 +555,15 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   const verifiedBuyer: BuyerProfileModel['verifiedBuyer'] = isFraud
     ? { flag: isNaN(vbbN) ? 0 : vbbN, tier: 'fraud', label: '⚠ Fraud-flagged account' }
     : (vbbRaw != null && vbbRaw !== '' && !isNaN(vbbN))
-    ? (vbbN >= 6 ? { flag: vbbN, tier: 'trustseal', label: 'TrustSEAL Buyer' }
-      : (vbbN === 4 || vbbN === 5) ? { flag: vbbN, tier: 'gst_verified', label: 'Verified Business Buyer' }
+    // owner 2026-07-14: flag 5–8 ⟶ TrustSEAL Buyer; flag 4 ⟶ Verified Business Buyer; ANY GSTIN present ⟶ Verified
+    // Business Buyer (even without the flag); else verified mobile+email ⟶ Verified Buyer.
+    ? (vbbN >= 5 ? { flag: vbbN, tier: 'trustseal', label: 'TrustSEAL Buyer' }
+      : vbbN === 4 ? { flag: vbbN, tier: 'gst_verified', label: 'Verified Business Buyer' }
+      : gstinVal ? { flag: vbbN, tier: 'gst_verified', label: 'Verified Business Buyer' }
       : verifiedTier ? { flag: vbbN, ...verifiedTier }
       : vbbN > 0 ? { flag: vbbN, tier: 'partial', label: 'Partially-Verified Account' }
       : { flag: vbbN, tier: 'unverified', label: 'Unverified Account' })
-    : (verifiedTier ? { flag: 0, ...verifiedTier } : null);
+    : (gstinVal ? { flag: 0, tier: 'gst_verified', label: 'Verified Business Buyer' } : (verifiedTier ? { flag: 0, ...verifiedTier } : null));
   // "kis cheez ka dhandha hai" — one plain line: designation · role · what they deal in. Deterministic (no LLM needed);
   // the server-LLM business_persona (if present) supersedes it for a richer phrasing.
   const desigStr = str(idSum.designation);
