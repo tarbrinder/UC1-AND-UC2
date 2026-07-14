@@ -464,8 +464,9 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
     if (s) return { value: s, present: true, provenance: 'inferred', source: `web_osint (LLM) · ${label}`, inferred: true, confidence: webConf };
     const bpu = bpSocialUrl.get(label.toUpperCase());   // real profile URL from the IndiaMART buyer record
     if (bpu) return { value: bpu, present: true, provenance: 'registry', source: 'IndiaMART buyer profile · social_profiles (verified link)' };
-    if (sign3Socials.has(label.toUpperCase())) return { value: 'Present', present: true, provenance: 'inferred', source: 'Sign3 · phone-linked account', inferred: true, note: 'account exists per Sign3 — presence only, profile URL not captured' };
-    return absentField(webVerified ? 'web_osint / Sign3' : 'no web/social account on file (Sign3 checked)');
+    // owner 2026-07-14: a Sign3 presence-only flag with NO captured URL is slop — show a dash, never "Present".
+    // Only a REAL profile URL (web_osint / buyerprofile social_profiles) surfaces; otherwise the row is absent → "-".
+    return absentField(webVerified ? 'web_osint / Sign3 (no profile URL captured)' : 'no web/social profile URL on file');
   };
   const gb = obj(web.google_business);
   // Prefer web_osint google_business (only when the web search was anchored); else fall back to the Sign3 Google-Maps
@@ -501,7 +502,10 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // back to the deterministic aggregate CAPPED to 6 so an unranked dump can't over-elongate the card.
   const llmPoi = str(obj(llm.products_of_interest).value);
   const products = llmPoi
-    ? dedupeProducts(llmPoi.split(/\s*[·,;|]\s*/).map(str).filter(Boolean))
+    // owner 2026-07-14: split ONLY on the bullet/pipe delimiters — NOT commas. A comma lives INSIDE a product name
+    // ("Electronic components (Piezo Buzzers, Audio ICs)", "Speakers (Bluetooth, Loud, Cabinets)"); splitting on it
+    // shredded one product into broken fragments. The extract emits a ' · '-joined ranked list, so · is the separator.
+    ? dedupeProducts(llmPoi.split(/\s*[·;|]\s*/).map(str).filter(Boolean))
     : dedupeProducts([...reqs.map((r) => str(r.title)), ...(wa?.meta?.productsEnquired || []).map(str)].filter(Boolean)).slice(0, 6);
 
   // #4 — most-recent requirement's BuyLead-page fields (order value / requirement type / category / specs). Prefer the
