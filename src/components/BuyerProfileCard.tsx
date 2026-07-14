@@ -3,7 +3,7 @@
 // Owner rules: exactly the mockup attributes/order; empty attr → "Not Specified"; empty social/link → "-"; NO
 // provenance/ticks/validation chrome (a compact traffic-light strip only). PII + demographics under the name.
 import { useMemo } from 'react';
-import { User, Building2, Calendar, MapPin, Factory, Globe, IndianRupee, CreditCard, ShieldCheck, Mail, Phone, Users, Target, ShoppingCart, TrendingUp, Store, BadgeCheck, type LucideIcon } from 'lucide-react';
+import { User, Building2, Calendar, MapPin, Factory, Globe, IndianRupee, CreditCard, ShieldCheck, Mail, Phone, Users, Target, ShoppingCart, TrendingUp, Store, BadgeCheck, Layers, type LucideIcon } from 'lucide-react';
 import { parseBuyerProfile, type BuyerProfileModel, type Field, type LabeledField } from '../lib/buyerProfileModel';
 
 // ── exact mockup brand glyphs (brand-coloured, matching the reference) ────────────────────────────────────────
@@ -168,6 +168,7 @@ export default function BuyerProfileCard({ rich, glid }: { rich: unknown; glid: 
 
           <SectionTitle>Business Overview</SectionTitle>
           <Row Ic={Building2} label="Business Type" f={businessTypeF} />
+          <Row Ic={Layers} label="Industry / Sub-Industry" f={pick(m.overview, 'Industry / Sub-Industry')} />
           <Row Ic={TrendingUp} label="Business Stage" f={pick(m.buyerDetails, 'Business Stage')} />
           <Row Ic={Factory} label="Business Scale" f={pick(m.overview, 'Business Scale')} />
           <Row Ic={ShoppingCart} label="Annual Procurement" f={pick(m.overview, 'Annual Procurements', 'Annual Procurement')} />
