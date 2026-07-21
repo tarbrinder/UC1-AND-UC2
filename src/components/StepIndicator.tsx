@@ -2,7 +2,7 @@ interface Props {
   step: 0 | 1 | 2;
 }
 
-const STEPS = ['Product', 'Specifications', 'Delivery'];
+const STEPS = ['Product', 'Specifications', 'More Details'];
 
 export default function StepIndicator({ step }: Props) {
   return (

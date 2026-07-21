@@ -20,6 +20,20 @@ export interface OrderScaleSignal {
   bulkUnit: boolean;   // the unit itself is a business-scale unit (tonne/truck/…)
 }
 
+// Generic, category-AGNOSTIC unit-of-measure fallback. Used ONLY when a category's ISQ carries
+// no quantity/unit spec (e.g. Diesel Generator, mcat 13467, whose GetIsq returns Power/Brand/…
+// but no unit). So the buyer still gets unit CHIPS with the first pre-selected — never a free-text
+// box, never a hidden field. No category literals: these are the same universal units for every mcat.
+export const DEFAULT_UNITS = ['Piece', 'Unit', 'Nos', 'Set', 'Pair', 'Dozen', 'Kg', 'Meter', 'Litre', 'Box'];
+
+/** Pick the pre-selected unit from a list, honouring a unit typed in the query ("10 nos …" → "Nos"). */
+export function matchUnit(options: string[], typed?: string): string {
+  if (!options.length) return '';
+  const t = (typed || '').toLowerCase().trim();
+  if (!t) return options[0];
+  return options.find((o) => { const lo = o.toLowerCase(); return lo === t || lo.startsWith(t) || t.startsWith(lo); }) || options[0];
+}
+
 export function classifyOrderScale(qty?: number | string, unit?: string): OrderScaleSignal {
   const n = typeof qty === 'number' ? qty : parseFloat(String(qty ?? '').replace(/[^0-9.]/g, ''));
   const u = (unit || '').trim();

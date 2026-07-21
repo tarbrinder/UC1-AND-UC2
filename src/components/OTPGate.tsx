@@ -8,13 +8,19 @@ const DEMO_OTP = '1234';
 interface Props {
   onVerified: (name: string, mobile: string) => void;
   onClose: () => void;
+  /** When both are supplied (mobile = 10 digits), skip the name/number step and open straight on the 4-digit OTP. */
+  initialName?: string;
+  initialMobile?: string;
 }
 
-export default function OTPGate({ onVerified, onClose }: Props) {
+export default function OTPGate({ onVerified, onClose, initialName, initialMobile }: Props) {
+  const seedMobile = (initialMobile || '').replace(/\D/g, '').slice(-10);
+  const seedName = (initialName || '').trim();
+  const preseeded = /^\d{10}$/.test(seedMobile) && seedName.length > 0;
   // Step 1: mobile + name entry
-  const [step, setStep] = useState<1 | 2>(1);
-  const [name, setName] = useState('');
-  const [mobile, setMobile] = useState('');
+  const [step, setStep] = useState<1 | 2>(preseeded ? 2 : 1);
+  const [name, setName] = useState(seedName);
+  const [mobile, setMobile] = useState(seedMobile);
   const [sendingOtp, setSendingOtp] = useState(false);
   const [sendError, setSendError] = useState('');
 

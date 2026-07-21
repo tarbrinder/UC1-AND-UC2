@@ -25,6 +25,12 @@ export interface ScoreContext {
   intentAnswered?: number;
   /** Whether buyer-profile (role/industry) is asked — false for tiny retail buys. */
   profileApplicable?: boolean;
+  /** Whether GST is asked — true only for a business role (every buyer type except individual/consumer). */
+  gstApplicable?: boolean;
+  /** Page-2 AI "Smart Questions" surfaced (only scored when loaded — normalized out while loading/errored/empty). */
+  aiSpecTotal?: number;
+  /** How many of the surfaced AI questions the buyer has answered. */
+  aiSpecAnswered?: number;
 }
 
 export function calcScore(
@@ -33,7 +39,9 @@ export function calcScore(
   hasImage: boolean,
   ctx: ScoreContext = {}
 ): ScoreDetails {
-  const { quantityApplicable = true, frequencyApplicable = true, profileApplicable = true } = ctx;
+  const { quantityApplicable = true, frequencyApplicable = true, profileApplicable = true, gstApplicable = false } = ctx;
+  const aiSpecTotal = ctx.aiSpecTotal ?? 0;
+  const aiSpecAnswered = Math.min(ctx.aiSpecAnswered ?? 0, aiSpecTotal);
 
   const checks: ScoreCheck[] = [];
   // Only the points for questions that are actually asked count toward the
@@ -73,6 +81,8 @@ export function calcScore(
   // For End Users this captures "Buying for"; for business it's Industry.
   add('Details', 'Profile detail', 5, !!form.industry?.trim(), profileApplicable);
   add('Details', 'Purchase frequency', 5, !!form.requirementFrequency?.trim(), frequencyApplicable);
+  // GST — only counts for a business role. "Answered" = Yes/No chosen (null = still unknown, not done).
+  add('Details', 'GST', 5, form.gstRegistered === true || form.gstRegistered === false, gstApplicable);
 
   // Spec-adjacent context answered in the "more details" sheet — graded, so each
   // answer bumps the score and pulls completion up. Only counts when offered.
@@ -86,6 +96,19 @@ export function calcScore(
     intentTotal > 0 && intentAnswered >= intentTotal,
     intentTotal > 0,
     intentEarned
+  );
+
+  // Page-2 AI "Smart Questions" — graded like the intent bucket. Only counts when questions are surfaced
+  // (aiSpecTotal>0); while page-2 is loading / errored / empty it is inapplicable → normalized OUT, never
+  // a scored-zero. So a planner failure or a category with no extra questions never tanks the score.
+  const aiSpecEarned = aiSpecTotal > 0 ? Math.round((10 * aiSpecAnswered) / aiSpecTotal) : 0;
+  add(
+    'Specs',
+    `Smart questions${aiSpecTotal > 0 ? ` (${aiSpecAnswered}/${aiSpecTotal})` : ''}`,
+    10,
+    aiSpecTotal > 0 && aiSpecAnswered >= aiSpecTotal,
+    aiSpecTotal > 0,
+    aiSpecEarned
   );
 
   // Normalise to 100 over the applicable points so every category can reach 100.

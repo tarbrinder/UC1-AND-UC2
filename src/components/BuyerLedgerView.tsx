@@ -15,7 +15,7 @@ import { nodeCard } from '../lib/nodeCards';
 import { rulebookFor } from '../lib/attributeRulebook';
 import { buildSourceConsumptionMatrix, consumptionSummary, deriveConsumption } from '../lib/sourceConsumption';
 import { synthMeta } from '../lib/profileSynth';
-import { pruneTwinLLM, offerEnrichLLM, enrichRequirementLLM, extractBuyerProfileLLM, hasGeminiKey, type SynthLLMOut, type SynthUsage } from '../lib/gemini';
+import { pruneTwinLLM, offerEnrichLLM, enrichRequirementLLM, extractBuyerProfileLLM, hasGeminiKey, RFQ_FORM_LLM_KEY, type SynthLLMOut, type SynthUsage } from '../lib/gemini';
 import { readSet, completenessCritic } from '../lib/personaRegistry';
 import { buildWhatsAppTimeline, waFromMerged } from '../lib/whatsappTimeline';
 import { buildPnsCards } from '../lib/pnsCards';
@@ -321,7 +321,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     if (!synthCtx || msynth.status === 'loading') return; // one extract in flight at a time
     const _off = getOfflineSnapshot(); // OFFLINE (P4): use the CAPTURED extract output — never call the LLM
     if (_off) { if (msynth.status === 'idle') setMsynth(_off.extractOut ? { status: 'done', out: _off.extractOut as SynthLLMOut, ms: _off.extractMs || 0, usage: (_off.extractUsage as SynthUsage) || null } : { status: 'no-key', out: null, ms: 0, usage: null }); return; }
-    if (!hasGeminiKey()) { if (msynth.status === 'idle') setMsynth({ status: 'no-key', out: null, ms: 0, usage: null }); return; }
+    if (!hasGeminiKey() && !RFQ_FORM_LLM_KEY) { if (msynth.status === 'idle') setMsynth({ status: 'no-key', out: null, ms: 0, usage: null }); return; } // card runs on the RFQ key too
     // Re-run when the PROMPT changes (a new ledger from external, or web arriving via webEpoch) — never when unchanged.
     // RETAIN the previous `out` while re-extracting so rawFinals/finals never empty → the UC1 card never blanks (hook 4).
     // runToken drops a stale (fast) completion that would otherwise clobber the newer (web) extract (hook 3).

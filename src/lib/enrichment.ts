@@ -936,6 +936,75 @@ export async function fetchCategoryBuild(mcatId: string, opts?: { fresh?: boolea
   try { await fetch(api(`/api/imworkflow/webhook/${N8N_HOOK}?mode=build_category&mcat_id=${encodeURIComponent(id)}${fresh}`), { signal: AbortSignal.timeout(25000) }); } catch { /* fire-and-forget */ }
 }
 
+// 2026-07-21: the SimpleRFQForm page-2 planner consumes the RAW category corpus directly — no n8n distill LLM.
+// `mode=category` now returns `category_corpus` (n8n parse_rows: an array of per-call {buyer_intent, buyer_queries,
+// seller_queries, products…}, PII-stripped). Returned WHOLE to the form's single planning LLM call. Fresh every
+// call (no cache — owner will add caching later). Falls back to the LEGACY `category_insights.category_intelligence`
+// object if the workflow hasn't been redeployed yet, so the form works across the migration.
+export interface CategoryCorpusResult { status: 'hit' | 'building' | 'error'; corpus: unknown | null; count: number; mcatId: string }
+
+export async function fetchCategoryCorpus(mcatId: string, opts?: { fresh?: boolean }): Promise<CategoryCorpusResult> {
+  const id = String(mcatId || '').trim();
+  if (!id) return { status: 'error', corpus: null, count: 0, mcatId: id };
+  try {
+    const fresh = opts?.fresh ? '&fresh=1' : '';
+    const res = await fetch(api(`/api/imworkflow/webhook/${N8N_HOOK}?mode=category&mcat_id=${encodeURIComponent(id)}${fresh}`), { signal: AbortSignal.timeout(60000) }); // fresh Redash-backed fetch → allow up to 60s
+    if (!res.ok) return { status: 'error', corpus: null, count: 0, mcatId: id };
+    const raw = await res.json();
+    const item = Array.isArray(raw) ? raw.find((x) => x && (x.category_corpus !== undefined || x.category_insights !== undefined || x.category_cache !== undefined)) : raw;
+    // NEW shape — category_corpus (array of per-call objects; n8n may send it as a JSON string).
+    let corpusRaw: unknown = item && (item as Record<string, unknown>).category_corpus;
+    if (typeof corpusRaw === 'string') { try { corpusRaw = JSON.parse(corpusRaw); } catch { corpusRaw = null; } }
+    if (Array.isArray(corpusRaw) && corpusRaw.length) return { status: 'hit', corpus: corpusRaw, count: corpusRaw.length, mcatId: id };
+    // LEGACY shape — category_insights.category_intelligence (distilled). Still usable as category evidence.
+    let ins: unknown = item && (item as Record<string, unknown>).category_insights;
+    if (typeof ins === 'string') { try { ins = JSON.parse(ins); } catch { ins = null; } }
+    if (ins && typeof ins === 'object') {
+      const ci = (ins as Record<string, unknown>).category_intelligence ?? ins;
+      if (ci && typeof ci === 'object' && Object.keys(ci).length) return { status: 'hit', corpus: ci, count: 0, mcatId: id };
+    }
+    return { status: 'building', corpus: null, count: 0, mcatId: id }; // cold / not ready yet → planner runs its fallback
+  } catch {
+    return { status: 'error', corpus: null, count: 0, mcatId: id };
+  }
+}
+
+// 2026-07-21: front-page image GALLERY (owner: ~90% match to the IndiaMART "Post a Requirement" popup —
+// hero + up to 3 thumbnails). Newreqform/IMSearchAPI is a seller-search that returns per-listing product
+// images for a query (JSON despite text/html; CORS `*`). Images only (owner). Direct cross-origin GET —
+// `r=Newreqform/IMSearchAPI` slash kept literal (URLSearchParams would %2F-encode it and break the Yii route).
+// s_glusrid/pageCityId default to the sample values (swap later). http→https to avoid mixed-content.
+// imimg CDN serves multiple size variants of the same asset via a `-NNNxNNN` filename suffix. IMSearchAPI's
+// `large_image` is only 250×250 → blurry when shown as a big hero. Bumping the suffix to 500×500 (or 1000)
+// returns a sharp variant (verified live). Used for the HERO only; thumbnails keep the small crisp size.
+export function upsizeImimg(url: string, size = 500): string {
+  if (!url || !/imimg\.com/i.test(url)) return url;
+  return url.replace(/-\d{2,4}x\d{2,4}(\.[a-z0-9]+)(?:$|\?)/i, `-${size}x${size}$1`);
+}
+
+export async function fetchProductImages(prodname: string, mcatId?: string): Promise<string[]> {
+  const q = String(prodname || '').trim();
+  if (!q) return [];
+  try {
+    const base = 'https://apps.imimg.com/index.php?r=Newreqform/IMSearchAPI';
+    const url = `${base}&prodname=${encodeURIComponent(q)}&s_glusrid=32454240&form_source=desktop.bl&pageCityId=70422&pdpTitle=${encodeURIComponent(q)}${mcatId && String(mcatId).trim() ? `&pdpMcat=${encodeURIComponent(String(mcatId).trim())}` : ''}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const rows: Array<{ fields?: { image?: string; large_image?: string } }> = Array.isArray((data as { results?: unknown })?.results) ? (data as { results: Array<{ fields?: { image?: string; large_image?: string } }> }).results : [];
+    const seen = new Set<string>(); const out: string[] = [];
+    for (const r of rows) {
+      let img = String(r?.fields?.large_image || r?.fields?.image || '').trim();
+      if (!img) continue;
+      img = img.replace(/^http:\/\//i, 'https://');
+      if (seen.has(img)) continue;
+      seen.add(img); out.push(img);
+      if (out.length >= 4) break;
+    }
+    return out;
+  } catch { return []; }
+}
+
 // ─── Shared product-token normaliser (the ONE matcher) ────────────────────────
 // Every "does the current product relate to the buyer's history?" check (off-profile
 // detection, category match, repeat-purchase, persona match) MUST tokenise the same

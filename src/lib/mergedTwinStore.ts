@@ -8,7 +8,7 @@
 // resolveExtractTwin returns null on that → the caller's own legacy prefill is the only safety net.
 
 import { buildPrunePrompt, applyPrune, synthEval, type FinalAttr, type SynthEval } from './synthesisEngine';
-import { pruneTwinLLM, extractBuyerProfileLLM, hasGeminiKey } from './gemini';
+import { pruneTwinLLM, extractBuyerProfileLLM, hasGeminiKey, RFQ_FORM_LLM_KEY } from './gemini';
 import { bundleFromResponse, buildExtractPrompt, extractedToFinals, buyerBlockToExtractOut, type RichResponse } from './buyerProfileExtract';
 
 // rich bi-user-insights shape detector (inlined to avoid a static import cycle with enrichment.ts)
@@ -114,7 +114,7 @@ export function ensureMergedTwin(glid: string, raw: unknown): void {
     try { (window as unknown as { __mergedTwin?: MergedTwinEntry }).__mergedTwin = e; } catch { /* noop */ }
   };
 
-  if (!hasGeminiKey()) { put(empty(key, 'no-key')); return; }      // no LLM → honest no-key (no arithmetic)
+  if (!hasGeminiKey() && !RFQ_FORM_LLM_KEY) { put(empty(key, 'no-key')); return; } // no LLM → honest no-key (card runs on the RFQ key too)
   if (!isRichShape(raw)) { put(empty(key, 'error')); return; }     // legacy non-rich shape → no extract possible (no arithmetic)
   runExtractPath(key, raw, put);                                   // the ONE path
 }

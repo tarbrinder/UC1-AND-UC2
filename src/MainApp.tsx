@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react';
-import { Zap, Layers, Mic, FileText, Sparkles } from 'lucide-react';
+import { Zap, Layers, Mic, FileText, Sparkles, Search, FolderTree, ExternalLink, BarChart3 } from 'lucide-react';
 import RFQModalV3 from './components/RFQModalV3';
 import RFQModalV4 from './components/RFQModalV4';
+import SimpleRFQForm from './components/SimpleRFQForm';
 import BuyerLedgerView from './components/BuyerLedgerView';
 import { buildRfqLedger, rfqStateFromInspector } from './lib/rfqLedger';
 import { isDebug } from './lib/debugFlag';
@@ -12,66 +13,8 @@ type ModalVariant = 'v1' | 'v2' | 'v3' | 'smart' | 'v4' | null;
 // ── UI declutter (owner) — hide the public quote CTAs + the extra debug pulls/ledgers FOR NOW. Everything is kept
 //    in source (just gated) so we can re-enable in future by flipping a single flag. Debug landing keeps ONLY the
 //    Buyer-GLID input + the 🔬 Buyer Ledger entry. ─────────────────────────────────────────────────────────────
-const SHOW_QUOTE_CTAS: boolean = false;   // Quick Quote · Quick Quote V2 · Voice Quote V3 · Smart RFQ · AI Studio V4
+const SHOW_QUOTE_CTAS: boolean = true;    // the "All RFQ form variants" hub (Simple/Category · popup/standalone · V1–V4 · debug)
 const SHOW_EXTRA_DEBUG: boolean = false;  // Pull → V3 · Pull → V4 · 🔬 RFQ Ledger · Ignore-Twin toggle · explainer line
-
-const VARIANT_BUTTONS: {
-  id: ModalVariant;
-  label: string;
-  sublabel: string;
-  desc: string;
-  bg: string;
-  textColor: string;
-  border?: string;
-  Icon: typeof Zap;
-}[] = [
-  {
-    id: 'v1',
-    label: 'Quick',
-    sublabel: 'Quote',
-    desc: 'Quick Quote — 2 min, no signup',
-    bg: 'bg-[#2d6a4f]',
-    textColor: 'text-white',
-    Icon: Zap,
-  },
-  {
-    id: 'v2',
-    label: 'Quick',
-    sublabel: 'Quote V2',
-    desc: 'V2 — Richer specs via dual ISQ APIs',
-    bg: 'bg-[#40916c]',
-    textColor: 'text-white',
-    Icon: Layers,
-  },
-  {
-    id: 'v3',
-    label: 'Voice',
-    sublabel: 'Quote V3',
-    desc: 'V3 — Voice-first, zero typing',
-    bg: 'bg-[#52b788]',
-    textColor: 'text-white',
-    Icon: Mic,
-  },
-  {
-    id: 'smart',
-    label: 'Smart',
-    sublabel: 'RFQ',
-    desc: 'Smart RFQ — AI-matched, best supplier fit',
-    bg: 'bg-white',
-    textColor: 'text-gray-800',
-    border: 'border border-gray-200',
-    Icon: FileText,
-  },
-  {
-    id: 'v4',
-    label: 'AI',
-    sublabel: 'Studio V4',
-    desc: 'V4 — AI Inspector: hover any AI decision',
-    bg: 'bg-gradient-to-br from-violet-600 to-fuchsia-600',
-    textColor: 'text-white',
-    Icon: Sparkles,
-  },
-];
 
 const VARIANT_LABELS: Record<NonNullable<ModalVariant>, string> = {
   v1: 'V1',
@@ -96,6 +39,11 @@ export default function MainApp() {
   // opens Smart with autoPull → the modal runs its existing pull on mount, so the product screen
   // stays clean. ?debug-gated (demo prefill). Opening any card directly = a clean cold run.
   const debug = isDebug(); // sticky within the tab — survives the dep-reopt reload that drops ?debug
+  // Simple RFQ — the plain, no-AI/no-n8n flow (mcat-resolve → GetIsq/getISQs → qty+specs only).
+  // Always visible on the landing (not ?debug-gated) since it needs no enrichment pull to run.
+  const [simpleFormOpen, setSimpleFormOpen] = useState(false);
+  const [simpleFormMode, setSimpleFormMode] = useState<'simple' | 'category'>('simple'); // Simple (no corpus) vs Category (corpus-driven) popup
+  const openSimple = (mode: 'simple' | 'category') => { setSimpleFormMode(mode); setSimpleFormOpen(true); };
   const [stagedGlid, setStagedGlid] = useState('');
   const [stagedIgnoreTwin, setStagedIgnoreTwin] = useState(false);
   const [autoPull, setAutoPull] = useState(false);
@@ -110,6 +58,38 @@ export default function MainApp() {
   // "Pull" → open Smart in STAGING mode (pulls + shows the pulled-data debug panels at step 0).
   // "Start RFQ →" inside the staging view flips stagingOnly off (same instance, data persists).
   const openStaged = (target: 'smart' | 'v4' = 'smart') => { if (!stagedGlid.trim()) return; setAutoPull(true); setStagingOnly(true); setActiveModal(target); };
+  // Hub → open a quote-engine variant cold (no pull/staging). Same as the old pill onClick.
+  const openVariant = (id: NonNullable<ModalVariant>) => { setAutoPull(false); setStagingOnly(false); setActiveModal(id); };
+  // Hub → the debug Profile & Enrichment observatory. Seeds the recurring demo GLID if none is staged.
+  const openLedger = () => { setStagedGlid((g) => g.trim() || '268590579'); setLedgerOpen(true); };
+  // The full menu of RFQ surfaces (owner: "surface ALL"), each with a one-line "what it does differently".
+  const HUB_GROUPS: { group: string; items: { title: string; tag: string; desc: string; Icon: typeof Zap; onClick: () => void }[] }[] = [
+    {
+      group: 'Post a Requirement — the redesigned form',
+      items: [
+        { title: 'Simple', tag: 'Popup', desc: 'No category corpus — buyer + seller specs + your input → top-5 smart questions. Today’s live flow.', Icon: Search, onClick: () => openSimple('simple') },
+        { title: 'Category', tag: 'Popup', desc: 'Corpus-driven: the whole category-intelligence corpus feeds one LLM call for the questions (needs v51 n8n).', Icon: FolderTree, onClick: () => openSimple('category') },
+        { title: 'Simple · standalone', tag: 'Full page', desc: 'The Simple form on its own full page, no dashboard chrome. Opens ?rfq=simple.', Icon: ExternalLink, onClick: () => { window.location.href = '?rfq=simple'; } },
+        { title: 'Category · standalone', tag: 'Full page', desc: 'The Category form on its own full page. Opens ?rfq=category.', Icon: ExternalLink, onClick: () => { window.location.href = '?rfq=category'; } },
+      ],
+    },
+    {
+      group: 'Quote engines — earlier versions',
+      items: [
+        { title: 'Quick Quote', tag: 'V1', desc: 'Fastest path — 2-min, no signup. Minimal fields.', Icon: Zap, onClick: () => openVariant('v1') },
+        { title: 'Quick Quote V2', tag: 'V2', desc: 'Richer specs via dual ISQ APIs (GetIsq + getISQs).', Icon: Layers, onClick: () => openVariant('v2') },
+        { title: 'Voice Quote', tag: 'V3', desc: 'Voice-first — speak the requirement, zero typing.', Icon: Mic, onClick: () => openVariant('v3') },
+        { title: 'Smart RFQ', tag: 'Smart', desc: 'AI-matched — best supplier fit from the enriched requirement.', Icon: FileText, onClick: () => openVariant('smart') },
+        { title: 'AI Studio', tag: 'V4', desc: 'AI Inspector — hover any AI decision to see its provenance.', Icon: Sparkles, onClick: () => openVariant('v4') },
+      ],
+    },
+    {
+      group: 'Debug',
+      items: [
+        { title: 'Profile & Enrichment', tag: 'Debug', desc: 'GLID → an AI-built buyer twin + enriched requirement, every claim traced back to its raw source.', Icon: BarChart3, onClick: openLedger },
+      ],
+    },
+  ];
   // UC3 · launch the live RFQ form for the buyer in the Ledger (mobile=V3/voice, desktop=V4/inspector), debug staging.
   const openFormForBuyer = (variant: 'v3' | 'v4', g: string) => { if (!g.trim()) return; setLedgerOpen(false); setRfqLedgerOpen(false); setStagedGlid(g); setAutoPull(true); setStagingOnly(true); setActiveModal(variant === 'v4' ? 'v4' : 'smart'); };
 
@@ -158,6 +138,16 @@ export default function MainApp() {
             <span>Profile + Requirement enrichment</span>
           </div>
         </div>
+
+        {/* Simple RFQ — always visible, no ?debug needed, no GLID required. Plain category/spec
+            APIs only: no Gemini, no buyer enrichment, no n8n. */}
+        <button
+          type="button"
+          onClick={() => openSimple('simple')}
+          className="px-8 py-3.5 rounded-2xl bg-teal-600 text-white text-base font-semibold hover:bg-teal-700 transition-colors shadow-sm"
+        >
+          Post a Requirement →
+        </button>
 
         {/* Step-0 debug staging — the Buyer GLID / Pull CTA lives HERE (above the cards so it's the
             first thing in ?debug). "Pull" → staging view (pulled-data debug) → "Start RFQ →" → clean form. */}
@@ -232,37 +222,43 @@ export default function MainApp() {
           <p className="text-[12px] text-gray-400 max-w-sm text-center">Append <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-600">?debug=1</code> to the URL to open the Buyer Profile &amp; Enrichment console.</p>
         )}
 
-        {/* Version buttons — hidden for now (owner: declutter; re-enable via SHOW_QUOTE_CTAS) */}
-        {SHOW_QUOTE_CTAS && (
-        <div className="flex flex-wrap justify-center gap-3 w-full">
-          {VARIANT_BUTTONS.map((btn) => {
-            const { Icon } = btn;
-            return (
-              <div key={btn.id} className="flex flex-col items-center gap-2">
-                <button
-                  onClick={() => { setAutoPull(false); setStagingOnly(false); setActiveModal(btn.id); }}
-                  className={`
-                    w-[140px] h-[100px] rounded-2xl font-bold flex flex-col items-center justify-center gap-2
-                    shadow-md hover:shadow-xl hover:-translate-y-0.5 active:scale-95 transition-all
-                    ${btn.bg} ${btn.textColor} ${btn.border ?? ''}
-                  `}
-                >
-                  <Icon size={24} />
-                  <div className="text-center leading-tight">
-                    <div className="text-sm font-bold">{btn.label}</div>
-                    <div className="text-xs font-semibold opacity-90">{btn.sublabel}</div>
-                  </div>
-                </button>
-                <p className="text-xs text-gray-400 text-center w-[140px] leading-snug">
-                  {btn.desc}
-                </p>
-              </div>
-            );
-          })}
-        </div>
-        )}
-
       </div>
+
+      {/* ── All RFQ form variants hub (owner: "surface ALL") — every RFQ surface in one place, each with a
+             one-line "what it does differently". Wider than the intro column. ── */}
+      {SHOW_QUOTE_CTAS && (
+        <div className="w-full max-w-5xl mt-14 space-y-8">
+          <div className="text-center">
+            <h2 className="text-lg font-bold text-gray-800">All RFQ form variants</h2>
+            <p className="text-[13px] text-gray-400 mt-1">Every version in one place — pick one to open it.</p>
+          </div>
+          {HUB_GROUPS.map((grp) => (
+            <div key={grp.group} className="space-y-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 px-1">{grp.group}</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {grp.items.map((item) => {
+                  const { Icon } = item;
+                  return (
+                    <button
+                      key={item.title}
+                      type="button"
+                      onClick={item.onClick}
+                      className="group text-left p-4 rounded-2xl border border-gray-200 bg-white hover:border-teal-300 hover:shadow-md hover:-translate-y-0.5 transition-all flex flex-col gap-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="w-9 h-9 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center group-hover:bg-teal-100 transition-colors"><Icon size={18} /></span>
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">{item.tag}</span>
+                      </div>
+                      <p className="font-bold text-gray-800 text-sm">{item.title}</p>
+                      <p className="text-[12px] text-gray-500 leading-snug">{item.desc}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Modal */}
       {activeModal && activeModal !== 'v4' && (
@@ -288,6 +284,11 @@ export default function MainApp() {
           onStart={() => setStagingOnly(false)}
           onInspectorState={setLiveRfqState}
         />
+      )}
+      {/* Simple RFQ — the plain, no-AI/no-n8n flow. Landing CTA above opens SIMPLE; the hub can also open
+          CATEGORY (corpus-driven). ?login=1 demos the logged-in scenario. */}
+      {simpleFormOpen && (
+        <SimpleRFQForm onClose={() => setSimpleFormOpen(false)} categoryMode={simpleFormMode} loggedIn={(() => { try { return new URLSearchParams(window.location.search).get('login') === '1'; } catch { return false; } })()} />
       )}
       {/* Module 1 — standalone Buyer Ledger Observatory (GLID pull → clickable provenance). Reads the same ledger. */}
       {ledgerOpen && (
