@@ -222,6 +222,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const categoryNameRef = useRef('');       // latest category name (McatDtl) for the async AI-spec call
   const photoSpecsRef = useRef<Record<string, string>>({}); // specs a photo/voice extracted → extra INPUT to the AI-specs prompt
   const commitGen = useRef(0);              // generation token — a superseded commit's late API responses become no-ops
+  const autoAdvancedFor = useRef('');       // mcatId we already auto-advanced past (unit-less) — so Back doesn't re-bounce
   const productNameRef = useRef('');        // live product name for the photo/voice "don't overwrite a typed name" guard
   const sellerSpecsRef = useRef<string[]>([]); // getISQs SELLER-flagged spec names → page-2 AI input (never rendered on page-1)
 
@@ -551,8 +552,11 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // Owner: if the category offers NO quantity/unit (and none was captured), there's nothing to fill on the
   // product page → skip straight to the specs page. Fires once per commit for a unit-less category.
   useEffect(() => {
-    if (committed && unitsResolved && !hasUnits && !quantity.trim() && stage === 'product') setStage('specs');
-  }, [committed, unitsResolved, hasUnits, quantity, stage]);
+    if (committed && unitsResolved && !hasUnits && !quantity.trim() && stage === 'product' && autoAdvancedFor.current !== mcatId) {
+      autoAdvancedFor.current = mcatId; // once per product — tapping Back to this product won't re-bounce forward
+      setStage('specs');
+    }
+  }, [committed, unitsResolved, hasUnits, quantity, stage, mcatId]);
 
   const goBack = () => { if (stage === 'product') return onClose(); if (stage === 'specs') return setStage('product'); if (stage === 'aispecs') return setStage('specs'); if (stage === 'more') return setStage('aispecs'); setStage('more'); };
   const submit = () => { if (otpVerified.current) { setStage('results'); return; } setShowOTP(true); };
