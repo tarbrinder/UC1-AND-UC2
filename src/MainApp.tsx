@@ -151,8 +151,7 @@ export default function MainApp() {
 
         {/* Step-0 debug staging — the Buyer GLID / Pull CTA lives HERE (above the cards so it's the
             first thing in ?debug). "Pull" → staging view (pulled-data debug) → "Start RFQ →" → clean form. */}
-        {debug && (
-          <div className="w-full max-w-sm rounded-2xl border border-purple-200 bg-purple-50/70 p-3 text-left">
+        <div className="w-full max-w-sm rounded-2xl border border-purple-200 bg-purple-50/70 p-3 text-left">
             <p className="text-[11px] font-semibold text-purple-700 uppercase tracking-wide mb-2">🐞 Debug · Buyer GLID (demo prefill)</p>
             <div className="flex gap-2">
               <input
@@ -214,14 +213,6 @@ export default function MainApp() {
               </>
             )}
           </div>
-        )}
-
-        {/* audit MAIN-164: without ?debug the landing has no interactive CTA (GLID input is debug-gated, quote CTAs off) —
-            so show a one-line hint instead of a dead-end page. */}
-        {!debug && !SHOW_QUOTE_CTAS && (
-          <p className="text-[12px] text-gray-400 max-w-sm text-center">Append <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-600">?debug=1</code> to the URL to open the Buyer Profile &amp; Enrichment console.</p>
-        )}
-
       </div>
 
       {/* ── All RFQ form variants hub (owner: "surface ALL") — every RFQ surface in one place, each with a
