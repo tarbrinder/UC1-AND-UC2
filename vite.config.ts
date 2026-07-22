@@ -57,6 +57,8 @@ export default defineConfig(({ mode }) => {
           target: 'https://imworkflow.intermesh.net',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api\/imworkflow/, ''),
+          proxyTimeout: 600000,
+          timeout: 600000,
         },
         // Befisc Profile-Advance (mobile → identity). The form calls `/api/smartauth/<CODE>`
         // (e.g. Profile-Advance C9S1); the proxy forwards to smartauth and injects the authkey
