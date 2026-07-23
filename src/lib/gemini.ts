@@ -20,11 +20,11 @@ const ENDPOINT = api('/api/llm/chat/completions');
 const MODEL_FAST = 'google/gemini-2.5-flash-lite';
 const MODEL_RICH = 'google/gemini-2.5-flash';
 
-// Owner-scoped LLM key for the SimpleRFQForm AND the buyer-profile-card extractor (extractBuyerProfileLLM).
-// Provisioned for flash-lite ONLY (flash → 401 team_model_access_denied), so both surfaces run on lite.
-// Absent → callers fall back to the default VITE_LLM_KEY + their normal model. Everything ELSE (V3/V4
-// planner/intent, n8n) stays on the default key.
-export const RFQ_FORM_LLM_KEY = ((import.meta.env.VITE_RFQ_LLM_KEY as string) || '').trim() || undefined;
+// Buyer-profile-card extractor (extractBuyerProfileLLM) key — ISOLATED from the SimpleRFQForm's key so the
+// Simple form's new flash-capable key stays "simple form only" (owner). Reads VITE_RFQ_BUYERCARD_KEY, and
+// falls back to VITE_RFQ_LLM_KEY if that var isn't set (so nothing breaks). Runs on flash-lite either way.
+// Absent → callers fall back to the default VITE_LLM_KEY. Everything ELSE (V3/V4, n8n) stays on the default key.
+export const RFQ_FORM_LLM_KEY = ((import.meta.env.VITE_RFQ_BUYERCARD_KEY as string) || (import.meta.env.VITE_RFQ_LLM_KEY as string) || '').trim() || undefined;
 export const RFQ_FORM_LLM_MODEL = MODEL_FAST;
 
 // ── India B2B context (injected into EVERY prompt) ────────────────────

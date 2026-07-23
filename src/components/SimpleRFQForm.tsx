@@ -99,13 +99,11 @@ const RFQ_LLM_KEY = ((import.meta.env.VITE_RFQ_LLM_KEY as string) || '').trim() 
 // call runs on flash-lite. Flip to 'google/gemini-2.5-flash' here (image/mic + page-2) once the key
 // gains flash access — the owner asked for flash on those, but the key blocks it today.
 const RFQ_MODEL = 'google/gemini-2.5-flash-lite'; // TEXT calls (spec hints + page-2 planner) — flash-lite
-// IMAGE + MIC model, separated so it can use a stronger model than the text calls (owner: "use 2.5 flash for
-// image and mic"). ⚑ BLOCKED TODAY: the RFQ key is provisioned flash-lite ONLY — a live gateway probe returns
-// 401 `team_model_access_denied` ("team can only access gemini-2.5-flash-lite") for flash, and the default key is
-// blocked entirely. So this stays on flash-lite (else every photo/voice call 401s). ➜ To enable flash: have ops
-// grant `google/gemini-2.5-flash` to the VITE_RFQ_LLM_KEY team at imllm, then change ONLY this line to
-// 'google/gemini-2.5-flash'. (Standard form has no image/mic — nothing to change there.)
-const RFQ_VISION_MODEL = 'google/gemini-2.5-flash-lite';
+// IMAGE + MIC on the stronger model (owner: "use 2.5 flash for image and mic"). The Simple-form key
+// (VITE_RFQ_LLM_KEY) now supports BOTH flash + flash-lite (verified via a live gateway probe: HTTP 200 on each),
+// so photo/voice run on flash for better multimodal extraction while the text calls stay on cheap flash-lite.
+// (Standard form has no image/mic — nothing there.)
+const RFQ_VISION_MODEL = 'google/gemini-2.5-flash';
 const hasFormLLM = () => !!RFQ_LLM_KEY || hasGeminiKey();
 
 const DEMO_SELLERS = [
