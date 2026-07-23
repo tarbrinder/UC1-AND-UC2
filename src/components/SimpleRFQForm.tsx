@@ -424,6 +424,14 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   };
   // "Same as my location": turning it ON copies the buyer's city into delivery; OFF frees delivery to edit.
   const toggleSameAs = () => setSameAsLoc((prev) => { const next = !prev; if (next && userLocation) setDeliveryLocation(userLocation); return next; });
+  // Owner: auto-request the browser location permission the moment the buyer reaches the Delivery ('more') page,
+  // so the precise city fills without a manual tap. Fires ONCE (ref-guarded); on deny/error useCurrentLocation
+  // falls back to the IP-detected city — the buyer is never blocked. (Needs HTTPS in prod; localhost is fine.)
+  const geoAutoAskedRef = useRef(false);
+  useEffect(() => {
+    if (stage === 'more' && !geoAutoAskedRef.current) { geoAutoAskedRef.current = true; useCurrentLocation(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
 
   useEffect(() => { if (committed) setTimeout(() => qtyRef.current?.focus(), 60); }, [committed]);
 
@@ -945,7 +953,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
             </div>
             <div>
               <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Unit</label>
-              <div className="flex flex-wrap gap-2">{unitOptions.map((u) => <RadioChip key={u} label={u} selected={unit === u} onClick={() => setUnit(unit === u ? '' : u)} />)}</div>
+              <div className="flex flex-wrap gap-2">{unitOptions.map((u) => <RadioChip key={u} label={u} selected={unit === u} onClick={() => setUnit(unitOptions.length === 1 ? u : (unit === u ? '' : u))} />)}</div>
             </div>
           </div>
           {isMobile && <button type="button" disabled={!canContinueProduct} onClick={() => canContinueProduct && setStage('specs')} className={`w-full py-3 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-colors ${canContinueProduct ? 'bg-teal-600 hover:bg-teal-700 text-white' : 'bg-gray-100 text-gray-300'}`}>Continue <ArrowRight className="w-4 h-4" /></button>}
@@ -1124,18 +1132,16 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // ── Last page pieces (owner order): Logistics & Payment FIRST, then About You, then Contact (collapsed). ──
   const logisticsBody = (
       <div className="rounded-xl border border-gray-200 p-4 sm:p-5 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
-        {/* MOBILE: delivery location is a COMPACT ROW that opens a bottom-sheet DRAWER (owner prefers the drawer —
-            the inline fields ate too much of the last page). Desktop keeps the header pill + anchored popover. */}
-        {isMobile && (
-          <div className="mb-4 relative">
-            <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><MapPin size={13} className="text-teal-500" /> Delivery location</p>
-            <button type="button" onClick={() => { setScoreOpen(false); setLocationEditing((v) => !v); }} className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2.5 text-sm text-gray-700 hover:border-teal-300">
-              <span className="truncate flex items-center gap-1.5"><MapPin size={13} className="text-gray-300 shrink-0" />{deliveryLocation || detectedCity || 'Select delivery city'}</span>
-              <Pencil size={13} className="text-gray-400 shrink-0" />
-            </button>
-            {locationEditing && renderLocationPopover('left')}
-          </div>
-        )}
+        {/* Delivery location = a COMPACT ROW in the card that opens the drawer/popover — SAME on mobile AND desktop
+            (owner: the desktop header pill hid the city; use the mobile pattern so the city is always visible). */}
+        <div className="mb-4 relative">
+          <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><MapPin size={13} className="text-teal-500" /> Delivery location</p>
+          <button type="button" onClick={() => { setScoreOpen(false); setLocationEditing((v) => !v); }} className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2.5 text-sm text-gray-700 hover:border-teal-300">
+            <span className="truncate flex items-center gap-1.5"><MapPin size={13} className="text-gray-300 shrink-0" />{deliveryLocation || detectedCity || 'Select delivery city'}</span>
+            <Pencil size={13} className="text-gray-400 shrink-0" />
+          </button>
+          {locationEditing && renderLocationPopover('left')}
+        </div>
         <div className="flex flex-col sm:grid sm:grid-cols-2 gap-4 sm:gap-6">
           <div>
             <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><Clock size={13} className="text-teal-500" /> Delivery</p>
@@ -1281,18 +1287,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         <div className="flex-1 min-w-0">
           <p className="font-bold text-teal-600 text-base leading-tight truncate">{productName}</p>
         </div>
-        {stage === 'more' && !isMobile && (
-          // Delivery-location pill in the header on DESKTOP only (space). On MOBILE the top is cluttered
-          // (score + sticky CTA), so the location moves INTO the Logistics & Payment card (owner 2026-07-21).
-          <div className="relative shrink-0">
-            <button type="button" onClick={() => { setScoreOpen(false); setLocationEditing((v) => !v); }} className="flex items-center gap-1 max-w-[110px] sm:max-w-[150px] px-2.5 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200 text-xs text-gray-700 transition-colors" aria-label="Change delivery location">
-              <MapPin size={12} className="text-teal-500 shrink-0" />
-              <span className="truncate">{deliveryLocation || detectedCity || 'Select city'}</span>
-              <Pencil size={11} className="text-gray-400 shrink-0" />
-            </button>
-            {locationEditing && renderLocationPopover('right')}
-          </div>
-        )}
+        {/* (Desktop header delivery-pill removed — the city hid there; delivery now lives as a compact row in the
+            Logistics card on BOTH surfaces, matching the mobile UI so the city is always visible — owner.) */}
         {!standalone && stage !== 'results' && scoreCircle}
         {/* Keyboard-safe mobile CTA (owner): the footer Next/Get-Quotes sits behind the on-screen keyboard on
             text-input stages, so mirror it into the always-visible header. Footer stays for the non-keyboard case. */}

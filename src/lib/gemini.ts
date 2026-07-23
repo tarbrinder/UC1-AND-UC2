@@ -531,7 +531,7 @@ Rules:
 - Keep only questions relevant to THIS product & segment; DROP the rest.
 - Skip anything already implied by the chosen specs or covered by the spec fields.
 - TOPIC-OVERLAP GUARD: never put a question on the final step ("requirement"/"persona") whose topic is ALREADY one of the spec fields above. E.g. if a spec field like "Usage"/"Application" exists, do NOT add an "intended usage/application" question; if "Warranty" is a spec, don't ask warranty; if "Material" is a spec, don't ask material. When the topic is already a spec field, either anchor a genuinely COMPLEMENTARY "specs" question to it, or drop it entirely.
-- The form ALREADY asks these elsewhere — do NOT ask them or any rephrasing/synonym of them: delivery timeline / when they need it / how soon / purchase timing, payment terms or mode, preferred supplier type, delivery city/location, company size, GST, purchase frequency, industry. Focus on OTHER intent/usage/quality/persona signals.
+- The form ALREADY asks these elsewhere — do NOT ask them or any rephrasing/synonym of them: delivery timeline / when they need it / how soon / purchase timing, payment terms or mode, preferred supplier type, company size, GST, purchase frequency, industry. ANY LOCATION question is FORBIDDEN — delivery/supply/site/shipping/installation location, "where will you use/install/receive it", city / state / region / pincode / area: the location is a hidden dedicated field. Focus on OTHER intent/usage/quality/persona signals.
 - TAILOR options to this product (e.g., "Usage" for a generator → Factory backup / Hospital / Site, not Home/Business). CHIPS ONLY: every question MUST have 3-5 specific option chips — NEVER free-text/empty options (the form adds an "Other…" chip). NEVER ask quantity/order-size, delivery, timeline, or payment — those are dedicated form fields.
 - You MAY add category-specific questions beyond the seed if they reveal buyer intent/seriousness.
 - ${args.askPersona ? 'Persona questions allowed.' : 'Do NOT ask persona questions.'}
@@ -1699,7 +1699,11 @@ Return ONLY JSON:
   // NO parser backstop (only QTY_Q covered quantity) — this is that backstop. Scoped so legit product specs survive
   // ("Delivery Pressure" for a pump, "Installation Type" → KEPT; only delivery TIMING/LOCATION, payment, GST,
   // business/industry are blocked). Purchase frequency / cadence is intentionally NOT blocked (a real AI-spec).
-  const FORM_FIELD_Q = /(\bdeliver\w*\s*(time|timeline|date|schedule|lead|when|by|day|week|location|address|area|city|region|state|pin)|\btimeline\b|\blead\s*time|\bhow\s*soon|\bwhen\s+do\s+you\s+(need|want|require)|\burgen|\bpayment|\badvance\s*payment|\bcredit\s*(term|period|day)|\bgst\b|\bpin\s*code|\bpincode|\bpostal|\binstall\w*\s*(location|address|site|city)|\bcompany\s*size|\bbusiness\s*type|\btype\s*of\s*business|\bindustry\b)/i;
+  // NOTE (2026-07-23): broadened to catch ANY location/where question, not just "delivery …". The old guard needed
+  // a "deliver" prefix, so "Supply location", "Site location", "Where will you use it", "Region", "Pincode" leaked
+  // through as page-2 questions. `\blocation\b` / `\bwhere\b` / supply·shipping·site prefixes + region/pincode now
+  // cover them. Still scoped so real specs survive — "Coverage Area", "Installation Type", "Delivery Pressure" are KEPT.
+  const FORM_FIELD_Q = /(\bdeliver\w*\s*(time|timeline|date|schedule|lead|when|by|day|week|location|address|area|city|region|state|pin)|\btimeline\b|\blead\s*time|\bhow\s*soon|\bwhen\s+do\s+you\s+(need|want|require)|\burgen|\bpayment|\badvance\s*payment|\bcredit\s*(term|period|day)|\bgst\b|\bpin\s*code|\bpincode|\bpostal|\binstall\w*\s*(location|address|site|city)|\blocation\b|\bwhere\b|\bshipping\b|\bregion\b|\bsupply\s*(location|area|city|point|address)|\bsite\s*(location|address)|\bcompany\s*size|\bbusiness\s*type|\btype\s*of\s*business|\bindustry\b)/i;
   const seen = new Set(args.buyerSpecs.map(norm));
   // SYNONYM dedup by OPTION OVERLAP (the exact-name `seen` set alone misses relabelled fields). A page-1 spec's
   // option set is the surest fingerprint of the CONCEPT it captures; if ≥half of an AI question's options match a

@@ -19,7 +19,7 @@
 const norm = (s) => s.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
 const BRAND_Q = /\b(brand|manufacturer|oem|make)\b|\bmodel\s*(name|no\.?|number)\b|preferred\s+(supplier|vendor|brand)|\b(vendor|supplier)\b/i;
 const QTY_Q = /\b(quantity|qty|order\s*(size|quantity)|volume|units?\s*(required|needed|per)|no\.?\s*of\s*(units|pieces|pcs)|how\s*many|moq|minimum\s*order)\b/i;
-const FORM_FIELD_Q = /(\bdeliver\w*\s*(time|timeline|date|schedule|lead|when|by|day|week|location|address|area|city|region|state|pin)|\btimeline\b|\blead\s*time|\bhow\s*soon|\bwhen\s+do\s+you\s+(need|want|require)|\burgen|\bpayment|\badvance\s*payment|\bcredit\s*(term|period|day)|\bgst\b|\bpin\s*code|\bpincode|\bpostal|\binstall\w*\s*(location|address|site|city)|\bcompany\s*size|\bbusiness\s*type|\btype\s*of\s*business|\bindustry\b)/i;
+const FORM_FIELD_Q = /(\bdeliver\w*\s*(time|timeline|date|schedule|lead|when|by|day|week|location|address|area|city|region|state|pin)|\btimeline\b|\blead\s*time|\bhow\s*soon|\bwhen\s+do\s+you\s+(need|want|require)|\burgen|\bpayment|\badvance\s*payment|\bcredit\s*(term|period|day)|\bgst\b|\bpin\s*code|\bpincode|\bpostal|\binstall\w*\s*(location|address|site|city)|\blocation\b|\bwhere\b|\bshipping\b|\bregion\b|\bsupply\s*(location|area|city|point|address)|\bsite\s*(location|address)|\bcompany\s*size|\bbusiness\s*type|\btype\s*of\s*business|\bindustry\b)/i;
 
 function parseAiSpecs(text, buyerSpecs = [], evidenceFacts = {}, buyerSpecOptions = {}) {
   let parsed;
@@ -174,6 +174,30 @@ const fixtures = [
       assert(names.includes('delivery pressure'), 'kept legit product spec "Delivery Pressure"');
       assert(names.includes('installation type'), 'kept legit context "Installation Type"');
       assert(names.includes('purchase frequency'), 'kept intentional AI-spec "Purchase Frequency"');
+    },
+  },
+  {
+    name: 'ANY location/where question dropped (supply/site/shipping/region/pincode) — not just "delivery …"',
+    buyerSpecs: [],
+    buyerSpecOptions: {},
+    evidence: {},
+    text: J({ questions: [
+      { fieldName: 'Supply Location', options: ['North', 'South'] },                 // leaked before (no "deliver" prefix) -> DROP
+      { fieldName: 'Site Location', options: ['Indoor', 'Outdoor site'] },           // -> DROP
+      { fieldName: 'Where will you use it?', options: ['Factory', 'Warehouse'] },    // -> DROP
+      { fieldName: 'Shipping Address Type', options: ['Home', 'Office'] },           // -> DROP
+      { fieldName: 'Region', options: ['North India', 'South India'] },              // -> DROP
+      { fieldName: 'Pincode Area', options: ['Metro', 'Non-metro'] },                // -> DROP
+      { fieldName: 'Coverage Area', options: ['Small', 'Large'] },                   // legit product spec (no supply/deliver prefix) -> KEEP
+      { fieldName: 'Installation Type', options: ['Wall', 'Floor'] },                // legit context -> KEEP
+    ] }),
+    expect: (r) => {
+      const names = r.map((q) => q.fieldName.toLowerCase());
+      for (const bad of ['supply location', 'site location', 'where will you use it?', 'shipping address type', 'region', 'pincode area']) {
+        assert(!names.includes(bad), `dropped location question "${bad}"`);
+      }
+      assert(names.includes('coverage area'), 'kept legit "Coverage Area"');
+      assert(names.includes('installation type'), 'kept legit "Installation Type"');
     },
   },
   { name: 'malformed JSON -> [] (never throws)', buyerSpecs: [], buyerSpecOptions: {}, evidence: {}, text: '{ questions: [broken', expect: (r) => assert(Array.isArray(r) && r.length === 0, 'malformed -> empty array') },

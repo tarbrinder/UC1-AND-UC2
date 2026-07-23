@@ -8,14 +8,25 @@ interface Props {
   ariaLabel?: string; // accessible name for the group (P2-230/255) — pass the spec/question label
 }
 
+const OPT_LIMIT = 8; // beyond this, collapse behind a "+N more" chip so a big option set doesn't wall the page
+
 export default function OptionChips({ options, value, onChange, className = '', ariaLabel = 'Options' }: Props) {
   const [customMode, setCustomMode] = useState(false);
   const [customVal, setCustomVal] = useState('');
+  const [expanded, setExpanded] = useState(false);
   const [poppingKey, setPoppingKey] = useState<string | null>(null);
   const popTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevValueRef = useRef(''); // the value before "Other…" opened — restored if the buyer abandons it (P2-220)
 
   const isCustomSelected = value !== '' && !options.includes(value);
+  // Collapse a long option set to the first OPT_LIMIT + a "+N more" chip; but always keep a SELECTED chip visible
+  // even if it lives in the hidden tail (so the buyer's choice never disappears behind "+N more").
+  const collapsed = options.length > OPT_LIMIT && !expanded;
+  const head = options.slice(0, OPT_LIMIT);
+  const visibleOptions = collapsed
+    ? (value && options.includes(value) && !head.includes(value) ? [...head, value] : head)
+    : options;
+  const hiddenCount = options.length - head.length;
 
   function triggerPop(key: string) {
     setPoppingKey(key);
@@ -38,7 +49,7 @@ export default function OptionChips({ options, value, onChange, className = '', 
 
   return (
     <div role="radiogroup" aria-label={ariaLabel} className={`flex flex-wrap gap-2 ${className}`}>
-      {options.map(opt => (
+      {visibleOptions.map(opt => (
         <button
           key={opt}
           type="button"
@@ -56,6 +67,12 @@ export default function OptionChips({ options, value, onChange, className = '', 
           {opt}
         </button>
       ))}
+
+      {collapsed && (
+        <button type="button" onClick={() => setExpanded(true)} className="px-3.5 py-2.5 min-h-[44px] rounded-full text-sm font-medium border border-gray-200 bg-gray-50 text-gray-500 hover:border-teal-300 hover:text-teal-600 transition-all">
+          +{hiddenCount} more
+        </button>
+      )}
 
       {!customMode && (
         <button
@@ -92,8 +109,8 @@ export default function OptionChips({ options, value, onChange, className = '', 
               onChange(prevValueRef.current);
             }
           }}
-          placeholder="Type here..."
-          className="px-3.5 py-2.5 min-h-[44px] rounded-full text-sm border border-teal-400 outline-none focus:ring-2 focus:ring-teal-100 w-36 text-gray-700"
+          placeholder="Type your answer…"
+          className="px-3.5 py-2.5 min-h-[44px] rounded-full text-sm border border-teal-400 bg-white outline-none focus:ring-2 focus:ring-teal-100 w-44 max-w-full text-gray-700 placeholder:text-gray-400"
         />
       )}
     </div>
