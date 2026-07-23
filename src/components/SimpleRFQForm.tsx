@@ -98,7 +98,14 @@ const RFQ_LLM_KEY = ((import.meta.env.VITE_RFQ_LLM_KEY as string) || '').trim() 
 // The RFQ key is provisioned for flash-lite ONLY (flash → 401 team_model_access_denied), so every form
 // call runs on flash-lite. Flip to 'google/gemini-2.5-flash' here (image/mic + page-2) once the key
 // gains flash access — the owner asked for flash on those, but the key blocks it today.
-const RFQ_MODEL = 'google/gemini-2.5-flash-lite'; // all form calls (image/mic/hints/page-2) run on flash-lite
+const RFQ_MODEL = 'google/gemini-2.5-flash-lite'; // TEXT calls (spec hints + page-2 planner) — flash-lite
+// IMAGE + MIC model, separated so it can use a stronger model than the text calls (owner: "use 2.5 flash for
+// image and mic"). ⚑ BLOCKED TODAY: the RFQ key is provisioned flash-lite ONLY — a live gateway probe returns
+// 401 `team_model_access_denied` ("team can only access gemini-2.5-flash-lite") for flash, and the default key is
+// blocked entirely. So this stays on flash-lite (else every photo/voice call 401s). ➜ To enable flash: have ops
+// grant `google/gemini-2.5-flash` to the VITE_RFQ_LLM_KEY team at imllm, then change ONLY this line to
+// 'google/gemini-2.5-flash'. (Standard form has no image/mic — nothing to change there.)
+const RFQ_VISION_MODEL = 'google/gemini-2.5-flash-lite';
 const hasFormLLM = () => !!RFQ_LLM_KEY || hasGeminiKey();
 
 const DEMO_SELLERS = [
@@ -657,7 +664,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       const fieldNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC);
       const fieldOpts: Record<string, string[]> = {};
       for (const s of isqSpecs) fieldOpts[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
-      const r = await analyzeImage(base64, mime, productName, fieldNames, fieldOpts, '', RFQ_LLM_KEY, RFQ_MODEL);
+      const r = await analyzeImage(base64, mime, productName, fieldNames, fieldOpts, '', RFQ_LLM_KEY, RFQ_VISION_MODEL);
       const committedNew = !!(r.productName && !productNameRef.current.trim());
       if (committedNew) await commitProduct(r.productName);
       else if (myGen !== commitGen.current) return; // a DIFFERENT product was committed while extracting → drop this stale result
@@ -682,7 +689,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     try {
       setAiBusy('Understanding your requirement…');
       const { base64, mime } = await fileToBase64(blob);
-      const r = await voiceToSpecs(base64, mime, productName, isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC), RFQ_LLM_KEY, RFQ_MODEL);
+      const r = await voiceToSpecs(base64, mime, productName, isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC), RFQ_LLM_KEY, RFQ_VISION_MODEL);
       const newName = (r.productName && !productNameRef.current.trim()) ? r.productName : '';
       if (newName) await commitProduct(newName);
       else if (myGen !== commitGen.current) return; // product switched mid-extraction → drop stale result
@@ -1365,9 +1372,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   //    right panel = product input + (pre-commit) Requirement Details / (post-commit) Quantity + Next. ──
   const productDesktop = (
     <div className="flex" style={{ minHeight: 580 }}>
-      {/* Gallery panel: always in the popup; on the STANDALONE landing it's hidden until a product is committed
-          (no giant empty box), so the empty landing is a clean single input column. */}
-      {(!standalone || committed) && (
+      {/* Gallery panel: POPUP ONLY. The standalone page already has the score rail on the left — an extra image
+          gallery over-clutters it (owner), so the standalone landing stays a clean single input column. */}
+      {!standalone && (
       <div className="hidden sm:flex w-[44%] bg-teal-50/70 p-7 flex-col items-center justify-center gap-5">
         {productImageUrl ? (
           <div className="w-full flex flex-col items-center gap-3">
@@ -1405,7 +1412,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         </div>
       </div>
       )}
-      <div className={`flex-1 flex flex-col p-7 min-w-0 relative ${standalone && !committed ? 'max-w-2xl mx-auto w-full' : ''}`}>
+      <div className={`flex-1 flex flex-col p-7 min-w-0 relative ${standalone ? 'max-w-2xl mx-auto w-full' : ''}`}>
         {!standalone && <button onClick={onClose} className="absolute top-4 right-4 z-20 w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 hover:bg-gray-200"><X size={16} /></button>}
         {/* Standalone leads with "What are you looking for?"; the popup has no heading (owner) — straight to input. */}
         {standalone && <div><p className="font-bold text-gray-900 text-2xl leading-tight">What are you looking for?</p><p className="text-sm text-gray-400 mt-1">Enter the product or service name to get started.</p></div>}
