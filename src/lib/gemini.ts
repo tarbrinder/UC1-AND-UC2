@@ -1569,11 +1569,13 @@ export async function getSpecHints(
   isqSpecsWithOptions: Record<string, string[]>,
   twinContext = '',
   evidenceFacts?: Record<string, string>, // EXPLICIT buyer facts from mic/photo — mapped onto ISQ fields (the "light spec mapper", folded in)
+  sellerSpecNames: string[] = [],          // seller-flagged fields — REFERENCE only, to name an extra with a real field name when one fits
   apiKey?: string
 ): Promise<{
   knownFromProductName: Record<string, string>;
   redundantISQSpecs: string[];
   isqHints: Record<string, string>;
+  extras: Record<string, string>;          // buyer-truth facts that DON'T fit a buyer ISQ field → surfaced as key-values, never lost
 }> {
   const evidence = evidenceFacts && Object.keys(evidenceFacts).length
     ? Object.entries(evidenceFacts).filter(([, v]) => v && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join('; ')
@@ -1584,30 +1586,40 @@ export async function getSpecHints(
       content: `${INDIA_CTX}
 You are a B2B product spec expert for IndiaMART.
 Product: "${productName}"
-${twinContext ? `Buyer background (use ONLY to make "isqHints" more relevant — do NOT use it to fill "knownFromProductName" with anything the product name does not itself entail, and NEVER infer a brand from it): ${twinContext}\n` : ''}${evidence ? `Buyer-STATED facts (EXPLICIT statements from the buyer's voice/photo — these ARE buyer truth, map each onto its matching ISQ field below and include it in "knownFromProductName" with the field's exact name; synonyms/units may differ, e.g. "5 kVA" → "Power (kVA)"): ${evidence}\n` : ''}ISQ fields: ${JSON.stringify(isqSpecNames)}
+${twinContext ? `Buyer background (use ONLY to make "isqHints" more relevant — do NOT use it to fill "knownFromProductName" with anything the product name does not itself entail, and NEVER infer a brand from it): ${twinContext}\n` : ''}${evidence ? `Buyer-STATED facts (EXPLICIT statements from the buyer's voice/photo — these ARE buyer truth, map each onto its matching ISQ field below and include it in "knownFromProductName" with the field's exact name; synonyms/units may differ, e.g. "5 kVA" → "Power (kVA)"): ${evidence}\n` : ''}Buyer ISQ fields (page-1 chips): ${JSON.stringify(isqSpecNames)}
 Fields with options: ${JSON.stringify(isqSpecsWithOptions)}
-
-Only put a value in "knownFromProductName" if it is UNAMBIGUOUSLY entailed by the product name OR explicitly present in the buyer-STATED facts above (map to the closest option string when one fits). If you are not ~certain, leave it out.
-NEVER INFER a Brand / Make / Manufacturer / OEM / Model from the product alone — that narrows the seller pool and is forbidden. NEVER guess.
+${sellerSpecNames.length ? `Seller-relevant fields (REFERENCE only — if an extra fact matches one of these, use its exact name as the extra's key): ${JSON.stringify(sellerSpecNames)}\n` : ''}
+RECONCILE every fact the buyer TRULY provided (from the product name + the stated facts above) into exactly ONE bucket — never both, no duplicates:
+1. "knownFromProductName" — a fact that maps to a BUYER ISQ field. Use the ISQ field's EXACT name as the key; map the value to the closest option string when one fits (e.g. "single phase" → "1-Phase", "5 kVA" → "5 kVA"). Only include a fact that is UNAMBIGUOUSLY entailed by the product name OR explicitly stated above.
+2. "extras" — a real buyer-provided fact that does NOT fit any buyer ISQ field (it may match a seller-relevant field, or be a brand-new attribute). Keep it as a clean key: value so it is never lost. NEVER put an ISQ-field fact here.
+GROUNDING: only include what the buyer ACTUALLY provided. NEVER guess, infer a typical/default value, or invent a fact. NEVER infer Brand / Make / Manufacturer / OEM / Model from the product name (that narrows the seller pool) — a brand goes in extras ONLY if the buyer explicitly stated it. A rating/dimension number ("5 kVA", "6 mm") is a spec, never a quantity.
 
 Return ONLY JSON:
 {
-  "knownFromProductName": { "SpecName": "value UNAMBIGUOUSLY implied by the product name (never a brand)" },
+  "knownFromProductName": { "ExactISQFieldName": "value (closest option string when one fits; never a brand)" },
+  "extras": { "AttributeName": "value the buyer gave that isn't a buyer ISQ field" },
   "redundantISQSpecs": ["spec names not applicable for this product"],
-  "isqHints": { "SpecName": "short helpful hint, max 8 words" }
+  "isqHints": { "ISQFieldName": "short helpful hint, max 8 words" }
 }`,
     },
-  ], { label: 'getSpecHints', apiKey, timeoutMs: 10000 }); // owner: 10s cap on all RFQ-form LLM calls
-  let parsed: { knownFromProductName?: Record<string, string>; redundantISQSpecs?: string[]; isqHints?: Record<string, string> };
+  ], { label: 'getSpecHints', temperature: 0, apiKey, timeoutMs: 10000 }); // temp 0 = deterministic reconciliation; 10s cap
+  let parsed: { knownFromProductName?: Record<string, string>; redundantISQSpecs?: string[]; isqHints?: Record<string, string>; extras?: Record<string, string> };
   // Harden against a valid-but-non-object body ('null'/'true'/123): JSON.parse doesn't throw on those, but then
   // parsed.knownFromProductName would. Coerce anything that isn't a plain object to {}.
   try { const p = JSON.parse(text); parsed = (p && typeof p === 'object') ? p : {}; } catch { parsed = {}; }
-  // Bias guard at the source: a name-detect must NEVER be a brand/make field.
+  // Bias guard at the source: a name-detect must NEVER be a brand/make field. Only keep fills that name a REAL
+  // ISQ field (key-validation — the LLM must not invent a buyer field). Everything else the LLM returned as a
+  // buyer fill but that isn't a real ISQ field is demoted to an extra (never dropped).
+  const isqSet = new Set(isqSpecNames.map((n) => n.toLowerCase()));
   const known: Record<string, string> = {};
+  const extras: Record<string, string> = { ...(parsed.extras && typeof parsed.extras === 'object' ? parsed.extras : {}) };
   for (const [k, v] of Object.entries(parsed.knownFromProductName || {})) {
-    if (!PREFERENCE_KEYWORDS.test(k)) known[k] = v;
+    if (!v || PREFERENCE_KEYWORDS.test(k)) continue;
+    if (isqSet.has(k.toLowerCase())) known[k] = v; else extras[k] = v; // key-validate; demote unknown keys to extras
   }
-  return { knownFromProductName: known, redundantISQSpecs: parsed.redundantISQSpecs || [], isqHints: parsed.isqHints || {} };
+  // Never let an extra shadow a buyer ISQ field (dedup).
+  for (const k of Object.keys(extras)) if (isqSet.has(k.toLowerCase())) delete extras[k];
+  return { knownFromProductName: known, redundantISQSpecs: parsed.redundantISQSpecs || [], isqHints: parsed.isqHints || {}, extras };
 }
 
 export interface AiSpecQuestion {
@@ -1688,7 +1700,14 @@ Return ONLY JSON:
   const norm = (s: string) => s.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   // Evidence corpus for the fabrication guard — a prefill is trusted only if a real evidence value backs it.
   const evidenceCorpus = Object.values(args.evidenceFacts || {}).map((v) => String(v).toLowerCase().trim()).filter(Boolean);
-  const evidenceBacks = (v: string) => { const lv = v.toLowerCase().trim(); return evidenceCorpus.some((e) => e.includes(lv) || lv.includes(e)); };
+  // A prefill is evidence-backed only on a WHOLE-TOKEN overlap of length >= 3 — not a bare substring. Stops a
+  // short token ("5") from validating a fabricated "5 kVA" prefill (the recurring containment-false-positive).
+  const toks = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const evidenceBacks = (v: string) => {
+    const vt = toks(v).filter((t) => t.length >= 3);
+    if (!vt.length) { const lv = v.toLowerCase().trim(); return evidenceCorpus.some((e) => e === lv); } // all-short value → require an exact evidence match
+    return vt.every((t) => evidenceCorpus.some((e) => toks(e).includes(t))); // every meaningful token must appear as a whole token in some evidence fact
+  };
   // Brand/vendor questions narrow the seller pool → never an OPEN ask. Scoped so it does NOT eat legit
   // objective attributes like "Model Scale"/"Winding material" (bare "model" needs a name/no qualifier).
   const BRAND_Q = /\b(brand|manufacturer|oem|make)\b|\bmodel\s*(name|no\.?|number)\b|preferred\s+(supplier|vendor|brand)|\b(vendor|supplier)\b/i;

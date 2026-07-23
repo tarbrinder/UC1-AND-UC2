@@ -126,6 +126,20 @@ function isQtyUnitField(name: string): boolean {
   if (!toks.length) return false;
   return toks.some((t) => QTY_UNIT_CORE.has(t)) && toks.every((t) => QTY_UNIT_CORE.has(t) || QTY_UNIT_FILLER.has(t));
 }
+// Snap an extracted value to the closest chip OPTION (case/format/whitespace-insensitive) so a mapped value like
+// "1-Phase" selects the real chip instead of creating a near-duplicate "Other". No fuzzy match → keep the value
+// (OptionChips renders it as a custom "Other" entry). The LLM already does the SEMANTIC map (single→1); this is
+// the deterministic safety-net for formatting differences.
+function snapToOption(value: string, options: string[]): string {
+  if (!value || !options || !options.length) return value;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const nv = norm(value);
+  if (!nv) return value;
+  const exact = options.find((o) => norm(o) === nv);
+  if (exact) return exact;
+  const contains = options.find((o) => { const no = norm(o); return no.length >= 2 && (no.includes(nv) || nv.includes(no)); });
+  return contains || value;
+}
 function mapDisplaySpecs(rows: Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }>): ISQSpec[] {
   return (rows || [])
     .filter((r) => r && r.IM_SPEC_MASTER_DESC && !isQtyUnitField(r.IM_SPEC_MASTER_DESC))
@@ -191,6 +205,10 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const [unitOptions, setUnitOptions] = useState<string[]>([]);
   const [isqSpecs, setIsqSpecs] = useState<ISQSpec[]>([]);
   const [specValues, setSpecValues] = useState<Record<string, string>>({});
+  // "Also detected" — buyer-truth facts (from name/photo/mic) that don't fit a buyer ISQ field. Never lost:
+  // shown as editable key-value rows below the specs and shipped in the requirement. Buyer edits are preserved.
+  const [extraSpecs, setExtraSpecs] = useState<Record<string, string>>({});
+  const extraEditedRef = useRef<Set<string>>(new Set()); // extra keys the buyer edited/removed → don't let a re-run clobber them
   const [specsLoading, setSpecsLoading] = useState(false);
   const [mcatId, setMcatId] = useState('');
   // Page-1 buyer-spec hints (fast getSpecHints): product-name pre-fills + field hints. (getSpecHints also returns
@@ -466,20 +484,34 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       hintsFiredFor.current = hintsKey;
       const withOpts: Record<string, string[]> = {};
       for (const s of isqSpecs) withOpts[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
-      getSpecHints(name, specNames, withOpts, '', photoSpecsRef.current, RFQ_LLM_KEY).then((h) => {
+      getSpecHints(name, specNames, withOpts, '', photoSpecsRef.current, sellerSpecsRef.current, RFQ_LLM_KEY).then((h) => {
         if (hintsFiredFor.current !== hintsKey || gen !== commitGen.current) return;
         setIsqHints(h.isqHints || {});
-        // h.redundantISQSpecs intentionally IGNORED — we no longer hide specs (see the state comment above).
-        // AUTOFILL ONLY ON AN EXPLICIT SIGNAL (owner: "don't autofill unless it's in the product name / photo / mic").
-        // getSpecHints can INFER/guess a spec value from the product name (e.g. "diesel generator" → Brand: Ashok
-        // Leyland); we DROP any pre-fill whose value doesn't literally appear in the typed name or the photo/mic
-        // evidence facts. So "30 kVA diesel generator" pre-fills Power=30 kVA (explicit), but a bare "diesel generator"
-        // pre-fills nothing it merely guessed.
+        // RECONCILE (owner model): the LLM is grounded (temp 0, "only what the buyer actually provided") and already
+        // maps values to the closest option, so we no longer gate on a brittle substring check. Fill each buyer ISQ
+        // field, SNAPPED to its real option (so "1-Phase" selects the chip, not a near-duplicate). Never overwrite a
+        // value the buyer set. Anything that isn't a buyer field → "Also detected" (nothing lost, no duplicates).
         if (h.knownFromProductName && Object.keys(h.knownFromProductName).length) {
-          const normTxt = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-          const explicit = normTxt(`${name} ${Object.values(photoSpecsRef.current || {}).join(' ')}`);
-          const isExplicit = (v: string) => { const nv = normTxt(v); return nv.length >= 2 && explicit.includes(nv); };
-          setSpecValues((prev) => { const next = { ...prev }; for (const [k, v] of Object.entries(h.knownFromProductName)) { const hit = specNames.find((n) => n.toLowerCase() === k.toLowerCase()); if (hit && v && isExplicit(v) && !next[hit]) next[hit] = v; } return next; });
+          setSpecValues((prev) => {
+            const next = { ...prev };
+            for (const [k, v] of Object.entries(h.knownFromProductName)) {
+              const hit = specNames.find((n) => n.toLowerCase() === k.toLowerCase());
+              if (hit && v && !next[hit]) next[hit] = snapToOption(v, withOpts[hit] || []);
+            }
+            return next;
+          });
+        }
+        // Merge extras — preserve any the buyer edited/removed (extraEditedRef); a re-run on new evidence adds only new ones.
+        if (h.extras && Object.keys(h.extras).length) {
+          setExtraSpecs((prev) => {
+            const next = { ...prev };
+            for (const [k, v] of Object.entries(h.extras)) {
+              if (!v || extraEditedRef.current.has(k.toLowerCase())) continue;
+              if (specNames.some((n) => n.toLowerCase() === k.toLowerCase())) continue; // never shadow a buyer field
+              next[k] = v;
+            }
+            return next;
+          });
         }
       }).catch((e) => emitApiError('getSpecHints', e, { mcatId }));
     }
@@ -598,6 +630,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     // against the new schema + evidence input to the AI-specs prompt. Buyer page answers DO reset (by design).
     if (Object.keys(photoSpecsRef.current).length) pendingAiSpecs.current = { ...photoSpecsRef.current };
     setIsqHints({}); setAiSpecs([]); setAiSpecValues({}); setAiSpecsError(false); setAiSpecsLoading(hasFormLLM());
+    setExtraSpecs({}); extraEditedRef.current = new Set(); // re-derived by getSpecHints from the (surviving) evidence + new name
     // P2-206: the 3 secondary catalog calls (getISQs enrichment · McatDtl image/category · IMSearchAPI gallery) all
     // depend only on `id`, so fire them CONCURRENTLY with the primary GetIsq below instead of serially after its
     // await. Page-1 spec correctness no longer depends on ordering: getISQs appends by functional merge, and GetIsq's
@@ -716,12 +749,14 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       if (r.quantity) setQuantity(String(r.quantity));
       // P2-205: apply the spoken unit now if the options are loaded, else STASH it — the [unitOptions] effect applies it once they resolve.
       if (r.quantityUnit) { if (unitOptions.length) setUnit(matchUnit(unitOptions, r.quantityUnit)); else pendingUnitRef.current = r.quantityUnit; }
-      if (r.deliveryTimeline) setDeliveryTimeline(r.deliveryTimeline);
-      if (r.paymentTerms) setPaymentTerms(r.paymentTerms);
+      // Coerce the LLM's enum outputs to our CANONICAL lists (snap "Advance"→"Full Advance"); drop anything that
+      // doesn't map to a real option so an off-canon value never ships to sellers or fails to select a chip (audit).
+      if (r.deliveryTimeline) { const t = snapToOption(r.deliveryTimeline, TIMELINE); if (TIMELINE.includes(t)) setDeliveryTimeline(t); }
+      if (r.paymentTerms) { const p = snapToOption(r.paymentTerms, PAYMENT_TERMS); if (PAYMENT_TERMS.includes(p)) setPaymentTerms(p); }
       // A spoken DELIVERY city sets the DELIVERY field (not the buyer's own IP/GPS-seeded location); if it differs,
       // un-link "same as my location" so both are preserved instead of collapsing origin↔destination (audit).
       if (r.deliveryLocation) { setDeliveryLocation(r.deliveryLocation); if (r.deliveryLocation.trim() && r.deliveryLocation.trim() !== userLocation.trim()) setSameAsLoc(false); }
-      if (r.creditPeriod) setCreditPeriod(r.creditPeriod);          // P2-225: lossless — was silently dropped
+      if (r.creditPeriod) { const c = snapToOption(r.creditPeriod, CREDIT_PERIODS); if (CREDIT_PERIODS.includes(c)) setCreditPeriod(c); }
       const specs = { ...(r.mappedSpecs || {}) }; (r.customSpecs || []).forEach((c) => { if (c.fieldName) specs[c.fieldName] = c.value; });
       applyExtractedSpecs(specs);
       const gotSomething = !!(r.productName || r.quantity || Object.keys(specs).length);
@@ -735,6 +770,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   };
 
   const setSpecValue = (k: string, v: string) => setSpecValues((p) => ({ ...p, [k]: v }));
+  // "Also detected" edits — mark the key as buyer-touched so a getSpecHints re-run never clobbers it.
+  const setExtraValue = (k: string, v: string) => { extraEditedRef.current.add(k.toLowerCase()); setExtraSpecs((p) => ({ ...p, [k]: v })); };
+  const removeExtra = (k: string) => { extraEditedRef.current.add(k.toLowerCase()); setExtraSpecs((p) => { const n = { ...p }; delete n[k]; return n; }); };
 
   // V3 rule (RFQModalV3.tsx:1162): anything that isn't an individual/personal/end-user is a BUSINESS role —
   // and a business buyer is asked for GST (an individual/consumer is not). "Individual Buyer" → false.
@@ -781,8 +819,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     const visibleAiNames = new Set(aiSpecs.filter((q) => !isqNames.has(q.fieldName.toLowerCase())).map((q) => q.fieldName));
     const merged: Record<string, string> = { ...specValues };
     for (const [k, v] of Object.entries(aiSpecValues)) if (visibleAiNames.has(k)) merged[k] = v;
+    for (const [k, v] of Object.entries(extraSpecs)) if (!(k in merged)) merged[k] = v; // "Also detected" facts ship too (lossless)
     return Object.entries(merged).filter(([, v]) => v && v.trim());
-  }, [specValues, aiSpecValues, aiSpecs, isqSpecs]);
+  }, [specValues, aiSpecValues, aiSpecs, isqSpecs, extraSpecs]);
 
   // Compact one-liner for the on-screen "Your requirement" banner.
   const requirementSummary = useMemo(() => {
@@ -1084,15 +1123,30 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // from getSpecHints — hiding them asynchronously made specs "appear then vanish" ~1s after the page rendered
   // (the owner-reported bug). getSpecHints still PRE-FILLS known values + adds hints; it just never removes a field.
   const visibleSpecs = isqSpecs;
-  const specBody = specsLoading && isqSpecs.length === 0 ? (
-    <p className="text-xs text-gray-400 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Fetching category spec fields…</p>
-  ) : isqSpecs.length === 0 ? (
-    <p className="text-sm text-gray-400">No standard specs for this product — continue to the smart questions →</p>
+  // "Also detected" — extracted buyer-truth that isn't a buyer ISQ field; editable/removable, and shipped.
+  const extraKeys = Object.keys(extraSpecs);
+  const extrasSection = extraKeys.length > 0 && (
+    <div className="pt-3 border-t border-gray-100">
+      <p className="text-xs uppercase font-semibold text-gray-500 tracking-wide mb-2 flex items-center gap-1.5"><ListPlus size={13} className="text-teal-500" /> Also detected <span className="font-normal normal-case text-gray-400">— from your photo / voice · edit or remove</span></p>
+      <div className="space-y-2">
+        {extraKeys.map((k) => (
+          <div key={k} className="flex items-center gap-2">
+            <span className="text-sm text-gray-600 w-2/5 shrink-0 truncate" title={k}>{k}</span>
+            <input value={extraSpecs[k]} onChange={(e) => setExtraValue(k, e.target.value)} aria-label={k} className="flex-1 min-w-0 border border-gray-200 rounded-lg px-3 py-2 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+            <button type="button" onClick={() => removeExtra(k)} aria-label={`Remove ${k}`} className="w-9 h-9 shrink-0 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 flex items-center justify-center"><X size={15} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+  const specBody = specsLoading && isqSpecs.length === 0 && extraKeys.length === 0 ? (
+    <p className="text-sm text-gray-500 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Fetching category spec fields…</p>
   ) : (
     <div className="space-y-5">
-      {/* ALL buyer specs on page 1 (owner 2026-07-21) — these are the buyer's own requirement-form fields;
-          no top-3 + "+more" split (that hid half the buyer specs and read as redundant vs page 2). */}
+      {/* ALL buyer specs on page 1 (owner 2026-07-21) — the buyer's own requirement-form fields. */}
       {visibleSpecs.map(renderSpecField)}
+      {isqSpecs.length === 0 && extraKeys.length === 0 && <p className="text-sm text-gray-500">No standard specs for this product — continue to the smart questions →</p>}
+      {extrasSection}
     </div>
   );
 
@@ -1290,7 +1344,10 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
 
   // ── The single-panel (steps 1/2/results) — V3 chrome. ──
   const singlePanel = (
-    <div className={`flex flex-col ${isMobile || standalone ? 'h-full' : 'h-[78vh] min-h-[560px] max-h-[92vh]'} min-h-0`}>
+    // HD FIX: on the standalone full-page route the flow steps used to fill flex-1 edge-to-edge (~1600px) next to
+    // the rail — cap + centre them to match the already-capped product page (max-w-2xl) and popup card. Mobile stays
+    // full-width; popup is already capped by the card shell.
+    <div className={`flex flex-col ${isMobile || standalone ? 'h-full' : 'h-[78vh] min-h-[560px] max-h-[92vh]'} min-h-0 ${standalone ? 'max-w-2xl lg:max-w-3xl w-full mx-auto' : ''}`}>
       <div className="px-5 pt-4 pb-0 flex items-center gap-3 shrink-0">
         {isMobile
           ? <button onClick={goBack} aria-label="Back" className="w-11 h-11 -ml-1.5 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-500 shrink-0"><ArrowLeft className="w-5 h-5" /></button>
