@@ -350,11 +350,12 @@ Return ONLY valid JSON:
   "mappedSpecs": { "SpecFieldName": "value" },
   "customSpecs": [{ "fieldName": "name", "value": "value" }]
 }
-The audio may be in Hindi, English or Hinglish — transcribe faithfully, then extract. mappedSpecs keys must exactly match known spec fields. customSpecs is for anything else. Map deliveryTimeline/paymentTerms/creditPeriod to the EXACT option strings above (so the form can pre-select them).`,
+The audio may be in Hindi, English or Hinglish — transcribe faithfully, then extract. mappedSpecs keys must exactly match known spec fields. customSpecs is for ANYTHING ELSE the buyer stated (any B2B attribute — never drop a stated detail just because it isn't a known field). Map deliveryTimeline/paymentTerms/creditPeriod to the EXACT option strings above (so the form can pre-select them).
+GROUNDING (critical): extract ONLY what the buyer ACTUALLY SAID. If a detail was not spoken, return null (or omit it from mappedSpecs/customSpecs). NEVER guess, infer, or fill a typical/default value that wasn't stated. A number with a rating/dimension unit (e.g. "5 kVA", "6 mm", "230 volt") is a SPEC value, NOT the order quantity.`,
         },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'voiceToSpecs', apiKey, timeoutMs: 10000 });   // owner: 10s cap on all RFQ-form LLM calls (was the 240s default → a hung gateway spun the mic banner for minutes)
+  ], { model: model || MODEL_RICH, maxTokens: 2000, temperature: 0, label: 'voiceToSpecs', apiKey, timeoutMs: 10000 });   // temp 0 = deterministic extraction (audit); 10s cap; 2000 tokens is ample for this JSON (was 16000)
   return JSON.parse(text);
 }
 
@@ -410,15 +411,16 @@ Identify this B2B product and its key specs.${useCase} Return JSON:
   "additionalDetails": ""
 }`;
 
+  const GROUND = `\nGROUNDING (critical): report ONLY what is actually VISIBLE/READABLE in this image. If it is not a product (blurry, irrelevant, a person, a screenshot) return productName:null and empty specs. NEVER infer a spec from category priors or a "typical" value — only what you can see. Put ANY visible attribute that isn't a listed field into additionalSpecifications (never drop it). A rating/dimension number (e.g. "5 kVA", "6 mm") is a SPEC value, NOT the order quantity.`;
   const text = await callLLM([
     {
       role: 'user',
       content: [
         { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-        { type: 'text', text: prompt },
+        { type: 'text', text: prompt + GROUND },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'analyzeImage', apiKey, timeoutMs: 10000 });   // owner: 10s cap on all RFQ-form LLM calls (was the 240s default → a hung gateway spun the photo banner for minutes)
+  ], { model: model || MODEL_RICH, maxTokens: 2000, temperature: 0, label: 'analyzeImage', apiKey, timeoutMs: 10000 });   // temp 0 = deterministic extraction (audit); 10s cap; 2000 tokens ample (was 16000)
   return JSON.parse(text);
 }
 
