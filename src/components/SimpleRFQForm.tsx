@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   ArrowLeft, ArrowRight, Search, Mic, Camera, X, Pencil, MapPin, Star, User, Send, Phone,
   ChevronLeft, ChevronRight, ChevronDown, ChevronUp, BadgeCheck, ShieldCheck, Award, Package, MessageCircle, Clock, CreditCard,
-  LogIn, CheckCircle2, SlidersHorizontal, ListPlus, Truck, LocateFixed, type LucideIcon,
+  LogIn, CheckCircle2, SlidersHorizontal, ListPlus, Truck, LocateFixed, RotateCcw, type LucideIcon,
 } from 'lucide-react';
 import { getJSON, postJSON } from '../lib/api';
 import { fetchProductSuggestions, filterProducts, stripQuantityPrefix, parseQuantityFromName } from '../utils/productNames';
@@ -291,7 +291,6 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const photoSpecsRef = useRef<Record<string, string>>({}); // specs a photo/voice extracted → extra INPUT to the AI-specs prompt
   const commitGen = useRef(0);              // generation token — a superseded commit's late API responses become no-ops
   const autoAdvancedFor = useRef('');       // mcatId we already auto-advanced past (unit-less) — so Back doesn't re-bounce
-  const aiSkippedFor = useRef('');          // "mcatId:aiEpoch" we auto-skipped past when the AI-specs call FAILED (never trap on a dead page)
   const productNameRef = useRef('');        // live product name for the photo/voice "don't overwrite a typed name" guard
   const sellerSpecsRef = useRef<string[]>([]); // getISQs SELLER-flagged spec names → page-2 AI input (never rendered on page-1)
   const bodyScrollRef = useRef<HTMLDivElement | null>(null); // the flow-body scroller — reset to top on every stage change (P2-216)
@@ -593,7 +592,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     emit(EV.PRODUCT_COMMITTED, { mcatId: id, productName: name, surface: surfaceName });
     // Re-arm the LLM fire-guards so a re-commit (same or new mcat) re-fires getSpecHints/getMissingSpecs
     // and clears aiSpecsLoading — without this a same-product re-commit hangs the aispecs page forever.
-    hintsFiredFor.current = ''; aiFiredFor.current = ''; aiSkippedFor.current = '';
+    hintsFiredFor.current = ''; aiFiredFor.current = '';
     // LOSSLESS across a product change: mic/photo evidence (photoSpecsRef) is JOURNEY-level, never wiped —
     // the typed name anchors the NEW category while voice/photo facts survive as autofill candidates
     // against the new schema + evidence input to the AI-specs prompt. Buyer page answers DO reset (by design).
@@ -828,15 +827,15 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     }
   }, [committed, unitsResolved, hasUnits, quantity, stage, mcatId]);
 
-  // Owner: if the AI-specs call FAILS (threw/timed-out → 0 questions), don't strand the buyer on a dead page —
-  // auto-advance to the last page. Once per aiKey, so tapping Back to a failed page still shows the fallback copy.
-  useEffect(() => {
-    const aiKey = `${mcatId}:${aiEpoch}`;
-    if (stage === 'aispecs' && aiSpecsError && !aiSpecsLoading && aiSpecs.length === 0 && aiSkippedFor.current !== aiKey) {
-      aiSkippedFor.current = aiKey;
-      setStage('more');
-    }
-  }, [stage, aiSpecsError, aiSpecsLoading, aiSpecs.length, mcatId, aiEpoch]);
+  // Owner (2026-07-23, reversed the earlier auto-skip): on an AI-specs FAILURE we no longer auto-advance past
+  // the page. The buyer stays and sees a RETRY (re-fires getMissingSpecs) plus a quiet "continue anyway" — a
+  // transient gateway hiccup shouldn't silently rob the buyer of the smart questions. Loader shows while in flight.
+  const retryAiSpecs = () => {
+    aiFiredFor.current = '';            // re-arm the once-per-(mcat:epoch) guard
+    setAiSpecsError(false);
+    setAiSpecsLoading(true);            // instant loader feedback
+    setAiEpoch((e) => e + 1);           // new aiKey → the planner effect re-fires
+  };
 
   // ── BuyLead (BL) eligibility (owner) — a BL is generated when the buyer gave a real signal: a QUANTITY, OR at
   // least one PAGE spec (page-1 ISQ + page-2 AI). The last-page profile/logistics fields are NOT specs — and
@@ -1112,7 +1111,19 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         </div>
       )}
       {!aiSpecsLoading && visibleAiSpecs.length === 0 && (
-        <p className="text-sm text-gray-400">{!hasFormLLM() ? 'You can add any extra details on the next step. →' : aiSpecsError ? 'Couldn’t load smart questions right now — you can continue anyway. →' : 'No extra questions needed — your specs already cover it. Continue →'}</p>
+        aiSpecsError ? (
+          // FAILURE → retry (re-fires the planner) + a quiet continue. We DON'T auto-skip (owner) — a transient
+          // gateway blip shouldn't silently drop the smart questions.
+          <div className="flex flex-col items-start gap-3">
+            <p className="text-sm text-gray-500">Couldn’t load smart questions right now.</p>
+            <div className="flex items-center gap-4">
+              <button type="button" onClick={retryAiSpecs} className="flex items-center gap-1.5 px-4 py-2 min-h-[40px] rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700"><RotateCcw size={15} /> Retry</button>
+              <button type="button" onClick={() => setStage('more')} className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-700">Continue anyway →</button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-500">{!hasFormLLM() ? 'You can add any extra details on the next step. →' : 'No extra questions needed — your specs already cover it. Continue →'}</p>
+        )
       )}
       {visibleAiSpecs.map((q) => (
         <div key={q.fieldName} className="space-y-2">
