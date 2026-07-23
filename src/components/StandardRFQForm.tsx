@@ -6,8 +6,9 @@ import {
 import IndiaMartHeader from './IndiaMartHeader';
 import { upsizeImimg } from '../lib/enrichment';
 import { getJSON } from '../lib/api';
-import { emitApiError } from '../lib/emit';
+import { emit, emitApiError, EV } from '../lib/emit';
 import { resolveRfqTheme, rfqThemeClass } from '../lib/theme';
+import { sanitizeQty, qtyIsMeaningful, isValidIndianMobile, isValidGSTIN } from '../utils/formValidation';
 import type { StandardProduct, StandardRequirement } from '../lib/standardProducts';
 
 // "Standard Product" RFQ — a KNOWN brand-catalog SKU (from a brands.indiamart.com "Get Best Price"). The product
@@ -109,6 +110,10 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   const hero = heroBroken ? '' : product.image;
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [showScrollHint, setShowScrollHint] = useState(false); // subtle "more below" amber chevron (in sync with Simple)
+  // Funnel telemetry (in sync with the Simple form so Standard opens/steps/conversions are measurable once the
+  // analytics sink is wired) — form open once on mount, then a page_transition per step.
+  useEffect(() => { emit(EV.FORM_OPEN, { form: 'standard', surface: standalone ? 'standalone' : (isMobile ? 'mobile' : 'popup'), sid: product.sid, loggedIn }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { emit(EV.PAGE_TRANSITION, { form: 'standard', to: stage }); }, [stage]);
   // Reset the scroll to the top on every step change (P3-314 — the new step used to open mid-scroll).
   useEffect(() => { bodyRef.current?.scrollTo?.({ top: 0 }); }, [stage]);
   // "More below" hint — appears only when the body overflows + not scrolled to the end.
@@ -203,7 +208,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       `Requirement (exact product): ${product.title}`,
       ...chosenSpecs().map((s) => `${s.name}: ${s.value}`),
       ...carriedCustom().map((c) => `${c.name.trim()}: ${c.value.trim()}`),
-      quantity.trim() && `Quantity: ${[quantity.trim(), unit].filter(Boolean).join(' ')}`,
+      qtyIsMeaningful(quantity) && `Quantity: ${[quantity.trim(), unit].filter(Boolean).join(' ')}`,
       description.trim() && `Details: ${description.trim()}`,
       timeline && `Delivery timeline: ${timeline}`,
       payment && `Payment terms: ${[payment, payment === 'Credit (Post-Delivery)' && creditPeriod, showPaymentMode && paymentMode].filter(Boolean).join(' · ')}`,
@@ -211,7 +216,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       userLocation.trim() && userLocation.trim() !== deliveryLocation.trim() && `Buyer location: ${userLocation.trim()}`,
       businessType && `Buyer type: ${businessType}`,
       industry.trim() && `Industry: ${industry.trim()}`,
-      isBusinessRole && gstRegistered === true && `GST: ${gstNumber.trim() || 'Registered'}`,
+      isBusinessRole && gstRegistered === true && `GST: ${isValidGSTIN(gstNumber) ? gstNumber.trim().toUpperCase() : 'Registered'}`, // valid GSTIN only, else "Registered"
       isBusinessRole && gstRegistered === false && `GST: Not registered`,
     ]
       .filter(Boolean)
@@ -235,11 +240,23 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       contact: { name: contactName.trim(), mobile: contactMobile.trim(), email: contactEmail.trim() },
       text: buildText(),
     };
+    emit(EV.REQUIREMENT_SUBMITTED, { surface: standalone ? 'standalone' : (isMobile ? 'mobile' : 'popup'), sid: product.sid, hasQty: qtyIsMeaningful(quantity), specCount: chosenSpecs().length, loggedIn: isLoggedIn, form: 'standard' });
     if (onSubmit) onSubmit(req);
     else setSent(true); // demo fallback — no host handler
   };
 
-  const canSubmit = contactName.trim().length > 0 && contactMobile.trim().length >= 10; // P3-313: name is required, not just a valid mobile
+  const canSubmit = contactName.trim().length > 0 && isValidIndianMobile(contactMobile); // name required + a REAL Indian mobile (not just 10 digits — audit)
+  // Terminal CTA never dies silently: if the form isn't submittable, OPEN the contact card, surface a specific
+  // reason, and focus the first empty required field — instead of a greyed-out button with no explanation (audit).
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  const mobileRef = useRef<HTMLInputElement | null>(null);
+  const [showContactError, setShowContactError] = useState(false);
+  const handleGetQuotes = () => {
+    if (canSubmit) { submit(); return; }
+    setContactOpen(true);
+    setShowContactError(true);
+    setTimeout(() => { (contactName.trim() ? mobileRef : nameRef).current?.focus(); }, 60);
+  };
 
   // ── Stepper (2 nodes, mirrors the Simple form) ──
   const stepper = (
@@ -302,7 +319,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Quantity</label>
-          <input type="text" aria-label="Quantity" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="e.g., 500" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 animate-field-highlight" />
+          <input type="text" aria-label="Quantity" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(sanitizeQty(e.target.value))} placeholder="e.g., 500" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 animate-field-highlight" />
         </div>
         <div>
           <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Unit</label>
@@ -477,12 +494,15 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
             ? <span className="flex items-center gap-1.5 text-xs font-medium text-green-600 truncate"><Check size={13} className="shrink-0" /> {contactName || 'Logged in'}</span>
             : <button type="button" onClick={() => { setIsLoggedIn(true); setContactOpen(true); }} className="flex items-center gap-1 shrink-0 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 rounded-lg px-2.5 py-1.5"><LogIn size={13} /> Login</button>}
         </div>
+        {showContactError && !canSubmit && (
+          <p role="alert" className="mt-2 text-xs font-medium text-red-500">Enter your name and a valid 10-digit mobile number to get quotes.</p>
+        )}
         {contactOpen && (
           <div className="space-y-3 mt-4">
-            <input aria-label="Your name" autoComplete="name" value={contactName} onChange={(e) => setContactName(e.target.value)} placeholder="Your name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+            <input ref={nameRef} aria-label="Your name" autoComplete="name" value={contactName} onChange={(e) => setContactName(e.target.value)} placeholder="Your name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
             <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-teal-400 focus-within:border-teal-400">
               <span className="px-3 py-2.5 text-sm text-gray-500 bg-gray-50 border-r border-gray-200">+91</span>
-              <input type="tel" aria-label="Mobile number" autoComplete="tel-national" value={contactMobile} onChange={(e) => setContactMobile(e.target.value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile" className="flex-1 px-3 py-2.5 text-base sm:text-sm outline-none" />
+              <input ref={mobileRef} type="tel" aria-label="Mobile number" autoComplete="tel-national" value={contactMobile} onChange={(e) => setContactMobile(e.target.value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile" className="flex-1 px-3 py-2.5 text-base sm:text-sm outline-none" />
             </div>
             <input type="email" aria-label="Email address (optional)" autoComplete="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="Email (optional)" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
           </div>
@@ -500,7 +520,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
         : <span className="font-bold text-teal-600 text-[15px]">Get Best Price</span>}
       {stage === 'product'
         ? <button type="button" onClick={() => setStage('details')} className="flex items-center gap-1.5 bg-teal-600 text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-teal-700">Next <ChevronRight size={15} /></button>
-        : <button type="button" onClick={submit} disabled={!canSubmit} className={`flex items-center gap-1.5 text-white text-sm font-semibold px-4 py-2 rounded-lg ${canSubmit ? 'bg-teal-600 hover:bg-teal-700' : 'bg-gray-300 cursor-not-allowed'}`}><MessageCircle size={15} /> Get Best Price</button>}
+        : <button type="button" onClick={handleGetQuotes} aria-disabled={!canSubmit} className={`flex items-center gap-1.5 min-h-[40px] text-white text-sm font-semibold px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 ${canSubmit ? '' : 'opacity-90'}`}><MessageCircle size={15} /> Get Best Price</button>}
     </div>
   );
 

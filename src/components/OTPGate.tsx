@@ -3,6 +3,7 @@ import { X, Phone, ShieldCheck, RotateCcw } from 'lucide-react';
 import { localDB } from '../lib/supabase';
 import { emit, EV } from '../lib/emit';
 import { useFocusTrap } from '../lib/useFocusTrap';
+import { isValidIndianMobile } from '../utils/formValidation';
 
 // Demo OTP — always "1234" (owner: keep simulated for now).
 // ⚑ DEV-TODO (real login/SMS flow): replace handleSendOtp/verifyOtp with a real SMS-provider send + verify. When
@@ -20,7 +21,7 @@ interface Props {
 export default function OTPGate({ onVerified, onClose, initialName, initialMobile }: Props) {
   const seedMobile = (initialMobile || '').replace(/\D/g, '').slice(-10);
   const seedName = (initialName || '').trim();
-  const preseeded = /^\d{10}$/.test(seedMobile) && seedName.length > 0;
+  const preseeded = isValidIndianMobile(seedMobile) && seedName.length > 0;
   // Step 1: mobile + name entry
   const [step, setStep] = useState<1 | 2>(preseeded ? 2 : 1);
   const [name, setName] = useState(seedName);
@@ -44,6 +45,8 @@ export default function OTPGate({ onVerified, onClose, initialName, initialMobil
     if (step === 2) {
       setCountdown(60);
       setCanResend(false);
+      setTimeout(() => digitRefs.current[0]?.focus(), 80); // focus the first OTP box (also on preseeded mount) so the keypad + one-time-code autofill engage
+
       timerRef.current = setInterval(() => {
         setCountdown(prev => {
           if (prev <= 1) {
@@ -69,8 +72,8 @@ export default function OTPGate({ onVerified, onClose, initialName, initialMobil
 
   async function handleSendOtp() {
     setSendError('');
-    if (!/^\d{10}$/.test(mobile)) {
-      setSendError('Enter a valid 10-digit mobile number.');
+    if (!isValidIndianMobile(mobile)) {
+      setSendError('Enter a valid 10-digit Indian mobile number.');
       return;
     }
     if (!name.trim()) {

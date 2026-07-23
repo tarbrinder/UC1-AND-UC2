@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { getJSON, postJSON } from '../lib/api';
 import { fetchProductSuggestions, filterProducts, stripQuantityPrefix, parseQuantityFromName } from '../utils/productNames';
+import { sanitizeQty, qtyIsMeaningful, isValidGSTIN } from '../utils/formValidation';
 import type { ISQSpec, RFQFormData } from '../types';
 import { calcScore, getScoreColor, getScoreLabel, type ScoreCheck } from '../utils/score';
 import OptionChips from './OptionChips';
@@ -277,6 +278,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   useEffect(() => { if (isLoggedIn) applyLoggedInDefaults(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [isLoggedIn]);
 
   const suggestDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suggestTokRef = useRef(0); // monotonic guard so a stale suggestion fetch can't overwrite a newer query's results
   const qtyRef = useRef<HTMLInputElement | null>(null);
   const productInputRef = useRef<HTMLInputElement | null>(null);
   const suppressFocusOpenRef = useRef(false); // the mount auto-focus must NOT pop the suggestion/recents dropdown — only a genuine focus/tap should
@@ -300,6 +302,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   useFocusTrap(showVoice, voiceRef);                         // P2-228: trap Tab within the voice-input overlay while open
   const photoMcatRef = useRef('');                           // the mcat the current photo/voice evidence belongs to (P0-01 mcat-scoping)
   const blToastShownRef = useRef(false);                     // one-time "requirement ready" toast when BL becomes eligible
+  const dispatchedRef = useRef(false);                       // one-shot BuyLead guard — no duplicate BL / double conversion on double-tap or edit-from-results
   const pendingUnitRef = useRef('');                         // a spoken unit stashed until the category's unitOptions resolve (P2-205)
 
   const surfaceName = standalone ? 'standalone' : 'popup';
@@ -347,6 +350,10 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // leaving the page on the first press. A sentinel history entry is pushed on mount and re-armed after each
   // intercepted Back; at the first stage (or the terminal results stage) Back performs the normal close/exit.
   useEffect(() => {
+    // ONLY on full-page shells (mobile MSite / standalone) — where Back-steps-through-stages is the MSite
+    // expectation. The embedded desktop popup must NOT hijack the host page's browser Back (it left a stale
+    // sentinel that broke the dashboard's Back after closing — audit).
+    if (!isMobile && !standalone) return;
     window.history.pushState({ rfq: true }, '');
     const onPop = () => {
       const s = stageRef.current;
@@ -531,14 +538,19 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     if (!val.trim()) { setMcatId(''); setIsqSpecs([]); setSpecValues({}); setUnitOptions([]); setUnit(''); setUnitsResolved(false); setProductImageUrl(''); setProductImages([]); }
     if (val.trim().length < 2) { setSuggestions([]); setShowDropdown(false); return; }
     setSuggestions(filterProducts(val)); setShowDropdown(true);
-    suggestDebounce.current = setTimeout(async () => { const live = await fetchProductSuggestions(val); if (live.length) setSuggestions(live); }, 200);
+    // Monotonic token: a slow fetch for an OLDER query ('t') must not overwrite the newer one's ('tm') results.
+    const tok = ++suggestTokRef.current;
+    suggestDebounce.current = setTimeout(async () => { const live = await fetchProductSuggestions(val); if (live.length && tok === suggestTokRef.current) setSuggestions(live); }, 200);
   };
 
   // Derive qty/unit options from raw ISQ rows (mapDisplaySpecs strips these, so read them first).
   const deriveUnits = (rows: unknown): string[] => {
     const flat = (Array.isArray(rows) ? rows : []).flatMap((s) => (Array.isArray(s) ? s : [s])).filter((s): s is ISQSpec => !!(s && (s as ISQSpec).IM_SPEC_MASTER_DESC));
     const u: string[] = [];
-    for (const qs of flat.filter((s) => /quantity|qty|unit/i.test(s.IM_SPEC_MASTER_DESC))) if (qs.IM_SPEC_OPTIONS_DESC) qs.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter((o) => o && o.toLowerCase() !== 'none').forEach((o) => { if (!u.includes(o)) u.push(o); });
+    // Pull unit options ONLY from a field that IS a dedicated quantity/unit field (same token test that hides it
+    // from the spec list) — a substring /unit|quantity/ wrongly matched real specs like "Unit Weight" and shipped
+    // a bogus order unit (e.g. "1 kg") to sellers (audit).
+    for (const qs of flat.filter((s) => isQtyUnitField(s.IM_SPEC_MASTER_DESC))) if (qs.IM_SPEC_OPTIONS_DESC) qs.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter((o) => o && o.toLowerCase() !== 'none').forEach((o) => { if (!u.includes(o)) u.push(o); });
     return u;
   };
   const commitProduct = useCallback(async (name: string) => {
@@ -619,7 +631,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       const unitOpts = deriveUnits(isqJson?.DATA);
       // Use ONLY the qty/unit the API provides. Some mcats carry none (e.g. Diesel Generator) — then
       // quantity + unit are simply hidden (and not required), matching V3.
-      if (unitOpts.length) { setUnitOptions(unitOpts); setUnit(matchUnit(unitOpts, parsedQty?.unit)); }
+      // only-if-empty setUnit: the parallel getISQs may have populated units first and the buyer may have already
+      // TAPPED one — never clobber a user's selection in this commit-time race (audit).
+      if (unitOpts.length) { setUnitOptions((prev) => (prev.length ? prev : unitOpts)); setUnit((u) => u || matchUnit(unitOpts, parsedQty?.unit)); }
       setUnitsResolved(true); // units are known now → Continue can un-gate even for a spec-less category
       const fast = mapDisplaySpecs(flat as Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }>);
       // P2-208: clear the spinner as soon as GetIsq answers — even with ZERO display specs (a spec-light category).
@@ -675,6 +689,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       if (!gotSomething) showFeedback("Couldn't read that photo — try another, or type the product name.", 'warning');
     } catch (e) {
       emit(EV.INPUT_SOURCE_USED, { source: 'photo', success: false });
+      emitApiError('analyzeImage', e, { mcatId }); // the ONLY AI feature — its outages (401/429/timeout) must be visible in telemetry
       const msg = e instanceof Error && e.message === 'too-large' ? 'That image is over 5 MB — please pick a smaller photo.'
         : e instanceof Error && e.message === 'undecodable' ? "Couldn't read that image format — try a JPG or PNG."
         : "Couldn't read that photo — try again, or type the product name.";
@@ -696,15 +711,18 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       if (r.quantityUnit) { if (unitOptions.length) setUnit(matchUnit(unitOptions, r.quantityUnit)); else pendingUnitRef.current = r.quantityUnit; }
       if (r.deliveryTimeline) setDeliveryTimeline(r.deliveryTimeline);
       if (r.paymentTerms) setPaymentTerms(r.paymentTerms);
-      if (r.deliveryLocation) applyUserCity(r.deliveryLocation);   // P2-225: lossless — was silently dropped
+      // A spoken DELIVERY city sets the DELIVERY field (not the buyer's own IP/GPS-seeded location); if it differs,
+      // un-link "same as my location" so both are preserved instead of collapsing origin↔destination (audit).
+      if (r.deliveryLocation) { setDeliveryLocation(r.deliveryLocation); if (r.deliveryLocation.trim() && r.deliveryLocation.trim() !== userLocation.trim()) setSameAsLoc(false); }
       if (r.creditPeriod) setCreditPeriod(r.creditPeriod);          // P2-225: lossless — was silently dropped
       const specs = { ...(r.mappedSpecs || {}) }; (r.customSpecs || []).forEach((c) => { if (c.fieldName) specs[c.fieldName] = c.value; });
       applyExtractedSpecs(specs);
       const gotSomething = !!(r.productName || r.quantity || Object.keys(specs).length);
       emit(EV.INPUT_SOURCE_USED, { source: 'mic', success: gotSomething });
       if (!gotSomething) showFeedback("Couldn't catch that — try again.", 'warning');
-    } catch {
+    } catch (e) {
       emit(EV.INPUT_SOURCE_USED, { source: 'mic', success: false });
+      emitApiError('voiceToSpecs', e, { mcatId });
       showFeedback("Couldn't process the recording — try again.", 'warning');
     } finally { setAiBusy(''); }
   };
@@ -773,7 +791,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       : '';
     return [
       `Requirement: ${productName}`,
-      quantity && `Quantity: ${[quantity, unit].filter(Boolean).join(' ')}`,
+      qtyIsMeaningful(quantity) && `Quantity: ${[quantity, unit].filter(Boolean).join(' ')}`,
       ...allSpecEntries.map(([k, v]) => `${k}: ${v}`),
       deliveryLocation && `Deliver to: ${deliveryLocation}`,
       userLocation.trim() && userLocation.trim().toLowerCase() !== deliveryLocation.trim().toLowerCase() && `Buyer location: ${userLocation.trim()}`,
@@ -783,7 +801,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       industry.trim() && `Industry: ${industry.trim()}`,
       // Purchase cadence, when relevant, is an LLM-driven AI-spec (page 2) → already in allSpecEntries above.
       // GST only for a business role (never for an individual buyer), and only once answered.
-      isBusinessRole && gstRegistered === true && `GST: ${gstNumber.trim() || 'Registered'}`,
+      isBusinessRole && gstRegistered === true && `GST: ${isValidGSTIN(gstNumber) ? gstNumber.trim().toUpperCase() : 'Registered'}`, // ship the number ONLY if it's a valid GSTIN, else just "Registered" (never garbage)
       isBusinessRole && gstRegistered === false && `GST: Not registered`,
       requirementNotes.trim() && `Notes: ${requirementNotes.trim()}`,
     ].filter(Boolean).join('\n');
@@ -815,7 +833,12 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // ── BuyLead (BL) eligibility (owner) — a BL is generated when the buyer gave a real signal: a QUANTITY, OR at
   // least one PAGE spec (page-1 ISQ + page-2 AI). The last-page profile/logistics fields are NOT specs — and
   // allSpecEntries is exactly {specValues, aiSpecValues}, so it already excludes them. ──
-  const blEligible = quantity.trim() !== '' || allSpecEntries.length > 0;
+  // BL-eligible = the buyer gave a real signal. Besides qty / a filled spec, ACCEPT free-text notes, AND accept a
+  // committed product in a category that genuinely has nothing to fill (no units + no page-1 specs) — e.g. a
+  // service / thin-schema requirement. Without this last clause those buyers hit a hard dead-end (can't submit a
+  // fully-typed requirement — the P1 the audit flagged). Last-page profile/logistics fields are NOT specs.
+  const blEligible = qtyIsMeaningful(quantity) || allSpecEntries.length > 0 || requirementNotes.trim() !== ''
+    || (committed && unitsResolved && !hasUnits && isqSpecs.length === 0);
   useEffect(() => {
     if (blEligible && !blToastShownRef.current) {
       blToastShownRef.current = true;
@@ -829,12 +852,14 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   //   and gate the results/"sent" UI on its resolution. Include the image, all specs, qty, contact + the lossless
   //   text below. Today it's a STUB: emit the funnel conversion + hand the requirement to the host via onSubmit.
   const dispatchBuyLead = (contactOverride?: { name?: string; mobile?: string }) => {
+    if (dispatchedRef.current) return; // idempotent: double-tap / edit-from-results must not fire a 2nd BuyLead or double-count the conversion
+    dispatchedRef.current = true;
     const contact = { name: contactOverride?.name || contactName, mobile: contactOverride?.mobile || contactMobile, email: contactEmail };
     const req: RFQSubmission = {
       productName, mcatId, text: buildRequirementText(), quantity, unit,
       specs: Object.fromEntries(allSpecEntries), contact, imageBase64: imageBase64 || undefined,
     };
-    emit(EV.REQUIREMENT_SUBMITTED, { surface: surfaceName, mcatId, specCount: allSpecEntries.length, hasQty: !!quantity.trim(), usedImage: !!imageBase64, categoryMode, loggedIn: isLoggedIn });
+    emit(EV.REQUIREMENT_SUBMITTED, { surface: surfaceName, mcatId, specCount: allSpecEntries.length, hasQty: qtyIsMeaningful(quantity), usedImage: !!imageBase64, categoryMode, loggedIn: isLoggedIn });
     onSubmit?.(req);
   };
 
@@ -916,7 +941,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Quantity</label>
-              <input ref={qtyRef} type="text" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/[^0-9.]/g, ''))} onKeyDown={(e) => { if (e.key === 'Enter' && canContinueProduct) setStage('specs'); }} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 animate-field-highlight" />
+              <input ref={qtyRef} type="text" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(sanitizeQty(e.target.value))} onKeyDown={(e) => { if (e.key === 'Enter' && canContinueProduct) setStage('specs'); }} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 animate-field-highlight" />
             </div>
             <div>
               <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Unit</label>
@@ -932,7 +957,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
           {quantity.trim() && (
             <div>
               <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Quantity</label>
-              <input ref={qtyRef} type="text" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/[^0-9.]/g, ''))} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+              <input ref={qtyRef} type="text" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(sanitizeQty(e.target.value))} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
             </div>
           )}
           {isMobile && <button type="button" disabled={!canContinueProduct} onClick={() => canContinueProduct && setStage('specs')} className={`w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors ${canContinueProduct ? 'bg-teal-600 hover:bg-teal-700 text-white' : 'bg-gray-100 text-gray-300'}`}>Continue <ArrowRight className="w-4 h-4" /></button>}
@@ -1227,7 +1252,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
                   <div className="pt-1 space-y-2 animate-field-in">
                     <textarea readOnly rows={5} value={`Hi ${s.name}, I need:\n${buildRequirementText()}`} className="w-full text-xs text-gray-700 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 resize-none" />
                     <div className="flex items-center gap-2">
-                      <button type="button" onClick={() => { setSentTo((p) => new Set(p).add(s.name)); setOpenEnquiry(null); }} className="flex-1 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold">Send</button>
+                      <button type="button" onClick={() => { setSentTo((p) => new Set(p).add(s.name)); setOpenEnquiry(null); showFeedback(`Enquiry sent to ${s.name}`, 'success'); }} className="flex-1 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold">Send</button>
                       {isMobile && <a href={waDeeplink()} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-[#25D366] text-white text-sm font-semibold"><MessageCircle className="w-4 h-4" /> WhatsApp</a>}
                     </div>
                   </div>
@@ -1274,7 +1299,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         {isMobile && stage !== 'results' && (() => {
           const holding = stage === 'aispecs' && aiSpecsLoading; // P2-203: hold on mobile while smart questions load (was a silent skip)
           return (
-            <button type="button" disabled={holding} onClick={() => { if (stage === 'specs') setStage('aispecs'); else if (stage === 'aispecs') setStage('more'); else submit(); }} className={`flex items-center gap-1 shrink-0 text-white text-xs font-semibold px-3 py-1.5 rounded-lg ${holding ? 'bg-gray-300 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700'}`}>
+            <button type="button" disabled={holding} onClick={() => { if (stage === 'specs') setStage('aispecs'); else if (stage === 'aispecs') setStage('more'); else submit(); }} className={`flex items-center gap-1 shrink-0 text-white text-sm font-semibold min-h-[40px] px-4 py-2 rounded-lg ${holding ? 'bg-gray-300 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700'}`}>
               {holding ? 'Preparing…' : stage === 'more' ? 'Get Quotes' : 'Next'} {!holding && <ArrowRight size={13} />}
             </button>
           );

@@ -34,7 +34,7 @@ export default function App() {
   // ⚑ DEV-TODO: production resolves the product from a real brand-product API by sid (the demo seeds one SKU).
   if (rfqMode === 'standard') {
     const prod = getStandardProduct(sidParam || '456523');
-    if (prod) return <StandardRFQForm standalone product={prod} onClose={() => { window.location.href = window.location.pathname; }} />;
+    if (prod) return <StandardRFQForm standalone loggedIn={loginParam} product={prod} onClose={() => { window.location.href = window.location.pathname; }} />;
     return <RouteNotFound detail={`No product found for sid "${sidParam}".`} />; // P2-248: don't fall through to the internal dashboard
   }
   // Any OTHER non-empty ?rfq value is a bad/stale link → explicit not-found, not a silent MainApp mount (P2-234).
