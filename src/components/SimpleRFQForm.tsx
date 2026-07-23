@@ -187,9 +187,10 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const [specValues, setSpecValues] = useState<Record<string, string>>({});
   const [specsLoading, setSpecsLoading] = useState(false);
   const [mcatId, setMcatId] = useState('');
-  // Page-1 buyer-spec hints (fast getSpecHints): product-name pre-fills + not-applicable + field hints.
+  // Page-1 buyer-spec hints (fast getSpecHints): product-name pre-fills + field hints. (getSpecHints also returns
+  // `redundantISQSpecs`, but we no longer HIDE specs with it — async AI must ENRICH, never yank an already-shown
+  // field. Hiding caused specs to "appear then vanish" ~1s after the page rendered; we show all buyer specs.)
   const [isqHints, setIsqHints] = useState<Record<string, string>>({});
-  const [redundantISQSpecs, setRedundantISQSpecs] = useState<string[]>([]);
   // Page-2 AI specs (getMissingSpecs over the live category node): the best 5 options-only questions.
   const [aiSpecs, setAiSpecs] = useState<AiSpecQuestion[]>([]);
   const [aiSpecsLoading, setAiSpecsLoading] = useState(false);
@@ -200,7 +201,6 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const [resolveError, setResolveError] = useState(false); // mcat-resolve network failure (distinct from "not a category")
   // Category CORPUS status (debug chip). The form fetches the raw per-call corpus fresh on mcat-known and
   // feeds it WHOLE to the single page-2 planner call — no n8n distill LLM, no cache.
-  const [catStatus, setCatStatus] = useState<{ state: 'idle' | 'fetching' | 'ready' | 'none' | 'error'; count: number }>({ state: 'idle', count: 0 });
   const catFetchTok = useRef(0);
   const categoryCorpusRef = useRef<unknown>(null); // raw category corpus (or legacy intelligence obj); passed as-is to the planner
   useEffect(() => () => { catFetchTok.current++; }, []); // cancel any in-flight corpus fetch on unmount
@@ -288,6 +288,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const productNameRef = useRef('');        // live product name for the photo/voice "don't overwrite a typed name" guard
   const sellerSpecsRef = useRef<string[]>([]); // getISQs SELLER-flagged spec names → page-2 AI input (never rendered on page-1)
   const bodyScrollRef = useRef<HTMLDivElement | null>(null); // the flow-body scroller — reset to top on every stage change (P2-216)
+  const [showScrollHint, setShowScrollHint] = useState(false); // subtle "more below" amber chevron when the flow body overflows
   const prevStageRef = useRef<Stage>('product');            // for the page_transition funnel event
   const stageRef = useRef<Stage>('product');                // live stage mirror for the popstate/back handler (P1-127)
   const voiceRef = useRef<HTMLDivElement | null>(null);      // voice-overlay container for the focus trap (P2-228)
@@ -319,6 +320,22 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       prevStageRef.current = stage;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
+
+  // Subtle "more below" scroll hint (owner) — a small amber chevron at the bottom of the flow body, shown ONLY
+  // when the page actually overflows and isn't scrolled to the end. Watches the flow scroller (scroll + content
+  // resize) so it appears/disappears live as specs load or the buyer scrolls. Same on all Simple variants.
+  useEffect(() => {
+    const el = bodyScrollRef.current;
+    if (!el) { setShowScrollHint(false); return; }
+    const update = () => setShowScrollHint(el.scrollHeight - el.scrollTop - el.clientHeight > 40);
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    ro?.observe(el);
+    if (ro && el.firstElementChild) ro.observe(el.firstElementChild); // content grows async (specs/AI load)
+    const t1 = setTimeout(update, 400); const t2 = setTimeout(update, 1500);
+    return () => { el.removeEventListener('scroll', update); ro?.disconnect(); clearTimeout(t1); clearTimeout(t2); };
   }, [stage]);
 
   // P1-127: make the browser/hardware Back button step through form stages (MSite expectation) instead of
@@ -433,9 +450,17 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       getSpecHints(name, specNames, withOpts, '', photoSpecsRef.current, RFQ_LLM_KEY).then((h) => {
         if (hintsFiredFor.current !== hintsKey || gen !== commitGen.current) return;
         setIsqHints(h.isqHints || {});
-        setRedundantISQSpecs(h.redundantISQSpecs || []);
+        // h.redundantISQSpecs intentionally IGNORED — we no longer hide specs (see the state comment above).
+        // AUTOFILL ONLY ON AN EXPLICIT SIGNAL (owner: "don't autofill unless it's in the product name / photo / mic").
+        // getSpecHints can INFER/guess a spec value from the product name (e.g. "diesel generator" → Brand: Ashok
+        // Leyland); we DROP any pre-fill whose value doesn't literally appear in the typed name or the photo/mic
+        // evidence facts. So "30 kVA diesel generator" pre-fills Power=30 kVA (explicit), but a bare "diesel generator"
+        // pre-fills nothing it merely guessed.
         if (h.knownFromProductName && Object.keys(h.knownFromProductName).length) {
-          setSpecValues((prev) => { const next = { ...prev }; for (const [k, v] of Object.entries(h.knownFromProductName)) { const hit = specNames.find((n) => n.toLowerCase() === k.toLowerCase()); if (hit && v && !next[hit]) next[hit] = v; } return next; });
+          const normTxt = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const explicit = normTxt(`${name} ${Object.values(photoSpecsRef.current || {}).join(' ')}`);
+          const isExplicit = (v: string) => { const nv = normTxt(v); return nv.length >= 2 && explicit.includes(nv); };
+          setSpecValues((prev) => { const next = { ...prev }; for (const [k, v] of Object.entries(h.knownFromProductName)) { const hit = specNames.find((n) => n.toLowerCase() === k.toLowerCase()); if (hit && v && isExplicit(v) && !next[hit]) next[hit] = v; } return next; });
         }
       }).catch((e) => emitApiError('getSpecHints', e, { mcatId }));
     }
@@ -479,21 +504,17 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // to re-plan WITH it. Fresh Redash-backed fetch can take a few seconds → fired at commit to hide latency.
   useEffect(() => {
     // SIMPLE mode: never fetch the category corpus — the planner runs on buyer + seller + user input only.
-    if (categoryMode !== 'category') { categoryCorpusRef.current = null; setCatStatus({ state: 'idle', count: 0 }); return; }
-    if (!mcatId) { categoryCorpusRef.current = null; setCatStatus({ state: 'idle', count: 0 }); return; }
+    if (categoryMode !== 'category') { categoryCorpusRef.current = null; return; }
+    if (!mcatId) { categoryCorpusRef.current = null; return; }
     const tok = ++catFetchTok.current;
     categoryCorpusRef.current = null;
-    setCatStatus({ state: 'fetching', count: 0 });
     fetchCategoryCorpus(mcatId).then((r) => {
       if (catFetchTok.current !== tok) return;                 // stale (mcat changed / unmount)
       if (r.status === 'hit' && r.corpus) {
         categoryCorpusRef.current = r.corpus;
-        setCatStatus({ state: 'ready', count: r.count });
         if (aiFiredFor.current) { aiFiredFor.current = ''; setAiEpoch((e) => e + 1); } // planner already ran without it → re-plan with the corpus
-      } else {
-        setCatStatus({ state: r.status === 'error' ? 'error' : 'none', count: 0 });
       }
-    }).catch((e) => { emitApiError('fetchCategoryCorpus', e, { mcatId }); if (catFetchTok.current === tok) setCatStatus({ state: 'error', count: 0 }); });
+    }).catch((e) => emitApiError('fetchCategoryCorpus', e, { mcatId }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mcatId]);
 
@@ -552,7 +573,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     // the typed name anchors the NEW category while voice/photo facts survive as autofill candidates
     // against the new schema + evidence input to the AI-specs prompt. Buyer page answers DO reset (by design).
     if (Object.keys(photoSpecsRef.current).length) pendingAiSpecs.current = { ...photoSpecsRef.current };
-    setIsqHints({}); setRedundantISQSpecs([]); setAiSpecs([]); setAiSpecValues({}); setAiSpecsError(false); setAiSpecsLoading(hasFormLLM());
+    setIsqHints({}); setAiSpecs([]); setAiSpecValues({}); setAiSpecsError(false); setAiSpecsLoading(hasFormLLM());
     // P2-206: the 3 secondary catalog calls (getISQs enrichment · McatDtl image/category · IMSearchAPI gallery) all
     // depend only on `id`, so fire them CONCURRENTLY with the primary GetIsq below instead of serially after its
     // await. Page-1 spec correctness no longer depends on ordering: getISQs appends by functional merge, and GetIsq's
@@ -695,7 +716,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     // minus any promoted to a page-1 field. P3-316: answers de-matched by a re-plan simply aren't counted.
     const isqNames = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase()));
     const visAi = aiSpecs.filter((q) => !isqNames.has(q.fieldName.toLowerCase()));
-    const visSpecs = isqSpecs.filter((s) => !redundantISQSpecs.includes(s.IM_SPEC_MASTER_DESC) || specValues[s.IM_SPEC_MASTER_DESC]);
+    const visSpecs = isqSpecs; // all buyer specs count toward the score (no redundant-hide)
     const aiTotal = visAi.length;
     const aiAnswered = visAi.filter((q) => (aiSpecValues[q.fieldName] || '').trim()).length;
     return calcScore(
@@ -704,10 +725,15 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       // frequencyApplicable:false — cadence is now an LLM-driven AI-spec, not a static field.
       visSpecs, !!imageBase64, { quantityApplicable: unitOptions.length > 0, profileApplicable: true, frequencyApplicable: false, gstApplicable: isBusinessRole, aiSpecTotal: aiTotal, aiSpecAnswered: aiAnswered },
     );
-  }, [productName, quantity, specValues, deliveryLocation, deliveryTimeline, paymentTerms, buyerType, industry, gstRegistered, gstNumber, isBusinessRole, isqSpecs, redundantISQSpecs, imageBase64, unitOptions.length, aiSpecs, aiSpecValues]);
+  }, [productName, quantity, specValues, deliveryLocation, deliveryTimeline, paymentTerms, buyerType, industry, gstRegistered, gstNumber, isBusinessRole, isqSpecs, imageBase64, unitOptions.length, aiSpecs, aiSpecValues]);
 
-  // The next unfilled, applicable score item — powers the "Fill next" nudge in the score popover + rail.
-  const nextCheck = scoreDetails.checks.find((c) => c.applicable && !c.done);
+  // The next unfilled, applicable score item — powers the "Fill next" nudge. It must MOVE FORWARD with the buyer:
+  // once they've passed a stage, don't keep nagging about a skipped/optional item behind them (e.g. "Product image"
+  // while they're on the Details page). So we only surface an unfilled item AT or AHEAD of the current stage; if
+  // nothing ahead is unfilled, the nudge simply hides (no stale back-pointer). (V3/V4 behave the same way.)
+  const checkStageIdx = (c: ScoreCheck): number =>
+    stageNodeIdx(c.group === 'Product' ? 'product' : c.group === 'Specs' ? (/smart/i.test(c.label) ? 'aispecs' : 'specs') : 'more');
+  const nextCheck = scoreDetails.checks.find((c) => c.applicable && !c.done && checkStageIdx(c) >= stageNodeIdx(stage));
 
   // R3 steal — score "+N" delta flash: when the total rises, float the gained points near the score for ~1s.
   useEffect(() => {
@@ -991,11 +1017,13 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     </>
   );
 
-  // Desktop-only anchored popover (mobile now renders locationFields inline — no drawer).
+  // Location editor: a BOTTOM-SHEET DRAWER on mobile (owner prefers the drawer — inline took too much last-page
+  // space), an ANCHORED popover on desktop. Same controls, two presentations via the sm: breakpoint.
   const renderLocationPopover = (align: 'left' | 'right' = 'right') => (
     <>
-      <div className="fixed inset-0 z-30" onClick={() => setLocationEditing(false)} />
-      <div className={`absolute z-40 top-full mt-2 w-80 max-w-[calc(100vw-3rem)] rounded-xl border border-gray-100 p-3 animate-modal-in text-left space-y-3 bg-white shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)] ${align === 'left' ? 'left-0' : 'right-0'}`} onClick={(e) => e.stopPropagation()}>
+      <div className="fixed inset-0 z-30 bg-black/20 sm:bg-transparent" onClick={() => setLocationEditing(false)} />
+      <div className={`fixed inset-x-0 bottom-0 z-40 w-full rounded-t-2xl border-t border-gray-100 p-4 animate-modal-in text-left space-y-3 bg-white shadow-[0_-8px_32px_-4px_rgba(30,42,58,0.18)] sm:absolute sm:inset-x-auto sm:bottom-auto sm:top-full sm:mt-2 sm:w-80 sm:max-w-[calc(100vw-3rem)] sm:rounded-xl sm:border sm:p-3 sm:shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)] ${align === 'left' ? 'sm:left-0' : 'sm:right-0'}`} style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }} onClick={(e) => e.stopPropagation()}>
+        <div className="w-9 h-1 bg-gray-200 rounded-full mx-auto mb-1 sm:hidden" />
         {locationFields}
         <button type="button" onClick={() => setLocationEditing(false)} className="w-full py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700">Done</button>
       </div>
@@ -1015,9 +1043,10 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     );
   };
 
-  // Hide specs the product name makes not-applicable (getSpecHints.redundantISQSpecs), but never hide one
-  // the buyer already answered.
-  const visibleSpecs = isqSpecs.filter((s) => !redundantISQSpecs.includes(s.IM_SPEC_MASTER_DESC) || specValues[s.IM_SPEC_MASTER_DESC]);
+  // Show ALL buyer specs (owner: "show all buyer specs on page 1"). We deliberately DON'T hide "redundant" ones
+  // from getSpecHints — hiding them asynchronously made specs "appear then vanish" ~1s after the page rendered
+  // (the owner-reported bug). getSpecHints still PRE-FILLS known values + adds hints; it just never removes a field.
+  const visibleSpecs = isqSpecs;
   const specBody = specsLoading && isqSpecs.length === 0 ? (
     <p className="text-xs text-gray-400 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Fetching category spec fields…</p>
   ) : isqSpecs.length === 0 ? (
@@ -1036,19 +1065,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const visibleAiSpecs = aiSpecs.filter((q) => !isqNameSet.has(q.fieldName.toLowerCase()));
   const aiSpecsBody = (
     <div className="space-y-5">
-      {/* Category-corpus status (Category mode only). It is a NON-BLOCKING enrichment: if the n8n/Redash corpus
-          errors or is slow, the planner runs on the same buyer+seller+intent inputs — one source is just absent.
-          So error/none read as "Using smart fallback", never a scary red "Error". */}
-      {categoryMode === 'category' && (
-        <div className="flex items-center flex-wrap gap-2 text-xs bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
-          <span className="font-semibold text-gray-500">Category corpus</span>
-          <span className={`inline-flex items-center gap-1.5 font-medium ${catStatus.state === 'ready' ? 'text-green-600' : catStatus.state === 'fetching' ? 'text-amber-600' : 'text-gray-400'}`}>
-            {catStatus.state === 'fetching' && <span className="w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />}
-            {catStatus.state === 'ready' ? (catStatus.count ? `${catStatus.count} calls ✓` : 'loaded ✓') : catStatus.state === 'fetching' ? 'Fetching…' : (catStatus.state === 'error' || catStatus.state === 'none') ? 'Using smart fallback' : '—'}
-            {mcatId && <span className="text-gray-400 font-normal">· mcat {mcatId}</span>}
-          </span>
-        </div>
-      )}
+      {/* (Category-corpus status chip removed — it was a dev/debug line, not for buyers. The corpus still loads
+          in the background for Category mode; it's just no longer surfaced.) */}
       {aiSpecsLoading && visibleAiSpecs.length === 0 && (
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-gray-400 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Preparing smart questions…</p>
@@ -1076,12 +1094,16 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // ── Last page pieces (owner order): Logistics & Payment FIRST, then About You, then Contact (collapsed). ──
   const logisticsBody = (
       <div className="rounded-xl border border-gray-200 p-4 sm:p-5 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
-        {/* MOBILE: delivery location lives HERE (header is crowded on MSite) and is INLINE — no drawer (P1-106).
-            Desktop keeps the compact header pill + anchored popover. */}
+        {/* MOBILE: delivery location is a COMPACT ROW that opens a bottom-sheet DRAWER (owner prefers the drawer —
+            the inline fields ate too much of the last page). Desktop keeps the header pill + anchored popover. */}
         {isMobile && (
-          <div className="mb-4 pb-4 border-b border-gray-100 space-y-3">
-            <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 tracking-wide"><MapPin size={13} className="text-teal-500" /> Delivery location</p>
-            {locationFields}
+          <div className="mb-4 relative">
+            <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><MapPin size={13} className="text-teal-500" /> Delivery location</p>
+            <button type="button" onClick={() => { setScoreOpen(false); setLocationEditing((v) => !v); }} className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2.5 text-sm text-gray-700 hover:border-teal-300">
+              <span className="truncate flex items-center gap-1.5"><MapPin size={13} className="text-gray-300 shrink-0" />{deliveryLocation || detectedCity || 'Select delivery city'}</span>
+              <Pencil size={13} className="text-gray-400 shrink-0" />
+            </button>
+            {locationEditing && renderLocationPopover('left')}
           </div>
         )}
         <div className="flex flex-col sm:grid sm:grid-cols-2 gap-4 sm:gap-6">
@@ -1273,7 +1295,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
                   <Icon size={13} />
                   {running && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-green-500 ring-2 ring-white animate-pulse" />}
                 </span>
-                {(active || !isMobile) && <span className="whitespace-nowrap">{node.label}</span>}
+                {/* Show only the ACTIVE label until there's real room (lg+). On narrow/zoomed desktop widths the
+                    4 full labels ("Your Profile & Delivery" is long) overflowed the stepper — hide non-active below lg. */}
+                <span className={`whitespace-nowrap ${active ? '' : 'hidden lg:inline'}`}>{node.label}</span>
               </button>
               {i < STEPPER.length - 1 && <span className={`h-px shrink-0 ${isMobile ? 'w-3' : 'w-2.5'} ${done ? 'bg-teal-300' : 'bg-gray-200'}`} />}
             </div>
@@ -1283,7 +1307,15 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       <div className="mx-5 mt-2 h-0.5 bg-gray-100 rounded-full overflow-hidden shrink-0"><div className="h-full bg-orange-400 rounded-full transition-all duration-500" style={{ width: progressPercent + '%' }} /></div>
       </>}
       {aiBusy && <div className="shrink-0 mx-5 mt-2 px-3 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
-      <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">{stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}</div> : resultsBody}</div>
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">{stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}</div> : resultsBody}</div>
+        {/* Subtle "more below" hint — appears only when the body overflows + not at the end; tap to scroll on. */}
+        {showScrollHint && (
+          <button type="button" aria-label="Scroll down for more" onClick={() => bodyScrollRef.current?.scrollBy({ top: bodyScrollRef.current.clientHeight * 0.8, behavior: 'smooth' })} className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center justify-center w-7 h-7 rounded-full bg-amber-100/90 text-amber-500 ring-1 ring-amber-200 shadow-[0_2px_8px_-1px_rgba(0,0,0,0.15)] backdrop-blur-sm animate-bounce">
+            <ChevronDown size={16} />
+          </button>
+        )}
+      </div>
       {/* Footer = DESKTOP only. On mobile it's redundant: the header has the ← back-arrow + the sticky Next/
           Get-Quotes CTA (keyboard-safe), and the stepper shows the step — so the bottom bar is dropped (owner). */}
       {stage !== 'results' && !isMobile && (
@@ -1451,7 +1483,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         <div className={`${themeClass} fixed inset-0 z-50 bg-gray-50 flex flex-col`}>
           <IndiaMartHeader firstName={isLoggedIn && contactName ? contactName.split(' ')[0] : ''} onExit={handleExit} />
           <div className="flex-1 min-h-0 flex overflow-hidden">
-            {scoreRail}
+            {/* Score rail is a "Post a Requirement" aid — HIDE it on the results/curated-sellers page (owner:
+                once the buyer is picking sellers, the score/checklist is a distraction). Sellers get full width. */}
+            {stage !== 'results' && scoreRail}
             {/* Only the product page needs this outer column to scroll; on flow pages singlePanel is h-full and
                 its OWN body scrolls (with the scroll-reset ref). Keeping the outer scrollable on flow pages left
                 residual scrollTop from the product page, pushing the next stage up out of view (owner's scroll bug). */}

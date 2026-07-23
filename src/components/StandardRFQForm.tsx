@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   ExternalLink, Plus, Trash2, CheckCircle2, MessageCircle, Package, Truck,
-  Check, ArrowLeft, ChevronRight, Lock, LogIn, LocateFixed,
+  Check, ArrowLeft, ChevronRight, ChevronUp, ChevronDown, Lock, LogIn, LocateFixed, MapPin, Pencil,
 } from 'lucide-react';
 import IndiaMartHeader from './IndiaMartHeader';
 import { upsizeImimg } from '../lib/enrichment';
@@ -29,6 +29,8 @@ const UNITS = ['Meter', 'Roll', 'Km', 'Piece', 'Nos'];
 // Last-page option sets kept IN SYNC with the Simple form (owner: "last page options not in sync with mobile form").
 const TIMELINES = ['Immediate', 'Within 15 Days', '1 Month', 'Flexible'];
 const PAYMENTS = ['Full Advance', 'Credit (Post-Delivery)', 'COD', 'Loan/Finance'];
+const CREDIT_PERIODS = ['15 Days', '30 Days', '45 Days', '60 Days', '90 Days'];
+const PAYMENT_MODES = ['Online Transfer', 'Cash', 'Cheque'];
 const BUSINESS_TYPES = ['Online Business', 'Exporter', 'Manufacturer', 'Retailer', 'Service Provider', 'Wholesaler', 'Individual Buyer'];
 
 // radio-style pill (single-select within a group)
@@ -70,10 +72,17 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   // logistics + about-you (mirror the SimpleRFQForm last page)
   const [timeline, setTimeline] = useState('');
   const [payment, setPayment] = useState('');
+  const [creditPeriod, setCreditPeriod] = useState('');   // shown only when payment = Credit (in sync with Simple)
+  const [paymentMode, setPaymentMode] = useState('');      // shown for non-credit/loan payments
+  const [userLocation, setUserLocation] = useState('');    // buyer's own location (vs delivery) — Simple-form model
   const [deliveryLocation, setDeliveryLocation] = useState('');
-  const [detectingLoc, setDetectingLoc] = useState(false); // P2-251: GPS/IP city detection in flight
+  const [sameAsLoc, setSameAsLoc] = useState(true);        // delivery = my location (default on)
+  const [locationEditing, setLocationEditing] = useState(false); // location drawer/popover open
+  const [detectingLoc, setDetectingLoc] = useState(false); // GPS/IP city detection in flight
   const [businessType, setBusinessType] = useState('');
   const [industry, setIndustry] = useState('');
+  const [gstRegistered, setGstRegistered] = useState<boolean | null>(null); // null = UNKNOWN; asked only for a business role
+  const [gstNumber, setGstNumber] = useState('');
   // Contact starts EMPTY for a guest (P1-114: never ship a real identity to an anonymous buyer). Identity is
   // filled ONLY once the buyer is logged in — either the host mounts us authenticated (loggedIn prop, the
   // Buyer-Profile scenario) or they tap Login in the Contact card (the login scenario). Mirrors SimpleRFQForm.
@@ -81,6 +90,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   const [contactMobile, setContactMobile] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [isLoggedIn, setIsLoggedIn] = useState(loggedIn);
+  const [contactOpen, setContactOpen] = useState(!loggedIn); // Contact card is COLLAPSIBLE (in sync with Simple); collapsed once logged-in/prefilled
   const [sent, setSent] = useState(false);
   const submittedRef = useRef(false); // one-shot guard so a double-tap can't fire onSubmit twice (P2-252)
 
@@ -98,8 +108,22 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   const themeClass = rfqThemeClass(rfqTheme);
   const hero = heroBroken ? '' : product.image;
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [showScrollHint, setShowScrollHint] = useState(false); // subtle "more below" amber chevron (in sync with Simple)
   // Reset the scroll to the top on every step change (P3-314 — the new step used to open mid-scroll).
   useEffect(() => { bodyRef.current?.scrollTo?.({ top: 0 }); }, [stage]);
+  // "More below" hint — appears only when the body overflows + not scrolled to the end.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) { setShowScrollHint(false); return; }
+    const update = () => setShowScrollHint(el.scrollHeight - el.scrollTop - el.clientHeight > 40);
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    ro?.observe(el);
+    if (ro && el.firstElementChild) ro.observe(el.firstElementChild);
+    const t1 = setTimeout(update, 400); const t2 = setTimeout(update, 1500);
+    return () => { el.removeEventListener('scroll', update); ro?.disconnect(); clearTimeout(t1); clearTimeout(t2); };
+  }, [stage, sent]);
   // Popup (host-embed) shell: lock the host page behind the modal so it can't scroll (P2-250). The standalone/mobile
   // shells replace the whole page, so nothing is behind them — only the popup mount needs this.
   useEffect(() => {
@@ -110,26 +134,30 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   // Escape closes the popup modal (P2-212). The mobile/standalone shells are full-page routes — Escape there
   // would navigate the buyer away mid-fill, so it's scoped to the popup embed only.
   useEffect(() => {
-    if (isMobile || standalone) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (locationEditing) { setLocationEditing(false); return; } // close the location drawer first (any shell)
+      if (!isMobile && !standalone) onClose();                    // then the popup modal (full-page shells don't exit on Escape)
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isMobile, standalone, onClose]);
+  }, [isMobile, standalone, onClose, locationEditing]);
 
-  // P2-251: parity with the Simple form — prefill delivery location from a coarse IP lookup on mount (only if
-  // the buyer hasn't typed one), and offer a "use my current location" GPS button (reverse-geocode, IP fallback).
-  // ⚑ DEV-TODO: ipapi.co / bigdatacloud are the demo geo providers; swap for the production geo service.
+  // Location model IN SYNC with the Simple form: buyer's own location + delivery location + "same as" toggle.
+  const applyUserCity = (city: string) => { setUserLocation(city); setSameAsLoc((same) => { if (same) setDeliveryLocation(city); return same; }); };
+  const toggleSameAs = () => setSameAsLoc((prev) => { const next = !prev; if (next) setDeliveryLocation(userLocation); return next; });
+  // Prefill from a coarse IP lookup on mount (only if empty). ⚑ DEV-TODO: ipapi.co / bigdatacloud are demo geo providers.
   useEffect(() => {
     let alive = true;
     getJSON<{ city?: string }>('https://ipapi.co/json/')
-      .then((d) => { if (alive && d?.city) setDeliveryLocation((v) => v || d.city!); })
+      .then((d) => { if (alive && d?.city) { setUserLocation((v) => v || d.city!); setDeliveryLocation((v) => v || d.city!); } })
       .catch((e) => emitApiError('ipapi', e));
     return () => { alive = false; };
   }, []);
   const detectLocation = () => {
     setDetectingLoc(true);
     const fallback = () => getJSON<{ city?: string }>('https://ipapi.co/json/')
-      .then((d) => { if (d?.city) setDeliveryLocation(d.city); })
+      .then((d) => { if (d?.city) applyUserCity(d.city); })
       .catch((e) => emitApiError('ipapi', e))
       .finally(() => setDetectingLoc(false));
     if (!('geolocation' in navigator)) { fallback(); return; }
@@ -139,7 +167,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
           const { latitude, longitude } = pos.coords;
           const r = await getJSON<{ city?: string; locality?: string; principalSubdivision?: string }>(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
           const city = (r?.city || r?.locality || r?.principalSubdivision || '').trim();
-          if (city) setDeliveryLocation(city);
+          if (city) applyUserCity(city);
         } catch (e) { emitApiError('reverseGeocode', e); }
         finally { setDetectingLoc(false); }
       },
@@ -147,6 +175,9 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 },
     );
   };
+  // Derived (mirror Simple): GST asked only for a business role; payment-mode shown for non-credit/loan payments.
+  const isBusinessRole = !!businessType && !/individual|personal|end[\s-]?user|consumer|home/i.test(businessType);
+  const showPaymentMode = !!payment && payment !== 'Credit (Post-Delivery)' && payment !== 'Loan/Finance';
 
   const toggleSpec = (name: string) =>
     setSelectedSpecs((prev) => {
@@ -175,10 +206,13 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       quantity.trim() && `Quantity: ${[quantity.trim(), unit].filter(Boolean).join(' ')}`,
       description.trim() && `Details: ${description.trim()}`,
       timeline && `Delivery timeline: ${timeline}`,
-      payment && `Payment terms: ${payment}`,
+      payment && `Payment terms: ${[payment, payment === 'Credit (Post-Delivery)' && creditPeriod, showPaymentMode && paymentMode].filter(Boolean).join(' · ')}`,
       deliveryLocation.trim() && `Delivery to: ${deliveryLocation.trim()}`,
+      userLocation.trim() && userLocation.trim() !== deliveryLocation.trim() && `Buyer location: ${userLocation.trim()}`,
       businessType && `Buyer type: ${businessType}`,
       industry.trim() && `Industry: ${industry.trim()}`,
+      isBusinessRole && gstRegistered === true && `GST: ${gstNumber.trim() || 'Registered'}`,
+      isBusinessRole && gstRegistered === false && `GST: Not registered`,
     ]
       .filter(Boolean)
       .join('\n');
@@ -196,8 +230,8 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       description: description.trim(),
       quantity: quantity.trim(),
       unit,
-      logistics: { deliveryTimeline: timeline, paymentTerms: payment, deliveryLocation: deliveryLocation.trim() },
-      profile: { businessType, industry: industry.trim() },
+      logistics: { deliveryTimeline: timeline, paymentTerms: payment, creditPeriod: payment === 'Credit (Post-Delivery)' ? creditPeriod : '', paymentMode: showPaymentMode ? paymentMode : '', deliveryLocation: deliveryLocation.trim(), buyerLocation: userLocation.trim() },
+      profile: { businessType, industry: industry.trim(), gstRegistered: isBusinessRole ? gstRegistered : null, gstNumber: isBusinessRole && gstRegistered ? gstNumber.trim() : '' },
       contact: { name: contactName.trim(), mobile: contactMobile.trim(), email: contactEmail.trim() },
       text: buildText(),
     };
@@ -268,7 +302,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Quantity</label>
-          <input type="text" aria-label="Quantity" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="e.g., 500" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+          <input type="text" aria-label="Quantity" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="e.g., 500" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 animate-field-highlight" />
         </div>
         <div>
           <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Unit</label>
@@ -339,6 +373,39 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
     </div>
   );
 
+  // ── Location controls (IN SYNC with the Simple form): current-location + your/delivery + same-as. Rendered in a
+  //    bottom-sheet DRAWER on mobile / anchored popover on desktop, opened from a compact row. ──
+  const locationFields = (
+    <>
+      <button type="button" onClick={detectLocation} disabled={detectingLoc} className="w-full flex items-center justify-center gap-2 py-2.5 min-h-[44px] rounded-lg border border-teal-200 bg-teal-50 text-teal-700 text-sm font-semibold hover:bg-teal-100 disabled:opacity-60">
+        {detectingLoc ? <span className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" /> : <LocateFixed size={15} />} Use my current location
+      </button>
+      <div>
+        <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Your location</p>
+        <div className="relative"><MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
+          <input aria-label="Your location" value={userLocation} onChange={(e) => applyUserCity(e.target.value)} placeholder="Search city…" className="w-full border border-gray-200 rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" /></div>
+      </div>
+      <div>
+        <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Delivery location</p>
+        <div className="relative"><MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
+          <input aria-label="Delivery location" value={deliveryLocation} disabled={sameAsLoc} onChange={(e) => setDeliveryLocation(e.target.value)} placeholder="Search city…" className={`w-full border rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 ${sameAsLoc ? 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed' : 'border-gray-200'}`} /></div>
+      </div>
+      <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+        <input type="checkbox" checked={sameAsLoc} onChange={toggleSameAs} className="accent-teal-600 w-4 h-4" /> Delivery is same as my location
+      </label>
+    </>
+  );
+  const renderLocationDrawer = () => (
+    <>
+      <div className="fixed inset-0 z-30 bg-black/20 sm:bg-transparent" onClick={() => setLocationEditing(false)} />
+      <div className="fixed inset-x-0 bottom-0 z-40 w-full rounded-t-2xl border-t border-gray-100 p-4 animate-modal-in text-left space-y-3 bg-white shadow-[0_-8px_32px_-4px_rgba(30,42,58,0.18)] sm:absolute sm:inset-x-auto sm:bottom-auto sm:top-full sm:mt-2 sm:right-0 sm:w-80 sm:max-w-[calc(100vw-3rem)] sm:rounded-xl sm:border sm:p-3 sm:shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }} onClick={(e) => e.stopPropagation()}>
+        <div className="w-9 h-1 bg-gray-200 rounded-full mx-auto mb-1 sm:hidden" />
+        {locationFields}
+        <button type="button" onClick={() => setLocationEditing(false)} className="w-full py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700">Done</button>
+      </div>
+    </>
+  );
+
   // ── Step 2 · Your Profile & Delivery ──
   const detailsStep = (
     <div className="space-y-5">
@@ -353,14 +420,19 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
             <label className="block text-sm font-medium text-gray-700 mb-2">Payment terms</label>
             <div className="flex flex-wrap gap-2">{PAYMENTS.map((p) => <Chip key={p} label={p} selected={payment === p} onClick={() => setPayment(payment === p ? '' : p)} />)}</div>
           </div>
-          <div>
+          {payment === 'Credit (Post-Delivery)' && (
+            <div><label className="block text-sm font-medium text-gray-700 mb-2">Credit period</label><div className="flex flex-wrap gap-2">{CREDIT_PERIODS.map((c) => <Chip key={c} label={c} selected={creditPeriod === c} onClick={() => setCreditPeriod(creditPeriod === c ? '' : c)} />)}</div></div>
+          )}
+          {showPaymentMode && (
+            <div><label className="block text-sm font-medium text-gray-700 mb-2">Payment mode</label><div className="flex flex-wrap gap-2">{PAYMENT_MODES.map((m) => <Chip key={m} label={m} selected={paymentMode === m} onClick={() => setPaymentMode(paymentMode === m ? '' : m)} />)}</div></div>
+          )}
+          <div className="relative">
             <label className="block text-sm font-medium text-gray-700 mb-1.5">Delivery location</label>
-            <div className="flex items-center gap-2">
-              <input aria-label="Delivery location" value={deliveryLocation} onChange={(e) => setDeliveryLocation(e.target.value)} placeholder="City / PIN" className="flex-1 min-w-0 border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
-              <button type="button" onClick={detectLocation} disabled={detectingLoc} aria-label="Use my current location" className="shrink-0 flex items-center gap-1.5 px-3 h-[44px] rounded-lg border border-teal-200 bg-teal-50 text-teal-700 text-xs font-semibold hover:bg-teal-100 disabled:opacity-60">
-                {detectingLoc ? <span className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" /> : <LocateFixed size={14} />}<span className="hidden sm:inline">Detect</span>
-              </button>
-            </div>
+            <button type="button" onClick={() => setLocationEditing((v) => !v)} className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2.5 text-sm text-gray-700 hover:border-teal-300">
+              <span className="truncate flex items-center gap-1.5"><MapPin size={13} className="text-gray-300 shrink-0" />{deliveryLocation || 'Select delivery city'}</span>
+              <Pencil size={13} className="text-gray-400 shrink-0" />
+            </button>
+            {locationEditing && renderLocationDrawer()}
           </div>
         </div>
       </div>
@@ -376,26 +448,45 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
             <label className="block text-sm font-medium text-gray-700 mb-1.5">Company / industry <span className="text-gray-400 font-normal">(optional)</span></label>
             <input aria-label="Company or industry (optional)" value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g., electrical contracting" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
           </div>
+          {/* GST — asked only for a BUSINESS role (every type except Individual), in sync with the Simple form.
+              Golden Rule: gstRegistered starts null (UNKNOWN) — never assume "No". */}
+          {isBusinessRole && (
+            <div className="pt-2 border-t border-gray-100">
+              <label className="block text-sm font-medium text-gray-700 mb-2">GST Registered?</label>
+              <div className="flex flex-wrap gap-2">
+                <Chip label="Yes" selected={gstRegistered === true} onClick={() => setGstRegistered(gstRegistered === true ? null : true)} />
+                <Chip label="No" selected={gstRegistered === false} onClick={() => { setGstRegistered(gstRegistered === false ? null : false); setGstNumber(''); }} />
+              </div>
+              {gstRegistered === true && (
+                <input type="text" aria-label="GST number" value={gstNumber} onChange={(e) => setGstNumber(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 15))} placeholder="GST number (15 digits)" className="w-full mt-2 border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       <div className="rounded-xl border border-gray-200 p-4 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-xs uppercase font-semibold text-gray-400 tracking-wide">Contact details</p>
-          {/* Login scenario (guest only): flips isLoggedIn → applyLoggedInDefaults prefills the buyer's identity.
-              ⚑ DEV-TODO: wire the real IndiaMART login/OTP here (today it just seeds the demo identity). */}
+        {/* COLLAPSIBLE contact card (in sync with the Simple form). Header toggles it; the Login button (guest) or the
+            verified-name badge (logged-in) sits alongside. ⚑ DEV-TODO: wire the real IndiaMART login/OTP behind Login. */}
+        <div className="flex items-center justify-between gap-2">
+          <button type="button" onClick={() => setContactOpen((v) => !v)} className="flex items-center gap-2 min-w-0">
+            <span className="text-xs uppercase font-semibold text-gray-400 tracking-wide">Contact details</span>
+            {contactOpen ? <ChevronUp size={16} className="text-gray-400 shrink-0" /> : <ChevronDown size={16} className="text-gray-400 shrink-0" />}
+          </button>
           {isLoggedIn
-            ? <span className="flex items-center gap-1.5 text-xs font-medium text-green-600"><Check size={13} /> {contactName || 'Logged in'}</span>
-            : <button type="button" onClick={() => setIsLoggedIn(true)} className="flex items-center gap-1 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 rounded-lg px-2.5 py-1.5"><LogIn size={13} /> Login</button>}
+            ? <span className="flex items-center gap-1.5 text-xs font-medium text-green-600 truncate"><Check size={13} className="shrink-0" /> {contactName || 'Logged in'}</span>
+            : <button type="button" onClick={() => { setIsLoggedIn(true); setContactOpen(true); }} className="flex items-center gap-1 shrink-0 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 rounded-lg px-2.5 py-1.5"><LogIn size={13} /> Login</button>}
         </div>
-        <div className="space-y-3">
-          <input aria-label="Your name" autoComplete="name" value={contactName} onChange={(e) => setContactName(e.target.value)} placeholder="Your name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
-          <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-teal-400 focus-within:border-teal-400">
-            <span className="px-3 py-2.5 text-sm text-gray-500 bg-gray-50 border-r border-gray-200">+91</span>
-            <input type="tel" aria-label="Mobile number" autoComplete="tel-national" value={contactMobile} onChange={(e) => setContactMobile(e.target.value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile" className="flex-1 px-3 py-2.5 text-base sm:text-sm outline-none" />
+        {contactOpen && (
+          <div className="space-y-3 mt-4">
+            <input aria-label="Your name" autoComplete="name" value={contactName} onChange={(e) => setContactName(e.target.value)} placeholder="Your name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+            <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-teal-400 focus-within:border-teal-400">
+              <span className="px-3 py-2.5 text-sm text-gray-500 bg-gray-50 border-r border-gray-200">+91</span>
+              <input type="tel" aria-label="Mobile number" autoComplete="tel-national" value={contactMobile} onChange={(e) => setContactMobile(e.target.value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile" className="flex-1 px-3 py-2.5 text-base sm:text-sm outline-none" />
+            </div>
+            <input type="email" aria-label="Email address (optional)" autoComplete="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="Email (optional)" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
           </div>
-          <input type="email" aria-label="Email address (optional)" autoComplete="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="Email (optional)" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
-        </div>
+        )}
       </div>
     </div>
   );
@@ -435,13 +526,25 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
     </div>
   );
 
+  // Scrollable body + the subtle "more below" hint (same as the Simple form) — shared by all 3 shells.
+  const scrollBody = (
+    <div className="relative flex-1 min-h-0 flex flex-col">
+      <div ref={bodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">{stepBody}</div>
+      {showScrollHint && (
+        <button type="button" aria-label="Scroll down for more" onClick={() => bodyRef.current?.scrollBy({ top: bodyRef.current.clientHeight * 0.8, behavior: 'smooth' })} className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center justify-center w-7 h-7 rounded-full bg-amber-100/90 text-amber-500 ring-1 ring-amber-200 shadow-[0_2px_8px_-1px_rgba(0,0,0,0.15)] backdrop-blur-sm animate-bounce">
+          <ChevronDown size={16} />
+        </button>
+      )}
+    </div>
+  );
+
   // ── Shells: [top CTA bar] · [scrollable body] · [bottom Exit] — the SAME MSite pattern on every surface
   //    (mobile · standalone · popup): Next/Back on top, Exit on bottom, in sync with the Simple form. ──
   if (isMobile) {
     return (
       <div role="dialog" aria-modal="true" aria-label="Get Best Price" className={`${themeClass} fixed inset-0 z-50 bg-white flex flex-col animate-modal-in`} style={{ height: '100dvh' }}>
         {!sent && topBar}
-        <div ref={bodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">{stepBody}</div>
+        {scrollBody}
         {!sent && exitRow}
       </div>
     );
@@ -453,7 +556,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
         <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
           <div className="w-full max-w-2xl flex flex-col bg-white overflow-hidden sm:my-6 sm:rounded-xl sm:shadow-[0_4px_12px_-2px_rgba(30,42,58,0.08)]">
             {!sent && topBar}
-            <div ref={bodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">{stepBody}</div>
+            {scrollBody}
             {!sent && exitRow}
           </div>
         </div>
@@ -464,7 +567,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
     <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6">
       <div role="dialog" aria-modal="true" aria-label="Get Best Price" className={`${themeClass} relative bg-white rounded-xl w-full max-w-2xl max-h-[calc(100dvh-3rem)] flex flex-col overflow-hidden animate-modal-in shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]`}>
         {!sent && topBar}
-        <div ref={bodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">{stepBody}</div>
+        {scrollBody}
         {!sent && exitRow}
       </div>
     </div>

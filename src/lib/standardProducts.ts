@@ -30,8 +30,8 @@ export interface StandardRequirement {
   description: string;
   quantity: string;
   unit: string;
-  logistics: { deliveryTimeline: string; paymentTerms: string; deliveryLocation: string };
-  profile: { businessType: string; industry: string };
+  logistics: { deliveryTimeline: string; paymentTerms: string; creditPeriod: string; paymentMode: string; deliveryLocation: string; buyerLocation: string };
+  profile: { businessType: string; industry: string; gstRegistered: boolean | null; gstNumber: string };
   contact: { name: string; mobile: string; email: string };
   text: string; // the assembled, lossless requirement text (for enquiry / WhatsApp)
 }
