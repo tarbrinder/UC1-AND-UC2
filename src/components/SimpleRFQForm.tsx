@@ -283,8 +283,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   //   if NOT logged in, prompt login (or capture + OTP-verify their own number). The literal values below are a
   //   DEMO stand-in — replace them; never ship a hard-coded identity.
   const applyLoggedInDefaults = () => {
-    setContactName((n) => n || 'Tarbrinder Singh');
-    setContactMobile((m) => m || '8283830681');
+    setContactName((n) => n || 'Demo Buyer');
+    setContactMobile((m) => m || '9876543210');
     setContactEmail((e) => e || 'tarbrinder.singh@indiamart.com');
     setBuyerType((b) => b || 'Manufacturer');
     setIndustry((i) => i || 'Construction Equipment');
@@ -317,6 +317,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const stageRef = useRef<Stage>('product');                // live stage mirror for the popstate/back handler (P1-127)
   const voiceRef = useRef<HTMLDivElement | null>(null);      // voice-overlay container for the focus trap (P2-228)
   useFocusTrap(showVoice, voiceRef);                         // P2-228: trap Tab within the voice-input overlay while open
+  const popupRef = useRef<HTMLDivElement | null>(null);      // desktop-popup dialog container for the focus trap (audit a11y)
+  useFocusTrap(!isMobile && !standalone, popupRef);          // trap Tab within the embedded popup so it can't escape to the dashboard
   const photoMcatRef = useRef('');                           // the mcat the current photo/voice evidence belongs to (P0-01 mcat-scoping)
   const blToastShownRef = useRef(false);                     // one-time "requirement ready" toast when BL becomes eligible
   const dispatchedRef = useRef(false);                       // one-shot BuyLead guard — no duplicate BL / double conversion on double-tap or edit-from-results
@@ -939,6 +941,16 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
 
   const progressPercent = stage === 'specs' ? 33 : stage === 'aispecs' ? 55 : stage === 'more' ? 85 : stage === 'results' ? 100 : 0;
 
+  // Persistent trust reassurance (owner/audit: proof lived only on the results screen). Shown at the entry so a
+  // wary buyer sees WHY it's safe before typing / handing over details.
+  const trustStrip = (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500">
+      <span className="flex items-center gap-1"><BadgeCheck size={13} className="text-green-600 shrink-0" /> Verified suppliers</span>
+      <span className="flex items-center gap-1"><ShieldCheck size={13} className="text-teal-600 shrink-0" /> Payment protected</span>
+      <span className="text-gray-300">·</span><span>100% free</span>
+      <span className="text-gray-300">·</span><span>No spam calls</span>
+    </div>
+  );
   // ── The product input row (shared by mobile-Lens front page and desktop two-panel) ──
   const productInputRow = (
     <div className="relative">
@@ -1269,7 +1281,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
             Golden Rule: gstRegistered starts null (UNKNOWN) — we never assume "No". */}
         {isBusinessRole && (
           <div className="mt-4 pt-4 border-t border-gray-100 animate-field-in">
-            <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">GST Registered?</p>
+            <p className="text-xs uppercase font-semibold text-gray-500 mb-1 tracking-wide">GST Registered?</p>
+            <p className="text-[11px] text-gray-500 mb-2">Only shared with suppliers you contact.</p>
             <div className="flex flex-wrap gap-2">
               <RadioChip label="Yes" selected={gstRegistered === true} onClick={() => setGstRegistered(gstRegistered === true ? null : true)} />
               <RadioChip label="No" selected={gstRegistered === false} onClick={() => { setGstRegistered(gstRegistered === false ? null : false); setGstNumber(''); }} />
@@ -1398,9 +1411,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
           );
         })}
       </div>
-      <div className="mx-5 mt-2 h-0.5 bg-gray-100 rounded-full overflow-hidden shrink-0"><div className="h-full bg-orange-400 rounded-full transition-all duration-500" style={{ width: progressPercent + '%' }} /></div>
+      <div className="mx-5 mt-2 h-0.5 bg-gray-100 rounded-full overflow-hidden shrink-0"><div className="h-full bg-teal-500 rounded-full transition-all duration-500" style={{ width: progressPercent + '%' }} /></div>
       </>}
-      {aiBusy && <div className="shrink-0 mx-5 mt-2 px-3 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
+      {aiBusy && <div role="status" aria-live="polite" className="shrink-0 mx-5 mt-2 px-3 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
       <div className="relative flex-1 min-h-0 flex flex-col">
         <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">{stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}</div> : resultsBody}</div>
         {/* Subtle "more below" hint — appears only when the body overflows + not at the end; tap to scroll on. */}
@@ -1448,6 +1461,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-5">
         <p className="text-sm font-semibold text-gray-700 mb-2">Enter Product/Service name <span className="text-red-500">*</span></p>
         {productInputRow}
+        <div className="mt-3">{trustStrip}</div>
         {qtyUnitBlock}
       </div>
       <div className="shrink-0 pb-[max(env(safe-area-inset-bottom),12px)] pt-2 text-center"><button type="button" onClick={onClose} className="text-sm text-gray-400 underline underline-offset-2">Exit</button></div>
@@ -1505,7 +1519,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         {standalone && <div><p className="font-bold text-gray-900 text-2xl leading-tight">What are you looking for?</p><p className="text-sm text-gray-400 mt-1">Enter the product or service name to get started.</p></div>}
         <label className={`block text-sm font-semibold text-gray-700 mb-2 ${standalone ? 'mt-6' : 'mt-1'}`}>Enter Product/Service name <span className="text-red-500">*</span></label>
         {productInputRow}
-        {aiBusy && <p className="mt-3 text-[12px] text-teal-700 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</p>}
+        <div className="mt-3">{trustStrip}</div>
+        {aiBusy && <p role="status" aria-live="polite" className="mt-3 text-[12px] text-teal-700 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</p>}
         {committed ? qtyUnitBlock : (
           <div className="mt-4">
             <label className="block text-sm font-semibold text-gray-700 mb-2">Requirement Details</label>
@@ -1591,7 +1606,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       ) : (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm overflow-y-auto overscroll-contain" style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
           <div className="flex min-h-full items-center justify-center p-4 sm:p-6">
-            <div role="dialog" aria-modal="true" aria-label="Post a Requirement" className={`${themeClass} relative bg-white rounded-xl w-full ${shellWidth} overflow-hidden animate-modal-in shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]`}>
+            <div ref={popupRef} role="dialog" aria-modal="true" aria-label="Post a Requirement" className={`${themeClass} relative bg-white rounded-xl w-full ${shellWidth} overflow-hidden animate-modal-in shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]`}>
               {stage === 'product' ? productStep : singlePanel}
             </div>
           </div>

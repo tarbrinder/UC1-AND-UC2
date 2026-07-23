@@ -102,7 +102,7 @@ export default function OTPGate({ onVerified, onClose, initialName, initialMobil
         onVerified(returningName ?? name, mobile);
       } else {
         emit(EV.OTP_FAILED, {});
-        setOtpError('Invalid OTP. Use 1234 for demo.');
+        setOtpError(import.meta.env.DEV ? 'Invalid OTP. Use 1234 for demo.' : 'Incorrect OTP. Please try again.');
         setDigits(['', '', '', '']);
         digitRefs.current[0]?.focus();
       }
@@ -233,6 +233,7 @@ export default function OTPGate({ onVerified, onClose, initialName, initialMobil
               >
                 {sendingOtp ? 'Sending OTP...' : 'Send OTP'}
               </button>
+              <p className="mt-2.5 text-center text-[11px] text-gray-500 flex items-center justify-center gap-1"><ShieldCheck size={12} className="text-teal-600 shrink-0" /> We never share your number · No spam · Your requirement is saved</p>
             </div>
           </>
         )}

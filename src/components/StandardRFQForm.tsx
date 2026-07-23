@@ -40,7 +40,7 @@ function Chip({ label, selected, onClick }: { label: string; selected: boolean; 
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-2 px-3 py-2 border rounded-full text-sm transition-all ${
+      className={`flex items-center gap-2 px-3.5 py-2.5 min-h-[44px] border rounded-full text-sm transition-all ${
         selected ? 'border-teal-500 bg-teal-50 text-teal-700 font-medium' : 'border-gray-200 text-gray-600 hover:border-gray-300'
       }`}
     >
@@ -99,8 +99,8 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   //   (a) Buyer-Profile fetch when mounted logged-in (GET the authenticated buyer's name/mobile/email), or
   //   (b) the actual IndiaMART login/OTP flow behind the Login button below. The hardcoded values are DEMO ONLY.
   const applyLoggedInDefaults = () => {
-    setContactName((n) => n || 'Tarbrinder Singh');
-    setContactMobile((m) => m || '8283830681');
+    setContactName((n) => n || 'Demo Buyer');
+    setContactMobile((m) => m || '9876543210');
   };
   useEffect(() => { if (isLoggedIn) applyLoggedInDefaults(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [isLoggedIn]);
 
@@ -469,7 +469,8 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
               Golden Rule: gstRegistered starts null (UNKNOWN) — never assume "No". */}
           {isBusinessRole && (
             <div className="pt-2 border-t border-gray-100">
-              <label className="block text-sm font-medium text-gray-700 mb-2">GST Registered?</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">GST Registered?</label>
+              <p className="text-[11px] text-gray-500 mb-2">Only shared with suppliers you contact.</p>
               <div className="flex flex-wrap gap-2">
                 <Chip label="Yes" selected={gstRegistered === true} onClick={() => setGstRegistered(gstRegistered === true ? null : true)} />
                 <Chip label="No" selected={gstRegistered === false} onClick={() => { setGstRegistered(gstRegistered === false ? null : false); setGstNumber(''); }} />
