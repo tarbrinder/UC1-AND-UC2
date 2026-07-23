@@ -354,7 +354,7 @@ The audio may be in Hindi, English or Hinglish — transcribe faithfully, then e
         },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'voiceToSpecs', apiKey });   // audit P2: raised from 2048 — a long transcript could clip mid-JSON and lose the whole extraction
+  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'voiceToSpecs', apiKey, timeoutMs: 10000 });   // owner: 10s cap on all RFQ-form LLM calls (was the 240s default → a hung gateway spun the mic banner for minutes)
   return JSON.parse(text);
 }
 
@@ -418,7 +418,7 @@ Identify this B2B product and its key specs.${useCase} Return JSON:
         { type: 'text', text: prompt },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'analyzeImage', apiKey });   // audit P2: raised from 1024 — avoid clipping the JSON on a detailed image read
+  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'analyzeImage', apiKey, timeoutMs: 10000 });   // owner: 10s cap on all RFQ-form LLM calls (was the 240s default → a hung gateway spun the photo banner for minutes)
   return JSON.parse(text);
 }
 
@@ -1595,9 +1595,11 @@ Return ONLY JSON:
   "isqHints": { "SpecName": "short helpful hint, max 8 words" }
 }`,
     },
-  ], { label: 'getSpecHints', apiKey });
+  ], { label: 'getSpecHints', apiKey, timeoutMs: 10000 }); // owner: 10s cap on all RFQ-form LLM calls
   let parsed: { knownFromProductName?: Record<string, string>; redundantISQSpecs?: string[]; isqHints?: Record<string, string> };
-  try { parsed = JSON.parse(text); } catch { parsed = {}; } // hints are best-effort — a bad body must not throw
+  // Harden against a valid-but-non-object body ('null'/'true'/123): JSON.parse doesn't throw on those, but then
+  // parsed.knownFromProductName would. Coerce anything that isn't a plain object to {}.
+  try { const p = JSON.parse(text); parsed = (p && typeof p === 'object') ? p : {}; } catch { parsed = {}; }
   // Bias guard at the source: a name-detect must NEVER be a brand/make field.
   const known: Record<string, string> = {};
   for (const [k, v] of Object.entries(parsed.knownFromProductName || {})) {
@@ -1665,7 +1667,7 @@ DECIDE IN THIS ORDER:
 2. MISMATCH GUARD (critical): if the mapped category / its evidence / the page-1 buyer specs do NOT fit the buyer's real product — e.g. the buyer wants a "generator toy" but the category is "diesel generator" — then IGNORE the category evidence, the seller-flagged specs, AND the (wrong) page-1 buyer specs, and build questions PURELY from the real product. A wrong category must NOT pollute the questions. Say nothing that only makes sense for the wrong category.
 3. WHEN THE CATEGORY MATCHES: mine the CATEGORY EVIDENCE for the specs/questions sellers ask MOST to qualify a buyer; prefer the high-frequency ones. Build each question's option chips from the real values seen in that evidence when present, else from real product-specific values.
 4. ORDER like the calls actually flow: if buyers/sellers open with INTENT / use-case, put the intent question FIRST, then the specs. Otherwise specs first. Return the questions in the EXACT order they should be shown to the buyer.
-5. COVERAGE / NO RE-ASK (STRICT — this is the worst failure): never ask anything a PAGE-1 BUYER SPEC already covers. Judge by MEANING and overlapping OPTIONS, NOT the exact field name — a buyer spec captures a concept even under a different label. Concrete: page-1 "Power (kVA)" already covers "Rated Power"/"Capacity"/"Output/Rating" → do NOT ask those; page-1 "Enclosure Type [Silent/Canopy, Open/Non-Silent]" already covers "Genset Type"/"Noise Level"/"Silent vs Open"/"Canopy" → do NOT ask those; page-1 "Brand" covers "Make"/"Manufacturer". Before adding any question, check every page-1 buyer spec above and DROP it if the concept overlaps. Never re-ask something the buyer already stated; surface that stated value PRE-ANSWERED via "prefill" instead.
+5. COVERAGE / NO RE-ASK (STRICT — this is the worst failure): never ask anything a PAGE-1 BUYER SPEC already covers. Judge by MEANING and overlapping OPTIONS, NOT the exact field name — a buyer spec captures a concept even under a different label. Concrete: page-1 "Power (kVA)" already covers "Rated Power"/"Capacity"/"Output/Rating" → do NOT ask those; page-1 "Enclosure Type [Silent/Canopy, Open/Non-Silent]" already covers "Genset Type"/"Noise Level"/"Silent vs Open"/"Canopy" → do NOT ask those; page-1 "Brand" covers "Make"/"Manufacturer". Before adding any question, check every page-1 buyer spec above and DROP it if the concept overlaps. Never re-ask something the buyer already stated; surface that stated value PRE-ANSWERED via "prefill" instead. QUANTITY / order size / volume / MOQ / "how many" is ALSO already captured on page 1 — NEVER ask it.
 6. CADENCE — your call: include a purchase-frequency question ONLY if it is meaningful for THIS product AND not already a buyer spec, and only if it earns a slot over other candidates (other questions may matter more — you decide). Product-appropriate options: capital good → "One-time","Occasional","Annual (AMC/renewal)"; consumable/raw-material/packaging → "Weekly","Monthly","Quarterly","Ongoing contract"; service → "One-time","Recurring","Retainer / ongoing". Skip entirely for a genuine one-off purchase. Never emit the generic "One-time/Weekly/Monthly/Annual" unless it truly fits.
 
 OUTPUT RULES:
@@ -1676,9 +1678,10 @@ OUTPUT RULES:
 - Plain simple English, ≤10 words per question.
 Return ONLY JSON:
 { "questions": [ { "fieldName": "question or spec name", "kind": "intent|spec|context", "options": ["opt1","opt2","opt3"], "helperText": "≤5-word why it matters", "prefill": "exact option the buyer's evidence supports — OMIT when no evidence" } ] }` },
-  ], { label: 'getMissingSpecs', temperature: 0.3, maxTokens: 4000, timeoutMs: 30000, model: args.model || MODEL_FAST, apiKey: args.apiKey }); // page-2 planner; default flash-lite (RFQ key is lite-only); 4000 output tokens; 30s buyer-facing deadline
+  ], { label: 'getMissingSpecs', temperature: 0.3, maxTokens: 4000, timeoutMs: 10000, model: args.model || MODEL_FAST, apiKey: args.apiKey }); // page-2 planner; default flash-lite (RFQ key is lite-only); 4000 output tokens; owner: 10s buyer-facing deadline
   let parsed: { questions?: Array<{ fieldName?: string; kind?: string; options?: unknown; helperText?: string; prefill?: string }> };
-  try { parsed = JSON.parse(text); } catch { parsed = { questions: [] }; } // never throw — a truncated/malformed body must not blank the whole page silently
+  // never throw — a truncated/malformed OR non-object ('null'/123) body must not blank the whole page silently
+  try { const p = JSON.parse(text); parsed = (p && typeof p === 'object') ? p : { questions: [] }; } catch { parsed = { questions: [] }; }
   // Normalise a field name for dedup: drop parenthetical unit suffixes ("Voltage (V)"→"voltage") + punctuation.
   const norm = (s: string) => s.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   // Evidence corpus for the fabrication guard — a prefill is trusted only if a real evidence value backs it.
@@ -1687,7 +1690,34 @@ Return ONLY JSON:
   // Brand/vendor questions narrow the seller pool → never an OPEN ask. Scoped so it does NOT eat legit
   // objective attributes like "Model Scale"/"Winding material" (bare "model" needs a name/no qualifier).
   const BRAND_Q = /\b(brand|manufacturer|oem|make)\b|\bmodel\s*(name|no\.?|number)\b|preferred\s+(supplier|vendor|brand)|\b(vendor|supplier)\b/i;
+  // Quantity/order-size is captured on page 1 (qty+unit) but STRIPPED from buyerSpecs, so it isn't in `seen` —
+  // guard it explicitly so the planner can never duplicate it as an AI spec (owner-flagged).
+  const QTY_Q = /\b(quantity|qty|order\s*(size|quantity)|volume|units?\s*(required|needed|per)|no\.?\s*of\s*(units|pieces|pcs)|how\s*many|moq|minimum\s*order)\b/i;
+  // LAST-PAGE / DEDICATED FORM FIELDS — the form collects delivery timeline · payment · delivery location · GST ·
+  // business type · industry on its FINAL step, so the AI planner must NEVER surface them as a page-2 question.
+  // The prompt already forbids it, but the LLM still occasionally leaks "Required delivery timeline" and there was
+  // NO parser backstop (only QTY_Q covered quantity) — this is that backstop. Scoped so legit product specs survive
+  // ("Delivery Pressure" for a pump, "Installation Type" → KEPT; only delivery TIMING/LOCATION, payment, GST,
+  // business/industry are blocked). Purchase frequency / cadence is intentionally NOT blocked (a real AI-spec).
+  const FORM_FIELD_Q = /(\bdeliver\w*\s*(time|timeline|date|schedule|lead|when|by|day|week|location|address|area|city|region|state|pin)|\btimeline\b|\blead\s*time|\bhow\s*soon|\bwhen\s+do\s+you\s+(need|want|require)|\burgen|\bpayment|\badvance\s*payment|\bcredit\s*(term|period|day)|\bgst\b|\bpin\s*code|\bpincode|\bpostal|\binstall\w*\s*(location|address|site|city)|\bcompany\s*size|\bbusiness\s*type|\btype\s*of\s*business|\bindustry\b)/i;
   const seen = new Set(args.buyerSpecs.map(norm));
+  // SYNONYM dedup by OPTION OVERLAP (the exact-name `seen` set alone misses relabelled fields). A page-1 spec's
+  // option set is the surest fingerprint of the CONCEPT it captures; if ≥half of an AI question's options match a
+  // single buyer spec's options (exact-normalised or containment — "silent"⊂"silent canopy", "5 kva"="5 kva"),
+  // it's the same field under a different name → drop it. Catches "Rated Power"↔"Power (kVA)",
+  // "Genset Type"↔"Enclosure Type" the name-only dedup would let through. Applied to open gap-fills only —
+  // an evidence-backed prefill carries a buyer-stated value and is kept (lossless).
+  const buyerOptSets = Object.values(args.buyerSpecOptions || {})
+    .map((opts) => new Set((opts || []).map(norm).filter(Boolean)))
+    .filter((s) => s.size >= 2); // only option sets with ≥2 real discriminating values fingerprint a concept
+  const optMatches = (a: string, bset: Set<string>) => bset.has(a) || [...bset].some((b) => (b.length >= 3 && a.includes(b)) || (a.length >= 3 && b.includes(a)));
+  const optOverlapsBuyer = (options: string[]) => {
+    const ns = options.map(norm).filter(Boolean);
+    if (ns.length < 2) return false; // too few options to safely fingerprint a concept
+    // STRICT MAJORITY (matches*2 > n): a 2-option question needs BOTH to match, so one incidental shared
+    // generic value ("Open", "Yes") can't false-drop a genuinely distinct spec.
+    return buyerOptSets.some((bset) => { const m = ns.filter((o) => optMatches(o, bset)).length; return m * 2 > ns.length; });
+  };
   const out: AiSpecQuestion[] = [];
   let gapCount = 0; // the ≤5 cap applies ONLY to non-prefilled gap-fill questions; evidence-prefilled questions are uncapped. PLANNER ORDER preserved (intent-first when the LLM ordered it so).
   for (const q of parsed.questions || []) {
@@ -1697,7 +1727,10 @@ Return ONLY JSON:
     let prefill = q.prefill ? String(q.prefill).trim() : '';
     if (prefill && !evidenceBacks(prefill)) prefill = ''; // fabrication guard: no evidence → not a buyer-stated fact
     if (prefill && !options.some((o) => o.toLowerCase() === prefill.toLowerCase())) options = [prefill, ...options];
+    if (QTY_Q.test(name)) continue;                         // quantity is a page-1 field — never duplicate it as an AI spec
+    if (FORM_FIELD_Q.test(name)) continue;                  // last-page field (delivery/timeline/payment/location/GST/business/industry) — the final step owns it, never ask it here
     if (BRAND_Q.test(name) && !prefill) continue;          // brand as an open ask — drop (evidence-backed brand stays)
+    if (!prefill && optOverlapsBuyer(options)) continue;   // synonym re-ask (same options as a page-1 spec) — drop the open gap-fill
     if (!prefill && options.length < 2) continue;          // options-only gate — but a pre-answered single-option evidence fact is legit
     if (prefill && !options.length) options = [prefill];
     seen.add(norm(name));

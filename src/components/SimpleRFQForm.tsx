@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   ArrowLeft, ArrowRight, Search, Mic, Camera, X, Pencil, MapPin, Star, User, Send, Phone,
   ChevronLeft, ChevronRight, ChevronDown, ChevronUp, BadgeCheck, ShieldCheck, Award, Package, MessageCircle, Clock, CreditCard,
-  LogIn, CheckCircle2, SlidersHorizontal, ListPlus, Truck, LocateFixed, Store, HelpCircle, Globe, type LucideIcon,
+  LogIn, CheckCircle2, SlidersHorizontal, ListPlus, Truck, LocateFixed, type LucideIcon,
 } from 'lucide-react';
 import { getJSON, postJSON } from '../lib/api';
 import { fetchProductSuggestions, filterProducts, stripQuantityPrefix, parseQuantityFromName } from '../utils/productNames';
@@ -11,9 +11,14 @@ import { calcScore, getScoreColor, getScoreLabel, type ScoreCheck } from '../uti
 import OptionChips from './OptionChips';
 import OTPGate from './OTPGate';
 import VoiceRecorder from './VoiceRecorder';
+import IndiaMartHeader from './IndiaMartHeader';
 import { analyzeImage, voiceToSpecs, hasGeminiKey, getSpecHints, getMissingSpecs, type AiSpecQuestion } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchProductImages, upsizeImimg } from '../lib/enrichment';
 import { matchUnit } from '../lib/quantity';
+import { emit, EV, emitApiError } from '../lib/emit';
+import { useToast, type ToastType } from './Toast';
+import { useFocusTrap } from '../lib/useFocusTrap';
+import { resolveRfqTheme, rfqThemeClass } from '../lib/theme';
 
 // "Post a Requirement → Get Quotes" — the simple RFQ flow. UI is a faithful clone of RFQModalV3
 // (two-panel product step · single-panel spec/delivery with the header score-circle + orange progress
@@ -27,12 +32,26 @@ type Surface = 'mobile' | 'desktop';
 type Stage = 'product' | 'specs' | 'aispecs' | 'more' | 'results';
 type CategoryMode = 'simple' | 'category';
 
+// The captured requirement handed back to the host (fixes P1-113). ⚑ DEV-TODO: the real BuyLead-generation API
+// consumes this — wire it in `dispatchBuyLead` below (owner: BL API provided later).
+export interface RFQSubmission {
+  productName: string;
+  mcatId: string;
+  text: string;                // the lossless requirement text (buildRequirementText)
+  quantity: string;
+  unit: string;
+  specs: Record<string, string>;
+  contact: { name: string; mobile: string; email: string };
+  imageBase64?: string;
+}
+
 interface Props {
   onClose: () => void;
   surface?: Surface;
   categoryMode?: CategoryMode; // 'simple' (default) = NO category corpus (buyer+seller+user only); 'category' = corpus-driven (needs v51 n8n)
   loggedIn?: boolean;          // logged-in buyer: contact collapsed + prefilled, no Login button, no OTP text
   standalone?: boolean;        // full-page route (fills viewport, no popup backdrop) vs dashboard popup
+  onSubmit?: (req: RFQSubmission) => void; // host receives the requirement (BL generation); demo falls back to the results screen
 }
 
 // Top clickable stepper nodes (owner). Product is the landing (stepper hidden there); the 3 numbered
@@ -53,7 +72,7 @@ function RadioChip({ label, selected, onClick }: { label: string; selected: bool
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-2 px-3 py-2 border rounded-full text-sm transition-all ${
+      className={`flex items-center gap-2 px-3.5 py-2.5 min-h-[44px] border rounded-full text-sm transition-all ${
         selected ? 'border-teal-500 bg-teal-50 text-teal-700 font-medium' : 'border-gray-200 text-gray-600 hover:border-gray-300'
       }`}
     >
@@ -88,14 +107,29 @@ const DEMO_SELLERS = [
   { name: 'Prime Industries', city: 'Thane', gst: true, trustSeal: false, paymentProtected: true, tenureYears: 4, rating: 4.3, reviews: 95 },
 ];
 
+// P2-221: drop ONLY a dedicated quantity/unit ISQ row (quantity + its unit are handled separately by the
+// Quantity+Unit block via deriveUnits). Token-based: drop a spec when EVERY word in its name is a quantity/unit
+// word AND at least one is a core qty/unit term — so "Quantity", "Unit", "Quantity Unit", "Order Quantity",
+// "Unit of Measurement", "MOQ", "Number of Units" are dropped, while real specs that merely CONTAIN such a word
+// ("Unit Weight", "Control Unit", "Number Of Cores", "Model Number") are KEPT. (Substring matching wrongly kept
+// "Quantity Unit"; a whole-name match wrongly missed it — hence the token rule.)
+const QTY_UNIT_CORE = new Set(['quantity', 'quantities', 'qty', 'unit', 'units', 'uom', 'moq']);
+const QTY_UNIT_FILLER = new Set(['order', 'min', 'minimum', 'of', 'measure', 'measurement', 'required', 'no', 'the', 'number']);
+function isQtyUnitField(name: string): boolean {
+  const toks = name.toLowerCase().replace(/[^a-z]+/g, ' ').trim().split(' ').filter(Boolean);
+  if (!toks.length) return false;
+  return toks.some((t) => QTY_UNIT_CORE.has(t)) && toks.every((t) => QTY_UNIT_CORE.has(t) || QTY_UNIT_FILLER.has(t));
+}
 function mapDisplaySpecs(rows: Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }>): ISQSpec[] {
   return (rows || [])
-    .filter((r) => r && r.IM_SPEC_MASTER_DESC && !/quantity|qty|unit/i.test(r.IM_SPEC_MASTER_DESC))
-    .slice(0, 10)
+    .filter((r) => r && r.IM_SPEC_MASTER_DESC && !isQtyUnitField(r.IM_SPEC_MASTER_DESC))
+    .slice(0, 30) // P3-305: was 10 — a rich-ISQ category could silently lose buyer specs. 30 covers every real schema.
     .map((r) => {
+      // P2-222: split ONLY on '##' (the documented delimiter). The old '/##|,/' fallback shattered legitimate
+      // comma-bearing option values ('1,000 kVA' → '1' + '000 kVA'). Live data confirms '##' is always the delimiter.
       const opts = (Array.isArray(r.OPTIONS_DATA) && r.OPTIONS_DATA.length
         ? r.OPTIONS_DATA.map((o) => (o.IM_SPEC_OPTIONS_DESC || '').trim()).filter(Boolean)
-        : (r.IM_SPEC_OPTIONS_DESC || '').split(/##|,/).map((o) => o.trim()).filter(Boolean)
+        : (r.IM_SPEC_OPTIONS_DESC || '').split('##').map((o) => o.trim()).filter(Boolean)
       ).filter((o) => !/^others?$/i.test(o));
       return { ...r, IM_SPEC_OPTIONS_DESC: opts.join('##') };
     });
@@ -109,7 +143,26 @@ const fileToBase64 = (file: Blob): Promise<{ base64: string; mime: string }> =>
     r.readAsDataURL(file);
   });
 
-export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple', loggedIn = false, standalone = false }: Props) {
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // owner: photos up to 5 MB
+// Normalize ANY uploaded image to a model-readable JPEG (owner's HEIC solution): iPhone HEIC won't decode in the
+// Gemini model OR the browser preview, so we decode via createImageBitmap → <canvas> → re-encode JPEG, downscaled
+// to ≤1600px (also shrinks the base64 payload). Rejects >5 MB. Throws 'too-large' / 'undecodable' so onPhoto can
+// show the right message. Fixes P1-120 (+ the HEIC decode gap + P2-239 preview mime).
+async function normalizeImage(file: File): Promise<{ base64: string; mime: string }> {
+  if (file.size > MAX_IMAGE_BYTES) throw new Error('too-large');
+  let bitmap: ImageBitmap;
+  try { bitmap = await createImageBitmap(file); } catch { throw new Error('undecodable'); }
+  const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('undecodable');
+  ctx.drawImage(bitmap, 0, 0, w, h); bitmap.close?.();
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+  return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mime: 'image/jpeg' };
+}
+
+export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple', loggedIn = false, standalone = false, onSubmit }: Props) {
   // Freeze the surface ONCE at mount — otherwise a mid-flow viewport crossing 640px (rotate/resize)
   // would silently swap the whole mobile↔desktop chrome on the next state change.
   const [surf] = useState<Surface>(() => surface ?? (typeof window !== 'undefined' && window.matchMedia('(min-width: 640px)').matches ? 'desktop' : 'mobile'));
@@ -182,7 +235,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const [aiBusy, setAiBusy] = useState('');
   const [showVoice, setShowVoice] = useState(false);
   const [scoreDelta, setScoreDelta] = useState(0);   // floating "+N" flash when the score rises
-  const [toast, setToast] = useState('');            // transient bottom toast (exit-intent nudge)
+  const { show: showToast } = useToast();            // P3-309: ONE toast system — the global portal ToastProvider (was a 2nd inline toast)
+  const [rfqTheme] = useState(resolveRfqTheme);      // IST-based dark theme, resolved once at mount (self-scoped via rfq-root)
+  const themeClass = rfqThemeClass(rfqTheme);
   const prevScoreRef = useRef(0);
   const exitIntentUsed = useRef(false);              // one-shot exit-intent salvage guard
   // R7 steal — recent searches (localStorage), shown in the product dropdown when the field is empty.
@@ -199,6 +254,10 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // mark OTP already-verified (submit skips the OTP step), and hide the Login CTA + banner. Two ways to reach it:
   // (1) the ?login=1 route flag (starts logged-in), or (2) tapping the in-form "Login" button. Empty-only fills
   // so a value the buyer already typed is never overwritten.
+  // ⚑ DEV-TODO (real login / identity — owner: TWO scenarios): if the buyer is logged in, fetch these from the
+  //   Buyer Profile / account session (name, mobile, email, business type, industry, GST) and mark OTP-verified;
+  //   if NOT logged in, prompt login (or capture + OTP-verify their own number). The literal values below are a
+  //   DEMO stand-in — replace them; never ship a hard-coded identity.
   const applyLoggedInDefaults = () => {
     setContactName((n) => n || 'Tarbrinder Singh');
     setContactMobile((m) => m || '8283830681');
@@ -214,6 +273,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
 
   const suggestDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const qtyRef = useRef<HTMLInputElement | null>(null);
+  const productInputRef = useRef<HTMLInputElement | null>(null);
+  const suppressFocusOpenRef = useRef(false); // the mount auto-focus must NOT pop the suggestion/recents dropdown — only a genuine focus/tap should
   const fileRef = useRef<HTMLInputElement | null>(null);
   const cardScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingAiSpecs = useRef<Record<string, string> | null>(null);
@@ -223,13 +284,90 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const photoSpecsRef = useRef<Record<string, string>>({}); // specs a photo/voice extracted → extra INPUT to the AI-specs prompt
   const commitGen = useRef(0);              // generation token — a superseded commit's late API responses become no-ops
   const autoAdvancedFor = useRef('');       // mcatId we already auto-advanced past (unit-less) — so Back doesn't re-bounce
+  const aiSkippedFor = useRef('');          // "mcatId:aiEpoch" we auto-skipped past when the AI-specs call FAILED (never trap on a dead page)
   const productNameRef = useRef('');        // live product name for the photo/voice "don't overwrite a typed name" guard
   const sellerSpecsRef = useRef<string[]>([]); // getISQs SELLER-flagged spec names → page-2 AI input (never rendered on page-1)
+  const bodyScrollRef = useRef<HTMLDivElement | null>(null); // the flow-body scroller — reset to top on every stage change (P2-216)
+  const prevStageRef = useRef<Stage>('product');            // for the page_transition funnel event
+  const stageRef = useRef<Stage>('product');                // live stage mirror for the popstate/back handler (P1-127)
+  const voiceRef = useRef<HTMLDivElement | null>(null);      // voice-overlay container for the focus trap (P2-228)
+  useFocusTrap(showVoice, voiceRef);                         // P2-228: trap Tab within the voice-input overlay while open
+  const photoMcatRef = useRef('');                           // the mcat the current photo/voice evidence belongs to (P0-01 mcat-scoping)
+  const blToastShownRef = useRef(false);                     // one-time "requirement ready" toast when BL becomes eligible
+  const pendingUnitRef = useRef('');                         // a spoken unit stashed until the category's unitOptions resolve (P2-205)
+
+  const surfaceName = standalone ? 'standalone' : 'popup';
+
+  // Funnel: form opens (once per mount). surface/categoryMode/device split the 4 variants (§8 taxonomy).
+  // Also auto-focus the product input on open (owner: "go ahead") — P2-214.
+  useEffect(() => {
+    emit(EV.FORM_OPEN, { surface: surfaceName, categoryMode, device: surf, loggedIn: isLoggedIn });
+    // Auto-focus so the keyboard/cursor is ready — but flag it so the resulting programmatic focus event does
+    // NOT open the suggestions/recents dropdown. The dropdown should appear only when the buyer themselves puts
+    // the cursor in the box (a real tap/focus) or starts typing — never popped open by default on load.
+    setTimeout(() => { suppressFocusOpenRef.current = true; productInputRef.current?.focus(); }, 120);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, []);
+
+  // Every stage change: (1) reset the flow-body scroll to top so the new page starts at its heading (P2-216/UI-18),
+  // (2) emit the page_transition funnel event (P2-224). Both were missing.
+  useEffect(() => {
+    stageRef.current = stage;
+    bodyScrollRef.current?.scrollTo?.({ top: 0 });
+    if (prevStageRef.current !== stage) {
+      emit(EV.PAGE_TRANSITION, { from: prevStageRef.current, to: stage, surface: surfaceName, device: surf });
+      prevStageRef.current = stage;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
+
+  // P1-127: make the browser/hardware Back button step through form stages (MSite expectation) instead of
+  // leaving the page on the first press. A sentinel history entry is pushed on mount and re-armed after each
+  // intercepted Back; at the first stage (or the terminal results stage) Back performs the normal close/exit.
+  useEffect(() => {
+    window.history.pushState({ rfq: true }, '');
+    const onPop = () => {
+      const s = stageRef.current;
+      if (s === 'product' || s === 'results') { onClose(); return; }
+      const prev: Stage = s === 'specs' ? 'product' : s === 'aispecs' ? 'specs' : 'aispecs'; // more → aispecs
+      setStage(prev);
+      window.history.pushState({ rfq: true }, ''); // re-arm for the next Back
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // P0-02 (owner's reported bug): lock the page behind the popup so it can't scroll (the standalone routes replace
+  // the whole page, so nothing is behind them — only the popup mounts need this). overscroll-contain on the
+  // backdrop + body scroller (below) stops iOS rubber-band / wheel-chaining to the dashboard.
+  useEffect(() => {
+    if (standalone) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [standalone]);
+
+  // Escape closes any open transient overlay — voice sheet, score/location/contact popover (P2-212). The
+  // full-page form shell itself never closes on Escape (no accidental data loss); OTPGate handles its own Escape.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (showVoice) setShowVoice(false);
+      else if (scoreOpen) setScoreOpen(false);
+      else if (locationEditing) setLocationEditing(false);
+      else if (contactOpen) setContactOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showVoice, scoreOpen, locationEditing, contactOpen]);
 
   useEffect(() => {
     let alive = true;
     // IP city seeds the buyer's OWN location; delivery mirrors it (sameAsLoc defaults on) until the buyer diverges.
-    getJSON<{ city?: string }>('https://ipapi.co/json/').then((d) => { if (alive && d?.city) { setDetectedCity(d.city); setUserLocation((v) => v || d.city!); setDeliveryLocation((v) => v || d.city!); } }).catch(() => {});
+    // ⚑ DEV-TODO: third-party IP geo (ipapi.co) fires on mount. If deployed embedded with VITE_API_BASE set, api()
+    //   would wrongly prefix this ABSOLUTE URL — api.ts now guards absolute URLs so this stays correct; keep that guard.
+    getJSON<{ city?: string }>('https://ipapi.co/json/').then((d) => { if (alive && d?.city) { setDetectedCity(d.city); setUserLocation((v) => v || d.city!); setDeliveryLocation((v) => v || d.city!); } }).catch((e) => emitApiError('ipapi', e));
     return () => { alive = false; };
   }, []);
 
@@ -248,7 +386,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
           const r = await getJSON<{ city?: string; locality?: string; principalSubdivision?: string }>(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
           const city = (r?.city || r?.locality || r?.principalSubdivision || '').trim();
           if (city) applyUserCity(city); else if (detectedCity) applyUserCity(detectedCity);
-        } catch { if (detectedCity) applyUserCity(detectedCity); }
+        } catch (e) { emitApiError('reverseGeocode', e); if (detectedCity) applyUserCity(detectedCity); }
         finally { setGeoLoading(false); }
       },
       fallback,
@@ -259,6 +397,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const toggleSameAs = () => setSameAsLoc((prev) => { const next = !prev; if (next && userLocation) setDeliveryLocation(userLocation); return next; });
 
   useEffect(() => { if (committed) setTimeout(() => qtyRef.current?.focus(), 60); }, [committed]);
+
+  // P2-205: a voice-spoken unit stashed before the category's unitOptions loaded → apply it once they resolve.
+  useEffect(() => { if (pendingUnitRef.current && unitOptions.length) { setUnit((u) => u || matchUnit(unitOptions, pendingUnitRef.current)); pendingUnitRef.current = ''; } }, [unitOptions]);
 
   useEffect(() => {
     if (!pendingAiSpecs.current || isqSpecs.length === 0) return;
@@ -296,13 +437,15 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         if (h.knownFromProductName && Object.keys(h.knownFromProductName).length) {
           setSpecValues((prev) => { const next = { ...prev }; for (const [k, v] of Object.entries(h.knownFromProductName)) { const hit = specNames.find((n) => n.toLowerCase() === k.toLowerCase()); if (hit && v && !next[hit]) next[hit] = v; } return next; });
         }
-      }).catch(() => {});
+      }).catch((e) => emitApiError('getSpecHints', e, { mcatId }));
     }
-    // (2) page-2 AI specs — SNAPSHOT fires on Landing NEXT (stage leaves 'product'), NOT at commit:
-    // avoids a wasted call when the buyer changes product / adds a photo while still on the landing
-    // page, and still hides its latency inside the Buyer-Specs dwell time. Re-fires only on a material
-    // change: new mcat, or new mic/photo evidence (aiEpoch bump).
-    if (stage === 'product') return;
+    // (2) page-2 AI specs — fire as EARLY as possible (owner: "should run as soon as I've entered the product
+    // name"). We gate on the page-1 specs having SETTLED (!specsLoading) rather than on the buyer leaving the
+    // landing page, so the planner starts the moment GetIsq resolves (right after commit) — its latency then hides
+    // behind the buyer entering quantity + filling page-1, and page-1 spec NAMES are already present for dedup.
+    // Fires for zero-ISQ categories too (specsLoading flips false with no specs). Re-fires on a material change:
+    // new mcat, or new mic/photo evidence (aiEpoch bump); a re-commit re-arms aiFiredFor so no double-ask sticks.
+    if (specsLoading) return;
     const aiKey = `${mcatId}:${aiEpoch}`;
     if (aiFiredFor.current !== aiKey) {
       aiFiredFor.current = aiKey;
@@ -324,12 +467,12 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
             // value — the buyer can still change it, and a buyer-set value is never overwritten.
             setAiSpecValues((prev) => { const next = { ...prev }; for (const q of qs) if (q.prefill && !next[q.fieldName]) next[q.fieldName] = q.prefill; return next; });
           }
-        } catch { if (aiFiredFor.current === aiKey && gen === commitGen.current) { setAiSpecs([]); setAiSpecsError(true); } } // a thrown/timed-out call is NOT "0 questions" — flag it so the page shows the right copy
+        } catch (e) { emitApiError('getMissingSpecs', e, { mcatId, aiEpoch }); emit(EV.AISPECS_FAILED, { mcatId, aiEpoch, surface: surfaceName }); if (aiFiredFor.current === aiKey && gen === commitGen.current) { setAiSpecsError(true); if (aiEpoch === 0) setAiSpecs([]); } } // flag the failure; but on a RE-PLAN (aiEpoch>0, e.g. a photo added on aispecs) KEEP the last-good questions so the buyer isn't force-navigated off the page (P2-258)
         finally { if (aiFiredFor.current === aiKey && gen === commitGen.current) setAiSpecsLoading(false); }
       })();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [committed, mcatId, isqSpecs, productName, aiEpoch, stage]);
+  }, [committed, mcatId, isqSpecs, productName, aiEpoch, specsLoading]);
 
   // Fetch the RAW category corpus as soon as the mcat is known (FRESH every time — no cache). It feeds the
   // page-2 planner (categoryCorpusRef). If it lands AFTER the planner already ran (fallback), bump aiEpoch
@@ -350,13 +493,16 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       } else {
         setCatStatus({ state: r.status === 'error' ? 'error' : 'none', count: 0 });
       }
-    }).catch(() => { if (catFetchTok.current === tok) setCatStatus({ state: 'error', count: 0 }); });
+    }).catch((e) => { emitApiError('fetchCategoryCorpus', e, { mcatId }); if (catFetchTok.current === tok) setCatStatus({ state: 'error', count: 0 }); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mcatId]);
 
   const onProductInput = (val: string) => {
     setProductName(val); productNameRef.current = val; setNotFound(false); setCommitted(false);
     if (suggestDebounce.current) clearTimeout(suggestDebounce.current);
+    // P1-103: clearing the name is "start over" — reset product-scoped state so a photo uploaded next is analysed
+    // against a fresh (no) schema and against the RIGHT product, not the previous category's ISQ fields.
+    if (!val.trim()) { setMcatId(''); setIsqSpecs([]); setSpecValues({}); setUnitOptions([]); setUnit(''); setUnitsResolved(false); setProductImageUrl(''); setProductImages([]); }
     if (val.trim().length < 2) { setSuggestions([]); setShowDropdown(false); return; }
     setSuggestions(filterProducts(val)); setShowDropdown(true);
     suggestDebounce.current = setTimeout(async () => { const live = await fetchProductSuggestions(val); if (live.length) setSuggestions(live); }, 200);
@@ -386,32 +532,32 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       const cleaned = stripQuantityPrefix(name);
       id = await resolveMcat(name);
       if (!id && cleaned && cleaned.toLowerCase() !== name.toLowerCase()) id = await resolveMcat(cleaned);
-    } catch { if (myGen === commitGen.current) { setResolving(false); setResolveError(true); } return; } // network failure ≠ "not a category"
+    } catch (e) { emitApiError('resolveMcat', e, { query: name }); emit(EV.PRODUCT_COMMIT_FAILED, { productName: name, surface: surfaceName }); if (myGen === commitGen.current) { setResolving(false); setResolveError(true); } return; } // network failure ≠ "not a category"
     if (myGen !== commitGen.current) return;
     if (!id) { setResolving(false); setNotFound(true); return; }
+    // P0-01 (owner: mcat-scoped + additive) — if this commit is an ENTIRELY DIFFERENT product (different mcat)
+    // than the one the mic/photo evidence + image were captured under, DROP them: they're wrong for the new
+    // schema and must not autofill / feed the LLM prompts / ship to sellers. Same mcat → keep & merge (additive).
+    if (photoMcatRef.current && photoMcatRef.current !== id) {
+      photoSpecsRef.current = {}; pendingAiSpecs.current = null; setImageBase64('');
+    }
+    photoMcatRef.current = id; // evidence added from here on belongs to this product
     setSpecsLoading(true); setUnitsResolved(false); setIsqSpecs([]); setSpecValues({}); setUnitOptions([]); setUnit(''); setProductImageUrl(''); setProductImages([]); setResolving(false); setCommitted(true);
     setMcatId(id); categoryNameRef.current = ''; sellerSpecsRef.current = []; pushRecent(name);
+    emit(EV.PRODUCT_COMMITTED, { mcatId: id, productName: name, surface: surfaceName });
     // Re-arm the LLM fire-guards so a re-commit (same or new mcat) re-fires getSpecHints/getMissingSpecs
     // and clears aiSpecsLoading — without this a same-product re-commit hangs the aispecs page forever.
-    hintsFiredFor.current = ''; aiFiredFor.current = '';
+    hintsFiredFor.current = ''; aiFiredFor.current = ''; aiSkippedFor.current = '';
     // LOSSLESS across a product change: mic/photo evidence (photoSpecsRef) is JOURNEY-level, never wiped —
     // the typed name anchors the NEW category while voice/photo facts survive as autofill candidates
     // against the new schema + evidence input to the AI-specs prompt. Buyer page answers DO reset (by design).
     if (Object.keys(photoSpecsRef.current).length) pendingAiSpecs.current = { ...photoSpecsRef.current };
     setIsqHints({}); setRedundantISQSpecs([]); setAiSpecs([]); setAiSpecValues({}); setAiSpecsError(false); setAiSpecsLoading(hasFormLLM());
-    try {
-      const isqJson = await getJSON<{ DATA?: (ISQSpec | ISQSpec[])[] }>(`/api/imimg/index.php?r=Newreqform/GetIsq&modid=MY&mcatid=${id}&cat_type=3&flag=1&isq_format=1&generic_flag=1&country_iso=IN`);
-      if (myGen !== commitGen.current) return;
-      const flat = (isqJson?.DATA ?? []).flatMap((s) => (Array.isArray(s) ? s : [s])).filter((s) => s && s.IM_SPEC_MASTER_DESC);
-      const unitOpts = deriveUnits(isqJson?.DATA);
-      // Use ONLY the qty/unit the API provides. Some mcats carry none (e.g. Diesel Generator) — then
-      // quantity + unit are simply hidden (and not required), matching V3.
-      setUnitOptions(unitOpts);
-      setUnit(unitOpts.length ? matchUnit(unitOpts, parsedQty?.unit) : '');
-      setUnitsResolved(true); // units are known now → Continue can un-gate even for a spec-less category
-      const fast = mapDisplaySpecs(flat as Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }>);
-      if (fast.length) { setIsqSpecs(fast); setSpecsLoading(false); }
-    } catch { /* fall through — getISQs .finally still settles specsLoading */ }
+    // P2-206: the 3 secondary catalog calls (getISQs enrichment · McatDtl image/category · IMSearchAPI gallery) all
+    // depend only on `id`, so fire them CONCURRENTLY with the primary GetIsq below instead of serially after its
+    // await. Page-1 spec correctness no longer depends on ordering: getISQs appends by functional merge, and GetIsq's
+    // own set (further down) MERGES `fast` over whatever is present rather than replacing it — so whichever resolves
+    // first, the authoritative buyer set still leads and no enrichment is clobbered.
     postJSON<{ RESPONSE?: { DATA?: Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }> } }>('/api/mimart/api/bmcajax/addressbook/getISQs', { mcatId: id }, 30000)
       .then((isq2) => {
         if (myGen !== commitGen.current) return; // stale product's response — drop it
@@ -427,19 +573,35 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         sellerSpecsRef.current = (sellerRows.length ? sellerRows : rows).map((s) => s.IM_SPEC_MASTER_DESC).filter(Boolean);
         const buyerSpecs = mapDisplaySpecs(rows.filter((s) => s.IM_SPEC_MASTER_DESC && !isSeller(s)));
         if (buyerSpecs.length) setIsqSpecs((prev) => { const have = new Set(prev.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase())); return [...prev, ...buyerSpecs.filter((s) => !have.has(s.IM_SPEC_MASTER_DESC.toLowerCase()))]; });
-      }).catch(() => {}).finally(() => { if (myGen === commitGen.current) { setSpecsLoading(false); setUnitsResolved(true); } });
+      }).catch((e) => emitApiError('getISQs', e, { mcatId: id })).finally(() => { if (myGen === commitGen.current) { setSpecsLoading(false); setUnitsResolved(true); } });
     getJSON<Record<string, unknown> & { Response?: { Data?: unknown }; data?: unknown }>(`/api/imimg/index.php?r=postblenq/McatDtl&modid=MY&mcatid=${id}`)
       .then((img) => {
         if (myGen !== commitGen.current) return;
         const d0 = (img?.Response?.Data ?? img?.data ?? img);
         const data = (Array.isArray(d0) ? d0[0] : d0) as Record<string, unknown>;
         if (data && typeof data === 'object') { const nm = data['glcat_mcat_name']; if (typeof nm === 'string' && nm.trim()) categoryNameRef.current = nm.trim(); for (const k of Object.keys(data)) { const v = data[k]; if (/img|image/i.test(k) && typeof v === 'string' && v.startsWith('http')) { setProductImageUrl(v.replace(/^http:\/\//i, 'https://')); break; } } } // https → no mixed-content on a prod https page
-      }).catch(() => {});
+      }).catch((e) => emitApiError('McatDtl', e, { mcatId: id }));
     // Front-page GALLERY (IMSearchAPI: real seller-listing photos for this query → hero + up to 3 thumbnails).
     // Images only. First image also backfills the single hero if McatDtl had none. Best-effort; silent on empty.
     fetchProductImages(name, id)
       .then((imgs) => { if (myGen !== commitGen.current || !imgs.length) return; setProductImages(imgs); setProductImageUrl((prev) => prev || imgs[0]); })
-      .catch(() => {});
+      .catch((e) => emitApiError('fetchProductImages', e, { mcatId: id }));
+    try {
+      const isqJson = await getJSON<{ DATA?: (ISQSpec | ISQSpec[])[] }>(`/api/imimg/index.php?r=Newreqform/GetIsq&modid=MY&mcatid=${id}&cat_type=3&flag=1&isq_format=1&generic_flag=1&country_iso=IN`);
+      if (myGen !== commitGen.current) return;
+      const flat = (isqJson?.DATA ?? []).flatMap((s) => (Array.isArray(s) ? s : [s])).filter((s) => s && s.IM_SPEC_MASTER_DESC);
+      const unitOpts = deriveUnits(isqJson?.DATA);
+      // Use ONLY the qty/unit the API provides. Some mcats carry none (e.g. Diesel Generator) — then
+      // quantity + unit are simply hidden (and not required), matching V3.
+      if (unitOpts.length) { setUnitOptions(unitOpts); setUnit(matchUnit(unitOpts, parsedQty?.unit)); }
+      setUnitsResolved(true); // units are known now → Continue can un-gate even for a spec-less category
+      const fast = mapDisplaySpecs(flat as Array<ISQSpec & { OPTIONS_DATA?: Array<{ IM_SPEC_OPTIONS_DESC?: string }> }>);
+      // P2-208: clear the spinner as soon as GetIsq answers — even with ZERO display specs (a spec-light category).
+      // MERGE (not replace) so a getISQs enrichment that resolved FIRST (P2-206 parallel fire) is preserved: the
+      // authoritative buyer `fast` set leads, any extra getISQs buyer-specs already present follow (dedup by name).
+      setIsqSpecs((prev) => { const have = new Set(fast.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase())); return [...fast, ...prev.filter((s) => !have.has(s.IM_SPEC_MASTER_DESC.toLowerCase()))]; });
+      setSpecsLoading(false);
+    } catch (e) { emitApiError('GetIsq', e, { mcatId: id }); /* fall through — the getISQs .finally still settles specsLoading */ }
   }, []);
 
   // Feed photo/voice-extracted specs into BOTH pipelines: page-1 fill (pendingAiSpecs → ISQ fields) AND
@@ -448,6 +610,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // primary signal) — a photo only ADDS specs; it names the product only when the buyer left it blank.
   const applyExtractedSpecs = (specs: Record<string, string>) => {
     if (!Object.keys(specs).length) return;
+    if (mcatId) photoMcatRef.current = mcatId; // tag this evidence to the current product (P0-01 mcat-scoping)
     pendingAiSpecs.current = specs; // still seeds the [isqSpecs]-keyed effect for a specs set that arrives LATER
     photoSpecsRef.current = { ...photoSpecsRef.current, ...specs };
     // Flush NOW onto any already-loaded ISQ field (empty-only) — the [isqSpecs] effect won't re-run when
@@ -459,10 +622,14 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     });
     setAiEpoch((e) => e + 1);
   };
+  const showFeedback = (msg: string, type: ToastType = 'info') => showToast(msg, type);
   const onPhoto = async (file: File) => {
-    const { base64, mime } = await fileToBase64(file); setImageBase64(base64);
-    if (!hasFormLLM()) return;
+    if (aiBusy) return;                       // P1-105: serialize — one extraction at a time (no dueling commits)
+    const myGen = commitGen.current;          // P1-104/P2-257: guard against a product switch mid-extraction
     try {
+      // P3-301: normalize INSIDE the try — a >5MB / undecodable (HEIC) file rejects gracefully with a clear message.
+      const { base64, mime } = await normalizeImage(file);
+      if (!hasFormLLM()) { setImageBase64(base64); return; } // no LLM key → just attach (no analysis)
       setAiBusy('Reading your photo…');
       // Schema-aware extraction (the plan's combined Call A): when the category schema is already
       // loaded, the image call maps values straight onto the real ISQ fields — no separate mapper call.
@@ -470,14 +637,50 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       const fieldOpts: Record<string, string[]> = {};
       for (const s of isqSpecs) fieldOpts[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
       const r = await analyzeImage(base64, mime, productName, fieldNames, fieldOpts, '', RFQ_LLM_KEY, RFQ_MODEL);
-      if (r.productName && !productNameRef.current.trim()) await commitProduct(r.productName);
+      const committedNew = !!(r.productName && !productNameRef.current.trim());
+      if (committedNew) await commitProduct(r.productName);
+      else if (myGen !== commitGen.current) return; // a DIFFERENT product was committed while extracting → drop this stale result
+      const extracted = { ...(r.specifications || {}), ...(r.additionalSpecifications || {}) };
+      const gotSomething = !!(r.productName || r.quantity || Object.keys(extracted).length);
+      setImageBase64(base64);                   // P2-240: credit the photo (score) only after a successful read
       if (r.quantity) setQuantity(String(r.quantity));
-      applyExtractedSpecs({ ...(r.specifications || {}), ...(r.additionalSpecifications || {}) });
-    } catch { /* photo still attached */ } finally { setAiBusy(''); }
+      applyExtractedSpecs(extracted);
+      emit(EV.INPUT_SOURCE_USED, { source: 'photo', success: gotSomething, extracted: Object.keys(extracted).length });
+      if (!gotSomething) showFeedback("Couldn't read that photo — try another, or type the product name.", 'warning');
+    } catch (e) {
+      emit(EV.INPUT_SOURCE_USED, { source: 'photo', success: false });
+      const msg = e instanceof Error && e.message === 'too-large' ? 'That image is over 5 MB — please pick a smaller photo.'
+        : e instanceof Error && e.message === 'undecodable' ? "Couldn't read that image format — try a JPG or PNG."
+        : "Couldn't read that photo — try again, or type the product name.";
+      showFeedback(msg, 'warning');
+    } finally { setAiBusy(''); }
   };
   const onVoice = async (blob: Blob) => {
-    setShowVoice(false); if (!hasFormLLM()) return;
-    try { const { base64, mime } = await fileToBase64(blob); setAiBusy('Understanding your requirement…'); const r = await voiceToSpecs(base64, mime, productName, isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC), RFQ_LLM_KEY, RFQ_MODEL); if (r.productName && !productNameRef.current.trim()) await commitProduct(r.productName); if (r.quantity) setQuantity(String(r.quantity)); if (r.quantityUnit && unitOptions.length) setUnit(matchUnit(unitOptions, r.quantityUnit)); if (r.deliveryTimeline) setDeliveryTimeline(r.deliveryTimeline); if (r.paymentTerms) setPaymentTerms(r.paymentTerms); const specs = { ...(r.mappedSpecs || {}) }; (r.customSpecs || []).forEach((c) => { if (c.fieldName) specs[c.fieldName] = c.value; }); applyExtractedSpecs(specs); } catch { /* ignore */ } finally { setAiBusy(''); }
+    setShowVoice(false); if (aiBusy || !hasFormLLM()) return;
+    const myGen = commitGen.current;
+    try {
+      setAiBusy('Understanding your requirement…');
+      const { base64, mime } = await fileToBase64(blob);
+      const r = await voiceToSpecs(base64, mime, productName, isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC), RFQ_LLM_KEY, RFQ_MODEL);
+      const newName = (r.productName && !productNameRef.current.trim()) ? r.productName : '';
+      if (newName) await commitProduct(newName);
+      else if (myGen !== commitGen.current) return; // product switched mid-extraction → drop stale result
+      if (r.quantity) setQuantity(String(r.quantity));
+      // P2-205: apply the spoken unit now if the options are loaded, else STASH it — the [unitOptions] effect applies it once they resolve.
+      if (r.quantityUnit) { if (unitOptions.length) setUnit(matchUnit(unitOptions, r.quantityUnit)); else pendingUnitRef.current = r.quantityUnit; }
+      if (r.deliveryTimeline) setDeliveryTimeline(r.deliveryTimeline);
+      if (r.paymentTerms) setPaymentTerms(r.paymentTerms);
+      if (r.deliveryLocation) applyUserCity(r.deliveryLocation);   // P2-225: lossless — was silently dropped
+      if (r.creditPeriod) setCreditPeriod(r.creditPeriod);          // P2-225: lossless — was silently dropped
+      const specs = { ...(r.mappedSpecs || {}) }; (r.customSpecs || []).forEach((c) => { if (c.fieldName) specs[c.fieldName] = c.value; });
+      applyExtractedSpecs(specs);
+      const gotSomething = !!(r.productName || r.quantity || Object.keys(specs).length);
+      emit(EV.INPUT_SOURCE_USED, { source: 'mic', success: gotSomething });
+      if (!gotSomething) showFeedback("Couldn't catch that — try again.", 'warning');
+    } catch {
+      emit(EV.INPUT_SOURCE_USED, { source: 'mic', success: false });
+      showFeedback("Couldn't process the recording — try again.", 'warning');
+    } finally { setAiBusy(''); }
   };
 
   const setSpecValue = (k: string, v: string) => setSpecValues((p) => ({ ...p, [k]: v }));
@@ -487,17 +690,21 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const isBusinessRole = !!buyerType && !/individual|personal|end[\s-]?user|consumer|home/i.test(buyerType);
 
   const scoreDetails = useMemo(() => {
-    // AI "Smart Questions" (page-2) → scored (owner). aiSpecTotal>0 only once questions surfaced, so a
-    // loading / errored / empty page-2 is normalized OUT (never a scored-zero). Prefilled = answered.
-    const aiTotal = aiSpecs.length;
-    const aiAnswered = aiSpecs.filter((q) => (aiSpecValues[q.fieldName] || '').trim()).length;
+    // P1-109: score the SAME arrays the pages render (visible), not the raw arrays — else the dial can stick
+    // <100 with no on-screen field to fill. visSpecs = page-1 minus redundant-and-unanswered; visAi = page-2
+    // minus any promoted to a page-1 field. P3-316: answers de-matched by a re-plan simply aren't counted.
+    const isqNames = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase()));
+    const visAi = aiSpecs.filter((q) => !isqNames.has(q.fieldName.toLowerCase()));
+    const visSpecs = isqSpecs.filter((s) => !redundantISQSpecs.includes(s.IM_SPEC_MASTER_DESC) || specValues[s.IM_SPEC_MASTER_DESC]);
+    const aiTotal = visAi.length;
+    const aiAnswered = visAi.filter((q) => (aiSpecValues[q.fieldName] || '').trim()).length;
     return calcScore(
       { productName, quantity, dynamicSpecs: specValues, deliveryLocation, deliveryTimeline, paymentTerms, buyerType, industry, gstRegistered, gstNumber } as Partial<RFQFormData>,
       // quantity stays scored ONLY when the API returned units (unitOptions>0) — unit itself is never scored;
       // frequencyApplicable:false — cadence is now an LLM-driven AI-spec, not a static field.
-      isqSpecs, !!imageBase64, { quantityApplicable: unitOptions.length > 0, profileApplicable: true, frequencyApplicable: false, gstApplicable: isBusinessRole, aiSpecTotal: aiTotal, aiSpecAnswered: aiAnswered },
+      visSpecs, !!imageBase64, { quantityApplicable: unitOptions.length > 0, profileApplicable: true, frequencyApplicable: false, gstApplicable: isBusinessRole, aiSpecTotal: aiTotal, aiSpecAnswered: aiAnswered },
     );
-  }, [productName, quantity, specValues, deliveryLocation, deliveryTimeline, paymentTerms, buyerType, industry, gstRegistered, gstNumber, isBusinessRole, isqSpecs, imageBase64, unitOptions.length, aiSpecs, aiSpecValues]);
+  }, [productName, quantity, specValues, deliveryLocation, deliveryTimeline, paymentTerms, buyerType, industry, gstRegistered, gstNumber, isBusinessRole, isqSpecs, redundantISQSpecs, imageBase64, unitOptions.length, aiSpecs, aiSpecValues]);
 
   // The next unfilled, applicable score item — powers the "Fill next" nudge in the score popover + rail.
   const nextCheck = scoreDetails.checks.find((c) => c.applicable && !c.done);
@@ -510,10 +717,16 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   }, [scoreDetails.total]);
 
   // All buyer-provided spec answers (page-1 ISQ + page-2 AI), non-empty, de-duplicated by field name.
+  // P1-131 / P2-223: only answers to CURRENTLY-VISIBLE page-2 questions are included — an answer to a question a
+  // re-plan removed, or one a late getISQs promoted to a page-1 field, is NOT shipped to sellers (it's invisible
+  // to the buyer, so it must not travel). Page-1 answers always count.
   const allSpecEntries = useMemo(() => {
-    const merged: Record<string, string> = { ...specValues, ...aiSpecValues };
+    const isqNames = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase()));
+    const visibleAiNames = new Set(aiSpecs.filter((q) => !isqNames.has(q.fieldName.toLowerCase())).map((q) => q.fieldName));
+    const merged: Record<string, string> = { ...specValues };
+    for (const [k, v] of Object.entries(aiSpecValues)) if (visibleAiNames.has(k)) merged[k] = v;
     return Object.entries(merged).filter(([, v]) => v && v.trim());
-  }, [specValues, aiSpecValues]);
+  }, [specValues, aiSpecValues, aiSpecs, isqSpecs]);
 
   // Compact one-liner for the on-screen "Your requirement" banner.
   const requirementSummary = useMemo(() => {
@@ -558,23 +771,64 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     }
   }, [committed, unitsResolved, hasUnits, quantity, stage, mcatId]);
 
+  // Owner: if the AI-specs call FAILS (threw/timed-out → 0 questions), don't strand the buyer on a dead page —
+  // auto-advance to the last page. Once per aiKey, so tapping Back to a failed page still shows the fallback copy.
+  useEffect(() => {
+    const aiKey = `${mcatId}:${aiEpoch}`;
+    if (stage === 'aispecs' && aiSpecsError && !aiSpecsLoading && aiSpecs.length === 0 && aiSkippedFor.current !== aiKey) {
+      aiSkippedFor.current = aiKey;
+      setStage('more');
+    }
+  }, [stage, aiSpecsError, aiSpecsLoading, aiSpecs.length, mcatId, aiEpoch]);
+
+  // ── BuyLead (BL) eligibility (owner) — a BL is generated when the buyer gave a real signal: a QUANTITY, OR at
+  // least one PAGE spec (page-1 ISQ + page-2 AI). The last-page profile/logistics fields are NOT specs — and
+  // allSpecEntries is exactly {specValues, aiSpecValues}, so it already excludes them. ──
+  const blEligible = quantity.trim() !== '' || allSpecEntries.length > 0;
+  useEffect(() => {
+    if (blEligible && !blToastShownRef.current) {
+      blToastShownRef.current = true;
+      emit(EV.BL_ELIGIBLE, { surface: surfaceName });
+      showFeedback('Great — your requirement is ready. You’ll get quotes from verified suppliers.', 'success');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blEligible]);
+
+  // ⚑ DEV-TODO (BuyLead generation API — owner provides it later): POST this RFQSubmission to the real BL endpoint
+  //   and gate the results/"sent" UI on its resolution. Include the image, all specs, qty, contact + the lossless
+  //   text below. Today it's a STUB: emit the funnel conversion + hand the requirement to the host via onSubmit.
+  const dispatchBuyLead = (contactOverride?: { name?: string; mobile?: string }) => {
+    const contact = { name: contactOverride?.name || contactName, mobile: contactOverride?.mobile || contactMobile, email: contactEmail };
+    const req: RFQSubmission = {
+      productName, mcatId, text: buildRequirementText(), quantity, unit,
+      specs: Object.fromEntries(allSpecEntries), contact, imageBase64: imageBase64 || undefined,
+    };
+    emit(EV.REQUIREMENT_SUBMITTED, { surface: surfaceName, mcatId, specCount: allSpecEntries.length, hasQty: !!quantity.trim(), usedImage: !!imageBase64, categoryMode, loggedIn: isLoggedIn });
+    onSubmit?.(req);
+  };
+
   const goBack = () => { if (stage === 'product') return onClose(); if (stage === 'specs') return setStage('product'); if (stage === 'aispecs') return setStage('specs'); if (stage === 'more') return setStage('aispecs'); setStage('more'); };
-  const submit = () => { if (otpVerified.current) { setStage('results'); return; } setShowOTP(true); };
+  const submit = () => {
+    // P1-101: never submit an empty RFQ (also closes the score-jump-to-'more'-with-no-product hole).
+    if (!blEligible) { showFeedback('Add a quantity or pick at least one spec to get quotes.', 'warning'); return; }
+    if (otpVerified.current) { dispatchBuyLead(); setStage('results'); return; }
+    setShowOTP(true);
+  };
   // Clickable top stepper: jump only to a VISITED node (index ≤ current) — never skip ahead.
   const goToNode = (target: Stage) => { if (stageNodeIdx(target) <= stageNodeIdx(stage)) setStage(target); };
   // Score-panel deep-link: map a score check to the stage that owns it, so tapping a missing item jumps
   // straight there (forward OR back — it's a shortcut). Product name/image/qty→product; Specifications→specs;
   // Smart questions→aispecs; everything in Details (location/timeline/payment/buyer/profile/GST)→more.
   const checkStage = (c: ScoreCheck): Stage => (c.group === 'Product' ? 'product' : c.group === 'Specs' ? (/smart/i.test(c.label) ? 'aispecs' : 'specs') : 'more');
-  const jumpToCheck = (c: ScoreCheck) => { setScoreOpen(false); setLocationEditing(false); setStage(checkStage(c)); };
+  const jumpToCheck = (c: ScoreCheck) => { if (stage === 'results') return; setScoreOpen(false); setLocationEditing(false); setStage(checkStage(c)); }; // P2-256: the results stage is terminal — no jumping back into the flow
   // R1 steal — exit-intent salvage: the FIRST close attempt from a FLOW page jumps to the last page + opens
   // contact + nudges (don't lose the RFQ). A second attempt (or from product/results) closes for real.
   const handleExit = () => {
-    if (!exitIntentUsed.current && stage !== 'product' && stage !== 'results') {
+    // P2-202: never run the lead-salvage nudge after the buyer already converted (OTP verified / reached results).
+    if (!exitIntentUsed.current && !otpVerified.current && stage !== 'product' && stage !== 'results') {
       exitIntentUsed.current = true;
       setStage('more'); setContactOpen(true); setScoreOpen(false); setLocationEditing(false);
-      setToast('Almost there — just add your contact to get quotes.');
-      setTimeout(() => setToast(''), 3500);
+      showToast('Almost there — just add your contact to get quotes.', 'info');
       return;
     }
     onClose();
@@ -589,16 +843,19 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       <div className="flex items-center border border-gray-200 rounded-xl overflow-hidden focus-within:border-teal-400 focus-within:ring-2 focus-within:ring-teal-100 bg-white">
         {isMobile && <Search className="w-4 h-4 text-gray-300 ml-3.5 shrink-0" />}
         <input
+          ref={productInputRef}
           type="text" value={productName}
+          aria-label="Product or service name"
           onChange={(e) => onProductInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && productName.trim()) commitProduct(productName.trim()); }}
-          onFocus={() => { if (suggestions.length || (recents.length && !productName.trim())) setShowDropdown(true); }}
+          onFocus={() => { if (suppressFocusOpenRef.current) { suppressFocusOpenRef.current = false; return; } if (suggestions.length || (recents.length && !productName.trim())) setShowDropdown(true); }}
+          onClick={() => { if (suggestions.length || (recents.length && !productName.trim())) setShowDropdown(true); }} // a real tap always counts as "bringing the cursor to the box" — reveals recents even when the field is already auto-focused
           onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
           placeholder={isMobile ? 'What are you looking to buy?' : 'e.g., TMT Bar, Diesel Generator…'}
           className="flex-1 min-w-0 px-4 py-3 text-base sm:text-sm outline-none bg-transparent"
         />
-        <button type="button" onClick={() => setShowVoice(true)} aria-label="Speak" className="flex items-center justify-center px-3 text-green-600 border-l border-gray-100 hover:bg-green-50 py-3"><Mic size={18} /></button>
-        <button type="button" onClick={() => fileRef.current?.click()} aria-label="Camera" className="px-3 text-teal-600 border-l border-gray-100 hover:bg-teal-50 py-3"><Camera size={16} /></button>
+        <button type="button" disabled={!!aiBusy} onClick={() => setShowVoice(true)} aria-label="Speak your requirement" className="flex items-center justify-center px-3 text-green-600 border-l border-gray-100 hover:bg-green-50 py-3 disabled:opacity-40 disabled:cursor-not-allowed"><Mic size={18} /></button>
+        <button type="button" disabled={!!aiBusy} onClick={() => fileRef.current?.click()} aria-label="Upload a product photo" className="px-3 text-teal-600 border-l border-gray-100 hover:bg-teal-50 py-3 disabled:opacity-40 disabled:cursor-not-allowed"><Camera size={16} /></button>
       </div>
       {resolving && <span className="absolute right-24 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />}
       {showDropdown && (suggestions.length > 0 || (recents.length > 0 && !productName.trim())) && (
@@ -612,8 +869,8 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
           {suggestions.map((s) => (<button key={s} onMouseDown={() => commitProduct(s)} className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-teal-50 hover:text-teal-700">{s}</button>))}
         </div>
       )}
-      {notFound && <p className="text-xs text-amber-600 mt-1.5">Couldn&apos;t match that to a category — try a more specific product name.</p>}
-      {resolveError && <p className="text-xs text-red-500 mt-1.5">Network issue reaching the catalog — <button type="button" onClick={() => commitProduct(productName)} className="font-semibold underline">tap to retry</button>.</p>}
+      {notFound && <p role="alert" className="text-xs text-amber-600 mt-1.5">Couldn&apos;t match that to a category — try a more specific product name.</p>}
+      {resolveError && <p role="alert" className="text-xs text-red-500 mt-1.5">Network issue reaching the catalog — <button type="button" onClick={() => commitProduct(productName)} className="font-semibold underline">tap to retry</button>.</p>}
     </div>
   );
 
@@ -702,37 +959,44 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     </div>
   );
 
-  // ── Delivery-location popover (rebuilt to the mockup: current-location + your/delivery + same-as) ──
+  // ── Shared location controls (current-location + your/delivery + same-as). Rendered INLINE on mobile
+  //    (owner: "no popups/drawers on mobile → inline sections", P1-106) and inside the DESKTOP anchored popover. ──
+  const locationFields = (
+    <>
+      {/* ① Use my current location (browser GPS → reverse-geocode; falls back to IP city) */}
+      <button type="button" onClick={useCurrentLocation} disabled={geoLoading} className="w-full flex items-center justify-center gap-2 py-2.5 min-h-[44px] rounded-lg border border-teal-200 bg-teal-50 text-teal-700 text-sm font-semibold hover:bg-teal-100 disabled:opacity-60">
+        {geoLoading ? <span className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" /> : <LocateFixed size={15} />} Use my current location
+      </button>
+      {/* ② Your location */}
+      <div>
+        <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Your location</p>
+        <div className="relative">
+          <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
+          <input type="text" aria-label="Your location" value={userLocation} onChange={(e) => applyUserCity(e.target.value)} placeholder="Search city…" className="w-full border border-gray-200 rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+        </div>
+      </div>
+      {/* ③ Delivery location (disabled while "same as" is on) */}
+      <div>
+        <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Delivery location</p>
+        <div className="relative">
+          <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
+          <input type="text" aria-label="Delivery location" value={deliveryLocation} disabled={sameAsLoc} onChange={(e) => setDeliveryLocation(e.target.value)} placeholder="Search city…" className={`w-full border rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 ${sameAsLoc ? 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed' : 'border-gray-200'}`} />
+        </div>
+      </div>
+      {/* ④ Same as my location */}
+      <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+        <input type="checkbox" checked={sameAsLoc} onChange={toggleSameAs} className="accent-teal-600 w-4 h-4" />
+        Delivery is same as my location
+      </label>
+    </>
+  );
+
+  // Desktop-only anchored popover (mobile now renders locationFields inline — no drawer).
   const renderLocationPopover = (align: 'left' | 'right' = 'right') => (
     <>
-      <div className="fixed inset-0 z-30 bg-black/20 sm:bg-transparent" onClick={() => setLocationEditing(false)} />
-      <div className={`fixed inset-x-0 bottom-0 z-40 w-full rounded-t-2xl border-t border-gray-100 p-4 animate-modal-in text-left space-y-3 bg-white shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)] sm:absolute sm:inset-x-auto sm:bottom-auto sm:top-full sm:mt-2 sm:w-80 sm:max-w-[calc(100vw-3rem)] sm:rounded-xl sm:border sm:p-3 ${align === 'left' ? 'sm:left-0' : 'sm:right-0'}`} style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }} onClick={(e) => e.stopPropagation()}>
-        <div className="w-9 h-1 bg-gray-200 rounded-full mx-auto mb-1 sm:hidden" />
-        {/* ① Use my current location (browser GPS → reverse-geocode; falls back to IP city) */}
-        <button type="button" onClick={useCurrentLocation} disabled={geoLoading} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border border-teal-200 bg-teal-50 text-teal-700 text-sm font-semibold hover:bg-teal-100 disabled:opacity-60">
-          {geoLoading ? <span className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" /> : <LocateFixed size={15} />} Use my current location
-        </button>
-        {/* ② Your location */}
-        <div>
-          <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Your location</p>
-          <div className="relative">
-            <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
-            <input type="text" value={userLocation} onChange={(e) => applyUserCity(e.target.value)} placeholder="Search city…" className="w-full border border-gray-200 rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
-          </div>
-        </div>
-        {/* ③ Delivery location (disabled while "same as" is on) */}
-        <div>
-          <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Delivery location</p>
-          <div className="relative">
-            <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
-            <input type="text" value={deliveryLocation} disabled={sameAsLoc} onChange={(e) => setDeliveryLocation(e.target.value)} placeholder="Search city…" className={`w-full border rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 ${sameAsLoc ? 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed' : 'border-gray-200'}`} />
-          </div>
-        </div>
-        {/* ④ Same as my location */}
-        <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
-          <input type="checkbox" checked={sameAsLoc} onChange={toggleSameAs} className="accent-teal-600 w-4 h-4" />
-          Delivery is same as my location
-        </label>
+      <div className="fixed inset-0 z-30" onClick={() => setLocationEditing(false)} />
+      <div className={`absolute z-40 top-full mt-2 w-80 max-w-[calc(100vw-3rem)] rounded-xl border border-gray-100 p-3 animate-modal-in text-left space-y-3 bg-white shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)] ${align === 'left' ? 'left-0' : 'right-0'}`} onClick={(e) => e.stopPropagation()}>
+        {locationFields}
         <button type="button" onClick={() => setLocationEditing(false)} className="w-full py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700">Done</button>
       </div>
     </>
@@ -745,7 +1009,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     return (
       <div key={s.IM_SPEC_MASTER_DESC} className="space-y-2">
         <label className="block text-sm font-medium text-gray-700">{s.IM_SPEC_MASTER_DESC}{hint && <span className="ml-2 font-normal text-gray-400">— {hint}</span>}</label>
-        {opts.length > 0 ? <OptionChips options={opts} value={specValues[s.IM_SPEC_MASTER_DESC] || ''} onChange={(v) => setSpecValue(s.IM_SPEC_MASTER_DESC, v)} />
+        {opts.length > 0 ? <OptionChips ariaLabel={s.IM_SPEC_MASTER_DESC} options={opts} value={specValues[s.IM_SPEC_MASTER_DESC] || ''} onChange={(v) => setSpecValue(s.IM_SPEC_MASTER_DESC, v)} />
           : <input type="text" value={specValues[s.IM_SPEC_MASTER_DESC] || ''} onChange={(e) => setSpecValue(s.IM_SPEC_MASTER_DESC, e.target.value)} placeholder={hint || `Enter ${s.IM_SPEC_MASTER_DESC.toLowerCase()}`} className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-400" />}
       </div>
     );
@@ -786,10 +1050,13 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         </div>
       )}
       {aiSpecsLoading && visibleAiSpecs.length === 0 && (
-        <p className="text-xs text-gray-400 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Preparing smart questions…</p>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-gray-400 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Preparing smart questions…</p>
+          <button type="button" onClick={() => setStage('more')} className="text-xs text-gray-400 underline underline-offset-2 hover:text-gray-600 shrink-0">Skip for now</button>
+        </div>
       )}
       {!aiSpecsLoading && visibleAiSpecs.length === 0 && (
-        <p className="text-sm text-gray-400">{aiSpecsError ? 'Couldn’t load smart questions right now — you can continue anyway. →' : 'No extra questions needed — your specs already cover it. Continue →'}</p>
+        <p className="text-sm text-gray-400">{!hasFormLLM() ? 'You can add any extra details on the next step. →' : aiSpecsError ? 'Couldn’t load smart questions right now — you can continue anyway. →' : 'No extra questions needed — your specs already cover it. Continue →'}</p>
       )}
       {visibleAiSpecs.map((q) => (
         <div key={q.fieldName} className="space-y-2">
@@ -798,7 +1065,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
             {q.helperText && <span className="ml-2 font-normal text-gray-400">— {q.helperText}</span>}
             {q.prefill && aiSpecValues[q.fieldName] === q.prefill && <span className="ml-2 font-normal text-teal-600">✦ from your input</span>}
           </label>
-          <OptionChips options={q.options} value={aiSpecValues[q.fieldName] || ''} onChange={(v) => setAiSpecValues((p) => ({ ...p, [q.fieldName]: v }))} />
+          <OptionChips ariaLabel={q.fieldName} options={q.options} value={aiSpecValues[q.fieldName] || ''} onChange={(v) => setAiSpecValues((p) => ({ ...p, [q.fieldName]: v }))} />
         </div>
       ))}
     </div>
@@ -809,15 +1076,12 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   // ── Last page pieces (owner order): Logistics & Payment FIRST, then About You, then Contact (collapsed). ──
   const logisticsBody = (
       <div className="rounded-xl border border-gray-200 p-4 sm:p-5 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
-        {/* MOBILE: delivery location lives HERE (header is crowded on MSite). Desktop keeps the header pill. */}
+        {/* MOBILE: delivery location lives HERE (header is crowded on MSite) and is INLINE — no drawer (P1-106).
+            Desktop keeps the compact header pill + anchored popover. */}
         {isMobile && (
-          <div className="mb-4 relative">
-            <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><MapPin size={13} className="text-teal-500" /> Delivery location</p>
-            <button type="button" onClick={() => { setScoreOpen(false); setLocationEditing((v) => !v); }} className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2.5 text-sm text-gray-700 hover:border-teal-300">
-              <span className="truncate flex items-center gap-1.5"><MapPin size={13} className="text-gray-300 shrink-0" />{deliveryLocation || detectedCity || 'Select delivery city'}</span>
-              <Pencil size={13} className="text-gray-400 shrink-0" />
-            </button>
-            {locationEditing && renderLocationPopover('left')}
+          <div className="mb-4 pb-4 border-b border-gray-100 space-y-3">
+            <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 tracking-wide"><MapPin size={13} className="text-teal-500" /> Delivery location</p>
+            {locationFields}
           </div>
         )}
         <div className="flex flex-col sm:grid sm:grid-cols-2 gap-4 sm:gap-6">
@@ -849,10 +1113,10 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         </button>
         {contactOpen && (
           <div className="space-y-3 mt-4">
-            <input type="text" value={contactName} onChange={(e) => setContactName(e.target.value)} placeholder="Your name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
-            <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-teal-400 focus-within:border-teal-400"><span className="px-3 py-2.5 text-sm text-gray-500 bg-gray-50 border-r border-gray-200">+91</span><input type="tel" value={contactMobile} onChange={(e) => setContactMobile(e.target.value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile" className="flex-1 px-3 py-2.5 text-base sm:text-sm outline-none" /></div>
-            <input type="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="Email (optional)" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
-            <textarea value={requirementNotes} onChange={(e) => setRequirementNotes(e.target.value)} rows={2} placeholder="Any specific requirement, grade, packaging…" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 resize-none" />
+            <input type="text" aria-label="Your name" autoComplete="name" value={contactName} onChange={(e) => setContactName(e.target.value)} placeholder="Your name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+            <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-teal-400 focus-within:border-teal-400"><span className="px-3 py-2.5 text-sm text-gray-500 bg-gray-50 border-r border-gray-200">+91</span><input type="tel" aria-label="Mobile number" autoComplete="tel-national" value={contactMobile} onChange={(e) => setContactMobile(e.target.value.replace(/\D/g, '').slice(0, 10))} placeholder="10-digit mobile" className="flex-1 px-3 py-2.5 text-base sm:text-sm outline-none" /></div>
+            <input type="email" aria-label="Email address (optional)" autoComplete="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="Email (optional)" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+            <textarea aria-label="Additional requirement details" value={requirementNotes} onChange={(e) => setRequirementNotes(e.target.value)} rows={2} placeholder="Any specific requirement, grade, packaging…" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 resize-none" />
           </div>
         )}
       </div>
@@ -875,7 +1139,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
           </div>
           <div>
             <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">Industry</p>
-            <input type="text" value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g., Construction" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+            <input type="text" aria-label="Industry" value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g., Construction" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
           </div>
         </div>
         {/* GST — asked only for a BUSINESS role (every Business type except "Individual Buyer"), per the V3 rule.
@@ -888,7 +1152,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
               <RadioChip label="No" selected={gstRegistered === false} onClick={() => { setGstRegistered(gstRegistered === false ? null : false); setGstNumber(''); }} />
             </div>
             {gstRegistered === true && (
-              <input type="text" value={gstNumber} onChange={(e) => setGstNumber(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 15))} placeholder="GST number (15 digits)" className="w-full mt-2 border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+              <input type="text" aria-label="GST number" value={gstNumber} onChange={(e) => setGstNumber(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 15))} placeholder="GST number (15 digits)" className="w-full mt-2 border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
             )}
           </div>
         )}
@@ -897,6 +1161,12 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   );
 
   // ── Curated sellers (results) ──
+  // ⚑ DEV-TODO (owner: keep this UI as-is for the demo): DEMO_SELLERS is illustrative. Wire the real server-side
+  //   seller-match API here (it returns verified GST/TrustSEAL/ratings). Owner: seed the first cards from the
+  //   IMSearchAPI product-search results (real company / city / price / image) — company/city/price need
+  //   fetchProductImages extended to return those fields; for now each card shows a real listing IMAGE + a
+  //   "Representative image" note. "Send Enquiry" / Call / WhatsApp are DEMO CTAs — wire the real dispatch (the
+  //   BL is already generated at submit via dispatchBuyLead); gate "Enquiry sent" on a real POST when wired.
   const resultsBody = (
     <div className="space-y-4">
       <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-3 flex items-center justify-between gap-3">
@@ -908,13 +1178,14 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         {!isMobile && <div className="flex gap-1.5"><button type="button" onClick={() => scrollCard(-1)} className="w-8 h-8 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50"><ChevronLeft className="w-4 h-4" /></button><button type="button" onClick={() => scrollCard(1)} className="w-8 h-8 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50"><ChevronRight className="w-4 h-4" /></button></div>}
       </div>
       <div ref={cardScrollRef} onScroll={(e) => setCardIdx(Math.round(e.currentTarget.scrollLeft / (e.currentTarget.clientWidth * 0.86)))} className="flex gap-3 overflow-x-auto snap-x snap-mandatory -mx-1 px-1 pb-2 scroll-smooth">
-        {DEMO_SELLERS.map((s) => {
+        {DEMO_SELLERS.map((s, si) => {
           const sent = sentTo.has(s.name); const open = openEnquiry === s.name;
+          const cardImg = productImages[si] || productImageUrl; // real IMSearchAPI listing photos, one per card
           return (
             <div key={s.name} className={`snap-center shrink-0 ${isMobile ? 'w-[86%]' : 'w-[300px]'} bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden`}>
               <div className="relative bg-gray-50" style={{ aspectRatio: '4/3' }}>
                 <span className="absolute top-3 left-3 z-10 bg-black/80 text-white text-xs font-semibold px-2.5 py-1 rounded-full">Get Best Price</span>
-                {productImageUrl ? <img src={productImageUrl} alt="" className="w-full h-full object-contain p-4" /> : <div className="w-full h-full flex items-center justify-center"><Package className="w-10 h-10 text-gray-300" /></div>}
+                {cardImg ? <><img src={cardImg} alt="" className="w-full h-full object-contain p-4" /><span className="absolute bottom-2 left-2 z-10 text-[10px] text-gray-400 bg-white/85 px-1.5 py-0.5 rounded">Representative image</span></> : <div className="w-full h-full flex items-center justify-center"><Package className="w-10 h-10 text-gray-300" /></div>}
               </div>
               <div className="p-4 space-y-2">
                 <p className="font-bold text-gray-800">{s.name}</p>
@@ -948,13 +1219,13 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     </div>
   );
 
-  // ── The single-panel (steps 1/2/results) — V3 chrome ──
+  // ── The single-panel (steps 1/2/results) — V3 chrome. ──
   const singlePanel = (
     <div className={`flex flex-col ${isMobile || standalone ? 'h-full' : 'h-[78vh] min-h-[560px] max-h-[92vh]'} min-h-0`}>
       <div className="px-5 pt-4 pb-0 flex items-center gap-3 shrink-0">
         {isMobile
-          ? <button onClick={goBack} aria-label="Back" className="w-9 h-9 -ml-1 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-500 shrink-0"><ArrowLeft className="w-5 h-5" /></button>
-          : <button onClick={() => fileRef.current?.click()} className="w-10 h-10 rounded-xl border-2 border-dashed border-gray-200 flex items-center justify-center text-gray-400 hover:border-teal-300 shrink-0 overflow-hidden">{productImageUrl ? <img src={productImageUrl} className="w-full h-full object-cover rounded-xl" alt="" /> : <Camera size={16} />}</button>}
+          ? <button onClick={goBack} aria-label="Back" className="w-11 h-11 -ml-1.5 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-500 shrink-0"><ArrowLeft className="w-5 h-5" /></button>
+          : <button onClick={() => fileRef.current?.click()} className="w-10 h-10 rounded-xl border-2 border-dashed border-gray-200 flex items-center justify-center text-gray-400 hover:border-teal-300 shrink-0 overflow-hidden">{imageBase64 ? <img src={`data:image/jpeg;base64,${imageBase64}`} className="w-full h-full object-cover rounded-xl" alt="" /> : <Camera size={16} />}</button>}
         <div className="flex-1 min-w-0">
           <p className="font-bold text-teal-600 text-base leading-tight truncate">{productName}</p>
         </div>
@@ -973,17 +1244,21 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         {!standalone && stage !== 'results' && scoreCircle}
         {/* Keyboard-safe mobile CTA (owner): the footer Next/Get-Quotes sits behind the on-screen keyboard on
             text-input stages, so mirror it into the always-visible header. Footer stays for the non-keyboard case. */}
-        {isMobile && stage !== 'results' && (
-          <button type="button" onClick={() => { if (stage === 'specs') setStage('aispecs'); else if (stage === 'aispecs') setStage('more'); else submit(); }} className="flex items-center gap-1 shrink-0 bg-teal-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-teal-700">
-            {stage === 'more' ? 'Get Quotes' : 'Next'} <ArrowRight size={13} />
-          </button>
-        )}
+        {isMobile && stage !== 'results' && (() => {
+          const holding = stage === 'aispecs' && aiSpecsLoading; // P2-203: hold on mobile while smart questions load (was a silent skip)
+          return (
+            <button type="button" disabled={holding} onClick={() => { if (stage === 'specs') setStage('aispecs'); else if (stage === 'aispecs') setStage('more'); else submit(); }} className={`flex items-center gap-1 shrink-0 text-white text-xs font-semibold px-3 py-1.5 rounded-lg ${holding ? 'bg-gray-300 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700'}`}>
+              {holding ? 'Preparing…' : stage === 'more' ? 'Get Quotes' : 'Next'} {!holding && <ArrowRight size={13} />}
+            </button>
+          );
+        })()}
         {!isMobile && !standalone && <button onClick={handleExit} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 hover:bg-gray-200 ml-1 shrink-0"><X size={14} /></button>}
       </div>
       {/* Clickable stage stepper (owner MSite redesign): a per-stage ICON for every node, colored by
           passed/current/upcoming; the stage NAME shows only for the CURRENT stage on mobile (all labels on
           desktop). Passed icons (idx ≤ current) are clickable to jump back. A green blinking dot sits on the
           "More Details" node while the AI smart-questions are being prepared in the background. */}
+      {stage !== 'results' && <>
       <div className="mx-5 mt-3 flex items-center gap-1 shrink-0 overflow-x-auto scroll-auto-hide">
         {STEPPER.map((node, i) => {
           const cur = stageNodeIdx(stage);
@@ -1006,8 +1281,9 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         })}
       </div>
       <div className="mx-5 mt-2 h-0.5 bg-gray-100 rounded-full overflow-hidden shrink-0"><div className="h-full bg-orange-400 rounded-full transition-all duration-500" style={{ width: progressPercent + '%' }} /></div>
+      </>}
       {aiBusy && <div className="shrink-0 mx-5 mt-2 px-3 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
-      <div className="flex-1 min-h-0 overflow-y-auto scroll-auto-hide px-5 py-5">{stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}</div> : resultsBody}</div>
+      <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">{stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}</div> : resultsBody}</div>
       {/* Footer = DESKTOP only. On mobile it's redundant: the header has the ← back-arrow + the sticky Next/
           Get-Quotes CTA (keyboard-safe), and the stepper shows the step — so the bottom bar is dropped (owner). */}
       {stage !== 'results' && !isMobile && (
@@ -1039,11 +1315,11 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const productMobile = (
     <div className="flex flex-col h-full min-h-0">
       <div className="shrink-0 px-4 pt-3 pb-2 border-b border-gray-100 flex items-center gap-3">
-        <button onClick={onClose} aria-label="Back" className="w-9 h-9 -ml-1 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-500"><ArrowLeft className="w-5 h-5" /></button>
+        <button onClick={onClose} aria-label="Back" className="w-11 h-11 -ml-1.5 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-500"><ArrowLeft className="w-5 h-5" /></button>
         <div className="flex-1 min-w-0"><p className="font-bold text-teal-600 text-[15px] leading-tight">Post a Requirement</p><p className="text-[11px] text-gray-400">Tell us what you need</p></div>
       </div>
       {aiBusy && <div className="shrink-0 px-4 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-5">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-5">
         <p className="text-sm font-semibold text-gray-700 mb-2">Enter Product/Service name <span className="text-red-500">*</span></p>
         {productInputRow}
         {qtyUnitBlock}
@@ -1107,30 +1383,12 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
         {committed ? qtyUnitBlock : (
           <div className="mt-4">
             <label className="block text-sm font-semibold text-gray-700 mb-2">Requirement Details</label>
-            <textarea value={requirementNotes} onChange={(e) => setRequirementNotes(e.target.value)} rows={4} placeholder="Describe what you need — grade, size, packaging, brand preference…" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 resize-none" />
+            <textarea aria-label="Requirement details" value={requirementNotes} onChange={(e) => setRequirementNotes(e.target.value)} rows={4} placeholder="Describe what you need — grade, size, packaging, brand preference…" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 resize-none" />
           </div>
         )}
         <button onClick={() => setStage('specs')} disabled={!canContinueProduct} className={`mt-auto w-full py-3 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-all ${canContinueProduct ? 'bg-teal-600 text-white hover:bg-teal-700' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>Next <ArrowRight size={16} /></button>
       </div>
     </div>
-  );
-
-  // IndiaMART top nav for the STANDALONE full-page routes (owner: "use the same header, remove location +
-  // search + Get Best Price"). Recreated wordmark (no logo asset in repo). Nav items are chrome (non-functional).
-  const standaloneHeader = (
-    <header className="shrink-0 h-16 bg-[#2e3192] text-white flex items-center gap-6 px-6 shadow-[0_1px_3px_0_rgba(30,42,58,0.2)]">
-      <div className="flex items-center gap-2 select-none">
-        <span className="w-8 h-8 rounded-full bg-white flex items-center justify-center shrink-0"><span className="text-[#e4002b] font-black text-lg leading-none">M</span></span>
-        <span className="text-xl font-extrabold tracking-tight lowercase">indiamart<span className="text-[9px] align-super font-semibold">®</span></span>
-      </div>
-      <div className="flex-1" />
-      <nav className="flex items-center gap-6">
-        {[{ Icon: Store, label: 'Seller Tools' }, { Icon: MessageCircle, label: 'Messages' }, { Icon: HelpCircle, label: 'Help' }, { Icon: Globe, label: 'Exporters' }].map(({ Icon, label }) => (
-          <span key={label} className="flex flex-col items-center gap-0.5 text-white/90 cursor-default"><Icon size={18} /><span className="text-[11px]">{label}</span></span>
-        ))}
-        <span className="flex items-center gap-1.5 cursor-default"><span className="w-7 h-7 rounded-full bg-white/20 flex items-center justify-center"><User size={16} /></span><span className="text-sm">Hi {(contactName || 'Tarbrinder').split(' ')[0]}</span><ChevronDown size={14} className="text-white/70" /></span>
-      </nav>
-    </header>
   );
 
   const productStep = isMobile ? productMobile : productDesktop;
@@ -1184,25 +1442,28 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   return (
     <>
       {isMobile ? (
-        <div className="fixed inset-0 z-50 bg-white flex flex-col animate-modal-in" style={{ height: '100dvh' }}>
+        <div role="dialog" aria-modal="true" aria-label="Post a Requirement" className={`${themeClass} fixed inset-0 z-50 bg-white flex flex-col animate-modal-in`} style={{ height: '100dvh' }}>
           {stage === 'product' ? productStep : singlePanel}
         </div>
       ) : standalone ? (
         // Standalone full-page route (?rfq=…): a REAL IndiaMART-style page. App shell = IndiaMART header on top,
         // the persistent LEFT score rail, and the form filling the rest full-bleed (no card, no popup X, no gutters).
-        <div className="fixed inset-0 z-50 bg-gray-50 flex flex-col">
-          {standaloneHeader}
+        <div className={`${themeClass} fixed inset-0 z-50 bg-gray-50 flex flex-col`}>
+          <IndiaMartHeader firstName={isLoggedIn && contactName ? contactName.split(' ')[0] : ''} onExit={handleExit} />
           <div className="flex-1 min-h-0 flex overflow-hidden">
             {scoreRail}
-            <div className="flex-1 min-w-0 bg-white overflow-y-auto flex flex-col">
+            {/* Only the product page needs this outer column to scroll; on flow pages singlePanel is h-full and
+                its OWN body scrolls (with the scroll-reset ref). Keeping the outer scrollable on flow pages left
+                residual scrollTop from the product page, pushing the next stage up out of view (owner's scroll bug). */}
+            <div className={`flex-1 min-w-0 bg-white flex flex-col ${stage === 'product' ? 'overflow-y-auto overscroll-contain' : 'overflow-hidden'}`}>
               {stage === 'product' ? productStep : singlePanel}
             </div>
           </div>
         </div>
       ) : (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm overflow-y-auto overscroll-contain" style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
           <div className="flex min-h-full items-center justify-center p-4 sm:p-6">
-            <div className={`relative bg-white rounded-xl w-full ${shellWidth} overflow-hidden animate-modal-in shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]`}>
+            <div role="dialog" aria-modal="true" aria-label="Post a Requirement" className={`${themeClass} relative bg-white rounded-xl w-full ${shellWidth} overflow-hidden animate-modal-in shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]`}>
               {stage === 'product' ? productStep : singlePanel}
             </div>
           </div>
@@ -1210,9 +1471,19 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       )}
 
       <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onPhoto(f); e.currentTarget.value = ''; }} />
-      {showVoice && <VoiceRecorder onRecordingComplete={(blob) => onVoice(blob)} onCancel={() => setShowVoice(false)} />}
-      {showOTP && <OTPGate initialName={contactName} initialMobile={contactMobile} onVerified={() => { otpVerified.current = true; setShowOTP(false); setStage('results'); }} onClose={() => setShowOTP(false)} />}
-      {toast && <div className="fixed left-1/2 -translate-x-1/2 bottom-6 z-[70] bg-gray-900 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg max-w-[90vw] text-center animate-modal-in">{toast}</div>}
+      {/* Voice recorder needs its OWN overlay — VoiceRecorder renders a bare card (no positioning), so without
+          this wrapper it was hidden behind the z-50 modal (the "mic not working" bug). Bottom-sheet on mobile. */}
+      {showVoice && (
+        <div className="fixed inset-0 z-[80] flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-4" onClick={() => setShowVoice(false)}>
+          <div ref={voiceRef} role="dialog" aria-modal="true" aria-label="Speak your requirement" className="w-full sm:max-w-sm bg-white rounded-t-2xl sm:rounded-2xl shadow-[0_12px_32px_-4px_rgba(30,42,58,0.24)] animate-modal-in" style={{ paddingBottom: 'max(env(safe-area-inset-bottom),8px)' }} onClick={(e) => e.stopPropagation()}>
+            <VoiceRecorder onRecordingComplete={(blob) => onVoice(blob)} onCancel={() => setShowVoice(false)} />
+          </div>
+        </div>
+      )}
+      {showOTP && <OTPGate initialName={contactName} initialMobile={contactMobile} onVerified={(name, mobile) => { if (name) setContactName((n) => n || name); if (mobile) setContactMobile((m) => m || mobile); otpVerified.current = true; setShowOTP(false); dispatchBuyLead({ name, mobile }); setStage('results'); }} onClose={() => setShowOTP(false)} />}
+      {/* Screen-reader live region (P1-128): announces the current step + RFQ-strength score as they change,
+          so non-visual users hear progress the score ring / stepper convey visually. Visually hidden. */}
+      <div aria-live="polite" className="sr-only">{`Step: ${stage}. RFQ strength ${scoreDetails.total} out of 100, ${getScoreLabel(scoreDetails.total)}.`}</div>
     </>
   );
 }
