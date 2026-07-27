@@ -108,18 +108,34 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
     );
   }
 
-  // ── Phase 2: choose repost / enrich / new (product recommendations) ──
+  // Shared chrome (used by BOTH the chooser and the form) — surface switcher + debug.
+  const surface: 'mobile' | 'desktop' = mode === 'mobile' ? 'mobile' : 'desktop';
+  const debugBtn = payload && (
+    <button onClick={() => setDebug((v) => !v)} className="fixed right-3 top-3 z-[60] rounded-lg bg-gray-900/90 px-2.5 py-1 text-[12px] font-semibold text-white">🔬 Debug</button>
+  );
+  // Surface switcher — reachable even on a deep-linked ?glid= (which skips the phase-1 picker).
+  const modeSwitch = (
+    <div className="fixed left-3 top-3 z-[80] flex gap-0.5 rounded-lg bg-gray-900/90 p-0.5 text-[11px] font-semibold">
+      {(['mobile', 'popup', 'standalone'] as const).map((mo) => (
+        <button key={mo} onClick={() => setMode(mo)} className={`rounded px-2 py-1 capitalize ${mode === mo ? 'bg-white text-gray-900' : 'text-white/80 hover:text-white'}`}>{mo}</button>
+      ))}
+    </div>
+  );
+  const debugRail = debug && payload && (
+    <div className="fixed inset-0 z-[70] bg-white sm:left-auto sm:w-[420px] sm:border-l sm:border-gray-200 sm:shadow-2xl"><BrainDebugPanel p={payload} onClose={() => setDebug(false)} /></div>
+  );
+
+  // ── Phase 2: choose repost / enrich / new — rendered per SURFACE mode (mobile / popup / standalone) ──
   if (phase === 'choose') {
-    return (
-      <div className="flex h-screen flex-col bg-gray-50">
-        <IndiaMartHeader onExit={() => setPhase('glid')} />
-        <div className="flex items-center gap-2 border-b border-gray-200 bg-white px-4 py-2">
-          <button onClick={() => setPhase('glid')} className="text-[13px] text-gray-500">← GLID</button>
-          <span className="text-[13px] font-medium text-gray-700">{glid}</span>
-          <span className={`rounded px-2 py-0.5 text-[11px] ${loading ? 'bg-amber-100 text-amber-700' : live ? 'bg-teal-100 text-teal-700' : 'bg-gray-100 text-gray-500'}`}>{loading ? `loading (${pns})…` : live ? 'live' : 'fixture'}</span>
-          {payload && <button onClick={() => setDebug(true)} className="ml-auto rounded-lg border border-gray-300 px-2.5 py-1 text-[12px] font-semibold">🔬 Debug</button>}
-        </div>
-        <div className="mx-auto w-full max-w-md flex-1 overflow-y-auto px-5 py-5">
+    const glidBar = (
+      <div className="flex items-center gap-2 border-b border-gray-200 bg-white px-4 py-2">
+        <button onClick={() => setPhase('glid')} className="text-[13px] text-gray-500">← GLID</button>
+        <span className="text-[13px] font-medium text-gray-700">{glid}</span>
+        <span className={`rounded px-2 py-0.5 text-[11px] ${loading ? 'bg-amber-100 text-amber-700' : live ? 'bg-teal-100 text-teal-700' : 'bg-gray-100 text-gray-500'}`}>{loading ? `loading (${pns})…` : live ? 'live' : 'fixture'}</span>
+      </div>
+    );
+    const chooseBody = (
+      <div className="mx-auto w-full max-w-md flex-1 overflow-y-auto px-5 py-5">
           <h2 className="text-base font-semibold text-gray-900">What do you want quotes for?</h2>
           <p className="mt-0.5 text-[12px] text-gray-500">Type it, or continue where you left off.</p>
 
@@ -171,28 +187,32 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
             </button>
           </div>
         </div>
-        {debug && payload && <div className="fixed inset-0 z-50 bg-white sm:left-auto sm:w-[400px] sm:border-l sm:border-gray-200"><BrainDebugPanel p={payload} onClose={() => setDebug(false)} /></div>}
+    );
+    const inner = <>{glidBar}{chooseBody}</>;
+    if (mode === 'popup') return (
+      <div className="relative h-screen bg-gray-100">
+        <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4">
+          <div className="flex h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">{inner}</div>
+        </div>
+        {modeSwitch}{debugBtn}{debugRail}
+      </div>
+    );
+    if (mode === 'mobile') return (
+      <div className="relative flex h-screen justify-center bg-gray-100">
+        <div className="relative flex h-full w-full max-w-[390px] flex-col overflow-hidden bg-white shadow-xl">{inner}</div>
+        {modeSwitch}{debugBtn}{debugRail}
+      </div>
+    );
+    return (
+      <div className="relative flex h-screen flex-col bg-gray-50">
+        <IndiaMartHeader onExit={() => setPhase('glid')} />
+        {inner}
+        {modeSwitch}{debugBtn}{debugRail}
       </div>
     );
   }
 
   // ── Phase 3: the DUPLICATED Simple form, pre-seeded — rendered per SURFACE mode ──
-  const surface: 'mobile' | 'desktop' = mode === 'mobile' ? 'mobile' : 'desktop';
-  const debugBtn = payload && (
-    <button onClick={() => setDebug((v) => !v)} className="fixed right-3 top-3 z-[60] rounded-lg bg-gray-900/90 px-2.5 py-1 text-[12px] font-semibold text-white">🔬 Debug</button>
-  );
-  // Surface switcher — reachable even on a deep-linked ?glid= (which skips the phase-1 picker),
-  // so all three variants can be exercised without re-entering. Left side, above the form + rail.
-  const modeSwitch = (
-    <div className="fixed left-3 top-3 z-[80] flex gap-0.5 rounded-lg bg-gray-900/90 p-0.5 text-[11px] font-semibold">
-      {(['mobile', 'popup', 'standalone'] as const).map((mo) => (
-        <button key={mo} onClick={() => setMode(mo)} className={`rounded px-2 py-1 capitalize ${mode === mo ? 'bg-white text-gray-900' : 'text-white/80 hover:text-white'}`}>{mo}</button>
-      ))}
-    </div>
-  );
-  const debugRail = debug && payload && (
-    <div className="fixed inset-0 z-[70] bg-white sm:left-auto sm:w-[420px] sm:border-l sm:border-gray-200 sm:shadow-2xl"><BrainDebugPanel p={payload} onClose={() => setDebug(false)} /></div>
-  );
   const form = <BrainRFQForm surface={surface} standalone={mode !== 'popup'} loggedIn categoryMode="category" brainSeed={seed ?? undefined} onClose={() => setPhase('choose')} />;
 
   if (mode === 'popup') {

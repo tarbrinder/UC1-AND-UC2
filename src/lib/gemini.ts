@@ -1704,6 +1704,66 @@ Rules: NEVER ask anything already in already_known. Plain buyer words, no jargon
   } catch { return { gaps: [] }; }
 }
 
+// ─── The UNIFIED Curated-RFQ Planner (collapses buyer-aware + getMissingSpecs + getSpecHints) ─────
+// ONE flash-lite UNDERSTAND→USE call: given everything we KNOW about THIS buyer × the category's real
+// seller questions, it (a) understands the buyer, (b) PREFILLS/CORRECTS fields from the buyer's OWN truth
+// (WhatsApp/calls/basket) with provenance, (c) emits the ONE opening intent question + ranked gaps NOT
+// already known, (d) decides an optional identity ask. Objective = maximise understanding, minimum effort.
+// Firewall: prefills come ONLY from the buyer's own stated signals (a category norm is a SUGGEST-gap, never
+// a prefill); a grounding guard drops any prefill value not backed by a real signal token.
+export interface CuratedPlan {
+  opening?: { q: string; why: string; options?: string[] };
+  prefills: { field: string; value: string; source: string; corrected_from?: string }[];   // Progressive Truth Enrichment
+  gaps: { q: string; kind: 'non_spec' | 'spec'; why: string; options?: string[] }[];
+  kyb_ask?: { doc: string; why: string } | null;
+  __raw?: { system: string; user: string; output: string };
+}
+export async function runCuratedPlanner(input: {
+  requirement: string;
+  filled?: Record<string, string>;                 // specs/qty/unit/location we already hold (the seed)
+  buyerSpecs?: string[];                            // ISQ field names shown on page 1 (never re-ask)
+  buyerSpecOptions?: Record<string, string[]>;
+  sellerSpecs?: string[];
+  categoryTopSpecs?: { q: string; pct?: number; vals?: string[] }[];
+  categoryPersonas?: unknown;
+  categoryB2b?: unknown;
+  buyerFacts?: Record<string, unknown>;
+  basket?: string[];
+  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[] };
+  entryMode?: string;
+  model?: string;
+}): Promise<CuratedPlan> {
+  const known = Object.entries(input.filled || {}).filter(([, v]) => v && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join('; ') || 'None';
+  const specsDetail = (input.buyerSpecs || []).map((n) => { const o = input.buyerSpecOptions?.[n]; return o && o.length ? `${n} [${o.slice(0, 8).join(', ')}]` : n; }).join('; ') || 'None';
+  const sys = `You are the Curated-RFQ Engine for IndiaMART. You KNOW this buyer (their facts, basket, and their OWN WhatsApp/call signals) and what sellers ACTUALLY ask in this category. Your objective is to maximise understanding of THIS requirement with the LEAST buyer effort — prefill/confirm what you already know, and ask only the fewest decisive gaps.
+Return ONLY JSON:
+{"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}],"kyb_ask":{"doc":"GST|Udyam|PAN|Company name","why":"buyer-benefit reason"}}
+RULES:
+- prefills = fill or CORRECT a field ONLY from the buyer's OWN signals below (buyer_signals / also_sourcing) — e.g. a spec the buyer typed on WhatsApp, an application they said on a call. NEVER prefill from a category norm (that is a gap/suggestion). Set corrected_from ONLY when a fresher buyer signal disagrees with an already_known value (prefer the LATEST signal). If no real buyer signal supports a value, DO NOT emit it.
+- opening = ONE short intent/use-case question personalised to THIS buyer (what is it FOR / what scale / new-or-expand), inferred from basket + facts + signals. 2-4 tap options.
+- gaps = the fewest decisive questions NOT already in already_known and NOT covered by a page-1 buyer spec (judge by MEANING + overlapping options, not exact name). NON-SPEC first, then top category specs. Max 3 non-spec. Options-only (3-8 concrete chips), never open Brand/Make/Model, never re-ask quantity.
+- kyb_ask = include ONLY if the category is clearly B2B/bulk AND the buyer has no GST on file; pick the single best-value doc; phrase the why as a buyer benefit (e.g. "verified buyers get more seller responses"). Omit otherwise.
+- Plain buyer words, ≤12 words per question, no jargon (never say CSL/mcat/ISQ).`;
+  const usr = JSON.stringify({
+    requirement: input.requirement, already_known: known && known !== 'None' ? known : undefined,
+    page1_buyer_specs: specsDetail !== 'None' ? specsDetail : undefined,
+    seller_flagged_specs: input.sellerSpecs?.slice(0, 20),
+    seller_top_questions: input.categoryTopSpecs, category_personas: input.categoryPersonas, category_b2b_b2c: input.categoryB2b,
+    buyer_facts: input.buyerFacts, also_sourcing: input.basket, buyer_signals: input.buyerSignals, flow: input.entryMode,
+  });
+  try {
+    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 2200, temperature: 0.2 });
+    const j = JSON.parse(raw) as CuratedPlan;
+    // Grounding guard: a prefill VALUE must be backed by a real buyer signal (never a fabricated fill).
+    const signalText = [input.requirement, JSON.stringify(input.buyerSignals || {}), (input.basket || []).join(' '), Object.values(input.filled || {}).join(' ')].join(' ').toLowerCase();
+    const groundToks = new Set(signalText.match(/[a-z0-9]+/g) || []);
+    const backed = (v: string) => { const t = (String(v).toLowerCase().match(/[a-z0-9]+/g) || []).filter((x) => x.length >= 3 || /\d/.test(x)); return t.length ? t.some((x) => groundToks.has(x)) : false; };
+    const prefills = Array.isArray(j.prefills) ? j.prefills.filter((p) => p && p.field && p.value && backed(p.value)) : [];
+    const gaps = Array.isArray(j.gaps) ? j.gaps.slice(0, 6) : [];
+    return { opening: j.opening, prefills, gaps, kyb_ask: j.kyb_ask ?? null, __raw: { system: sys, user: usr, output: raw } };
+  } catch { return { prefills: [], gaps: [] }; }
+}
+
 export async function getMissingSpecs(args: {
   productName: string;
   categoryName?: string;

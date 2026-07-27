@@ -26,6 +26,30 @@ export interface BrainSeed {
   categoryTopSpecs?: { q: string; pct?: number; vals?: string[] }[];
   categoryKeywords?: string[];
   productImage?: string;                    // viewed/posted product image → seeded for display + image pipeline
+  // the buyer's OWN truth signals for THIS requirement (WhatsApp / calls) — the planner enriches/corrects from these
+  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[] };
+}
+
+const asArr = (x: unknown): unknown[] => (Array.isArray(x) ? x : []);
+const asStrs = (x: unknown): string[] => asArr(x).filter((s): s is string => typeof s === 'string');
+/** Pull the buyer's own WhatsApp/call signals out of the engine's node_raw (debug-only channel — but the
+ *  PLANNER is a reasoning step, and the firewall still governs OUTPUT, so feeding it raw signals is allowed). */
+function extractBuyerSignals(p: RequirementBrainPayload): BrainSeed['buyerSignals'] {
+  const nr = (p.observability?.node_raw ?? {}) as Record<string, unknown>;
+  const wa = (nr.whatsapp ?? {}) as Record<string, unknown>;
+  const cr = (((nr.calls ?? {}) as Record<string, unknown>).requirement ?? {}) as Record<string, unknown>;
+  const call_specs = asArr(cr.products)
+    .flatMap((pr) => asArr((pr as Record<string, unknown>).specs))
+    .map((s) => ({ name: String((s as Record<string, unknown>).name ?? ''), value: String((s as Record<string, unknown>).value ?? '') }))
+    .filter((s) => s.name && s.value).slice(0, 12);
+  const sig = {
+    whatsapp_products: asStrs(wa.products_enquired).slice(0, 8),
+    call_queries: asStrs(cr.buyer_queries).slice(0, 8),
+    call_application: typeof cr.intended_application === 'string' ? (cr.intended_application as string) : undefined,
+    call_specs,
+  };
+  // only return if there's at least one real signal
+  return (sig.whatsapp_products.length || sig.call_queries.length || sig.call_application || sig.call_specs.length) ? sig : undefined;
 }
 
 const val = (d: Decision) => (typeof d.value === 'string' ? d.value : '');
@@ -65,6 +89,7 @@ export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
     basket: (m.recommendations ?? []).map((r) => r.product),
     categoryTopSpecs: m.category?.top_specs,
     categoryKeywords: m.category?.keywords,
+    buyerSignals: extractBuyerSignals(p),
   };
 }
 
@@ -72,10 +97,20 @@ export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
  *  image + whatever specs we have; the form's own pipeline (like the image flow) fills the rest. */
 export function recommendationToSeed(rec: { product: string; mcat?: string; is_expired?: boolean; specs?: { name: string; value: string }[]; image?: string | null }): BrainSeed {
   const specValues: Record<string, string> = {};
-  for (const s of rec.specs ?? []) if (s.name && s.value) specValues[s.name] = s.value;
+  // Route qty / unit / delivery OUT of specs into their own fields (same as brainToSeed) — else a
+  // reposted card's "Quantity: 500 / Quantity Unit: Piece" stays a spec chip and the qty box shows empty.
+  let quantity = '', unit = '', deliveryLocation = '';
+  for (const s of rec.specs ?? []) {
+    if (!s.name || !s.value) continue;
+    if (QTY.test(s.name)) { quantity = s.value; continue; }
+    if (QTY_UNIT.test(s.name)) { unit = s.value; continue; }
+    if (DELIV.test(s.name)) { deliveryLocation = s.value; continue; }
+    if (/^(order_value|requirement_type|purchase_frequency|application)$/i.test(s.name)) continue; // context, not an ISQ chip
+    specValues[s.name] = s.value;
+  }
   return {
     productName: rec.product, mcatId: rec.mcat ?? '', committed: !!rec.mcat,
-    quantity: '', unit: '', deliveryLocation: '',
+    quantity, unit, deliveryLocation,
     startStage: rec.mcat ? 'specs' : 'product',
     entryMode: rec.is_expired ? 'repost' : 'enrich',
     specValues, gaps: [], conflicts: [], gstAsk: false,

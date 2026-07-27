@@ -15,7 +15,7 @@ import VoiceRecorder from './VoiceRecorder';
 import IndiaMartHeader from './IndiaMartHeader';
 import SellerSearchProgress from './SellerSearchProgress';
 import { searchSellers, type SellerResult } from '../lib/sellerSearch';
-import { analyzeImage, voiceToSpecs, hasGeminiKey, getSpecHints, getMissingSpecs, inferSpecsFromApplication, generateBuyerAwareQuestions, RFQ_LLM_ENABLED, type AiSpecQuestion, type BuyerAwareQuestions } from '../lib/gemini';
+import { analyzeImage, voiceToSpecs, hasGeminiKey, getSpecHints, getMissingSpecs, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchProductImages, upsizeImimg } from '../lib/enrichment';
 import { matchUnit } from '../lib/quantity';
 import { emit, EV, emitApiError } from '../lib/emit';
@@ -776,24 +776,42 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // ── The INTELLIGENCE LAYER: the buyer-aware first question. On mount, generate the ONE contextual
   //    intent question ("why do you need this?") + ≤2 non-spec gaps from WHO the buyer is × the category's
   //    real seller questions. Shown prominently above the specs. Debug-captured via LLM_RAW('buyer-aware-questions').
-  const [baq, setBaq] = useState<BuyerAwareQuestions | null>(null);
+  const [baq, setBaq] = useState<CuratedPlan | null>(null);
+  const [planCorrections, setPlanCorrections] = useState<CuratedPlan['prefills']>([]);
   const [baqLoading, setBaqLoading] = useState(false);
   const [baqAnswers, setBaqAnswers] = useState<Record<string, string>>({});
   const baqFired = useRef(false);
   useEffect(() => {
     if (!_seed?.productName || baqFired.current || !hasFormLLM()) return;
+    if (!committed || !isqSpecs.length) return;   // UNDERSTAND→USE needs the ISQ schema (buyer + seller specs) loaded first
     baqFired.current = true;
     setBaqLoading(true);
-    generateBuyerAwareQuestions({
-      requirement: _seed.productName,
-      buyerFacts: _seed.buyerFacts,
-      basket: _seed.basket,
-      knownSpecs: _seed.specValues,
-      categoryTopSpecs: _seed.categoryTopSpecs,
-      categoryKeywords: _seed.categoryKeywords,
-      entryMode: _seed.entryMode,
-    }).then((r) => setBaq(r)).catch(() => setBaq(null)).finally(() => setBaqLoading(false));
-  }, [_seed]);
+    const buyerSpecNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC);
+    const buyerSpecOptions: Record<string, string[]> = {};
+    for (const s of isqSpecs) buyerSpecOptions[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
+    const filled: Record<string, string> = { ...specValues };
+    if (quantity) filled['Quantity'] = quantity;
+    if (unit) filled['Quantity Unit'] = unit;
+    if (deliveryLocation) filled['Delivery location'] = deliveryLocation;
+    // ONE unified Curated-RFQ planner call (collapses buyer-aware + progressive enrichment): understand the
+    // buyer, prefill/correct from their OWN signals, and ask the fewest decisive gaps.
+    runCuratedPlanner({
+      requirement: _seed.productName, filled, buyerSpecs: buyerSpecNames, buyerSpecOptions,
+      sellerSpecs: sellerSpecsRef.current, categoryTopSpecs: _seed.categoryTopSpecs,
+      buyerFacts: _seed.buyerFacts, basket: _seed.basket, buyerSignals: _seed.buyerSignals,
+      entryMode: _seed.entryMode, model: RFQ_MODEL_SPECS,
+    }).then((r) => {
+      setBaq(r);
+      // PROGRESSIVE TRUTH ENRICHMENT: apply the planner's prefills/corrections onto the spec fields (never a
+      // fabricated value — the planner already grounding-guards them), and surface them in the step-1 strip.
+      if (r.prefills?.length) {
+        const map: Record<string, string> = {};
+        for (const p of r.prefills) if (p.field && p.value) map[p.field] = p.value;
+        if (Object.keys(map).length) applyExtractedSpecs(map);
+        setPlanCorrections(r.prefills);
+      }
+    }).catch(() => setBaq(null)).finally(() => setBaqLoading(false));
+  }, [_seed, committed, isqSpecs]);
 
   // ── LLM-on-image: a seeded product image → analyzeImage → MORE specs, via the same merge path as an
   //    upload. Best-effort: cross-origin image fetch may be CORS-blocked (imimg.com) → skip silently. ──
@@ -832,6 +850,19 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       return next;
     });
   }, [_seed, specsLoading, isqSpecs]);
+
+  // commitProduct (fired by the seed on mount) RESETS quantity/unit (it parses them from the product
+  // NAME, which a reposted card doesn't carry). Re-apply the card's own qty/unit/delivery once the
+  // product has committed — never overwriting a value the buyer has since typed. Unit rides pendingUnitRef
+  // so it's matched to a real chip once the ISQ unit options load (the same path voice uses).
+  const seedQtyApplied = useRef(false);
+  useEffect(() => {
+    if (!_seed || seedQtyApplied.current || !committed) return;
+    seedQtyApplied.current = true;
+    if (_seed.quantity) setQuantity((q) => q || _seed.quantity);
+    if (_seed.unit) pendingUnitRef.current = _seed.unit;
+    if (_seed.deliveryLocation) { setDeliveryLocation((d) => d || _seed.deliveryLocation); setSameAsLoc(false); }
+  }, [_seed, committed]);
 
   // Feed photo/voice-extracted specs into BOTH pipelines: page-1 fill (pendingAiSpecs → ISQ fields) AND
   // the page-2 AI-specs prompt (photoSpecsRef → getMissingSpecs input). Bumping aiEpoch re-runs page 2
@@ -1719,6 +1750,21 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       {aiBusy && <div role="status" aria-live="polite" className="shrink-0 mx-5 mt-2 px-3 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
       <div className="relative flex-1 min-h-0 flex flex-col">
         <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">
+          {/* STEP-1 TRANSPARENCY — what the Engine filled / corrected from the buyer's own truth, each with its source. */}
+          {(stage === 'specs' || stage === 'aispecs') && planCorrections.length > 0 && (
+            <div className="mb-3 rounded-xl border border-gray-200 bg-white px-3.5 py-2.5">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Filled from your history</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {planCorrections.map((p, i) => (
+                  <span key={i} className={`inline-flex flex-wrap items-center gap-1 rounded-full border px-2.5 py-1 text-[12px] ${p.corrected_from ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-teal-200 bg-teal-50 text-teal-800'}`}>
+                    <span className="font-medium">{p.field}:</span> {p.value}
+                    {p.corrected_from ? <span className="text-amber-600">· corrected from {p.corrected_from}</span> : null}
+                    <span className="text-gray-400">· {p.source}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {/* THE BUYER-AWARE FIRST QUESTION — shown above the specs on the landing stage. */}
           {(stage === 'specs' || stage === 'aispecs') && (baqLoading || baq?.opening) && (
             <div className="mb-4 rounded-2xl border border-teal-200 bg-teal-50/70 p-4">
