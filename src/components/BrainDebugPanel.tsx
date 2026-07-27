@@ -6,6 +6,7 @@
 // Right rail, collapsible section headers, expand-to-last-row. Reads live LLM telemetry.
 import { useEffect, useState } from 'react';
 import { getLLMHealth, getLLMRaw, onLLMActivity, type LLMCallRecord } from '../lib/gemini';
+import { besReport } from '../lib/bes';
 import type { RequirementBrainPayload, Decision } from '../lib/brains/requirementBrain';
 
 const DOT: Record<string, string> = { green: 'bg-teal-500', amber: 'bg-amber-400', red: 'bg-red-500' };
@@ -110,6 +111,40 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
             </Row>
           );
         })}
+
+        {/* BUYER EFFORT SCORE — the second KPI. TUS asks "did we use the truth"; BES asks "did we make him
+            work for what we already knew". Lower is better, and the two are read TOGETHER: a TUS win bought
+            by asking three more questions is not a win. Live counters, no network, no field values. */}
+        {(() => {
+          const b = besReport();
+          if (!b.shown && !b.answered) return null;
+          return (<>
+            <Section title="buyer effort score — lower is better" count={b.score} />
+            <div className="rounded-lg bg-gray-50 px-2.5 py-2">
+              <p className="text-[10.5px] text-gray-600">
+                {b.answered} answered of {b.shown} shown
+                {b.answerRate != null && <span className={b.answerRate < 0.5 ? ' text-amber-600' : ' text-teal-700'}> · {Math.round(b.answerRate * 100)}% answer rate</span>}
+                {b.seconds != null && <span className="text-gray-400"> · {b.seconds}s to submit</span>}
+              </p>
+              {b.answerRate != null && b.answerRate < 0.5 && (
+                <p className="mt-0.5 text-[10px] text-amber-600">More than half of what we showed went unanswered — screen the buyer paid for and we got nothing from.</p>
+              )}
+              <div className="mt-1.5 space-y-0.5">
+                {b.contributions.map((c) => (
+                  <div key={c.event} className="flex items-center gap-2 text-[10px]">
+                    <span className="w-24 shrink-0 text-gray-500">{c.event.replace('_', ' ')}</span>
+                    <span className="w-8 shrink-0 text-right text-gray-400">×{c.n}</span>
+                    <span className="h-1.5 rounded-full bg-teal-400" style={{ width: `${Math.min(100, (c.cost / Math.max(b.score, 1)) * 100)}%` }} />
+                    <span className="shrink-0 text-gray-400">{c.cost}</span>
+                  </div>
+                ))}
+              </div>
+              {b.counts.correction > 0 && (
+                <p className="mt-1 text-[10px] text-amber-600">⚠ {b.counts.correction} correction{b.counts.correction > 1 ? 's' : ''} — we prefilled a value the buyer had to change. Each is a wrong prefill, not just effort.</p>
+              )}
+            </div>
+          </>);
+        })()}
 
         {/* UNDERSTAND + the question-competition ledger (planner v2). Parsed from the curated-planner raw
             output rather than prop-threaded, so the panel stays self-contained. This is the answer to

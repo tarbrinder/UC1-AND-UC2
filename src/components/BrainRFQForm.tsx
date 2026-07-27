@@ -9,6 +9,7 @@ import { fetchProductSuggestions, filterProducts, stripQuantityPrefix, parseQuan
 import { sanitizeQty, qtyIsMeaningful, isValidGSTIN } from '../utils/formValidation';
 import type { ISQSpec, RFQFormData } from '../types';
 import { calcScore, getScoreColor, getScoreLabel, type ScoreCheck } from '../utils/score';
+import { bes, besReset, besSubmitted } from '../lib/bes';
 import OptionChips from './OptionChips';
 import OTPGate from './OTPGate';
 import VoiceRecorder from './VoiceRecorder';
@@ -639,6 +640,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     // Re-arm the unified planner's fire-guard so a re-commit (same or new mcat) re-fires it and clears
     // aiSpecsLoading — without this a same-product re-commit hangs the spec page forever.
     plannerFiredFor.current = '';
+    besReset();   // BES is scored per REQUIREMENT — a new product starts a fresh effort budget
     // LOSSLESS across a product change: mic/photo evidence (photoSpecsRef) is JOURNEY-level, never wiped —
     // the typed name anchors the NEW category while voice/photo facts survive as autofill candidates
     // against the new schema + evidence input to the AI-specs prompt. Buyer page answers DO reset (by design).
@@ -1001,6 +1003,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     } finally { setAiBusy(''); }
   };
   const onVoice = async (blob: Blob) => {
+    bes('voice');
     setShowVoice(false); if (aiBusy || !hasFormLLM()) return;
     const myGen = commitGen.current;
     try {
@@ -1042,7 +1045,14 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     } finally { setAiBusy(''); }
   };
 
-  const setSpecValue = (k: string, v: string) => { photoSetKeys.current.delete(k); useCaseSetKeys.current.delete(k); setSpecValues((p) => ({ ...p, [k]: v })); }; // a buyer edit makes the field buyer-owned — neither a later photo/voice extraction nor the use-case assist will overwrite it (audit #3 + use-case priority)
+  const setSpecValue = (k: string, v: string) => {
+    // BES: a chip tap is light; overwriting a value WE prefilled is a correction — expensive, and evidence
+    // our prefill was wrong. Distinguished by whether the field currently holds a machine-set value.
+    const wasOurs = photoSetKeys.current.has(k) || useCaseSetKeys.current.has(k) || !!_seed?.specValues?.[k];
+    const hadValue = !!specValues[k];
+    bes(!v && hadValue ? 'backspace' : wasOurs && hadValue && specValues[k] !== v ? 'correction'
+        : (isqSpecs.find((x) => x.IM_SPEC_MASTER_DESC === k)?.IM_SPEC_OPTIONS_DESC ? 'chip' : 'text'), `spec:${k}`);
+    photoSetKeys.current.delete(k); useCaseSetKeys.current.delete(k); setSpecValues((p) => ({ ...p, [k]: v })); }; // a buyer edit makes the field buyer-owned — neither a later photo/voice extraction nor the use-case assist will overwrite it (audit #3 + use-case priority)
   // "Also detected" edits — mark the key as buyer-touched so a planner re-run never clobbers it.
   const setExtraValue = (k: string, v: string) => { extraEditedRef.current.add(k.toLowerCase()); setExtraSpecs((p) => ({ ...p, [k]: v })); };
   const removeExtra = (k: string) => { extraEditedRef.current.add(k.toLowerCase()); setExtraSpecs((p) => { const n = { ...p }; delete n[k]; return n; }); };
@@ -1223,6 +1233,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
 
   const goBack = () => { if (stage === 'product') return onClose(); if (stage === 'specs') return setStage('product'); if (stage === 'more') return setStage('specs'); setStage('more'); };
   const submit = () => {
+    besSubmitted();   // BES: stop the clock at send
     // P1-101: never submit an empty RFQ (also closes the score-jump-to-'more'-with-no-product hole).
     if (!blEligible) { showFeedback('Add a quantity or pick at least one spec to get quotes.', 'warning'); return; }
     if (otpVerified.current) { dispatchBuyLead(); setStage('results'); return; }
@@ -1459,6 +1470,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
 
   // ── Spec fields (ALL buyer specs, one list). Shows the unified planner's field_hint when present. ──
   const renderSpecField = (s: ISQSpec) => {
+    bes('question_shown', `spec:${s.IM_SPEC_MASTER_DESC}`);   // BES: screen the buyer had to read, answered or not
     const opts = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
     const hint = isqHints[s.IM_SPEC_MASTER_DESC];
     // FABRICATION FIREWALL: an OBSERVED-tier seed (engine action CONFIRM) came from something the buyer
@@ -1528,7 +1540,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       {aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && (
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-gray-500 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Preparing smart questions…</p>
-          <button type="button" onClick={() => setStage('more')} className="text-xs text-gray-500 underline underline-offset-2 hover:text-gray-600 shrink-0">Skip for now</button>
+          <button type="button" onClick={() => { bes('skip'); setStage('more'); }} className="text-xs text-gray-500 underline underline-offset-2 hover:text-gray-600 shrink-0">Skip for now</button>
         </div>
       )}
       {!aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && (
@@ -1562,13 +1574,13 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
         );
       })()}
       {visibleAiSpecs.map((q) => (
-        <div key={q.fieldName} className="space-y-2">
+        <div key={q.fieldName} className="space-y-2" ref={() => bes('question_shown', `ai:${q.fieldName}`)}>
           <label className="block text-sm font-medium text-gray-700">
             {q.fieldName}
             {q.helperText && <span className="ml-2 font-normal text-gray-500">— {q.helperText}</span>}
             {q.prefill && aiSpecValues[q.fieldName] === q.prefill && <span className="ml-2 font-normal text-teal-600">✦ from your input</span>}
           </label>
-          <OptionChips ariaLabel={q.fieldName} options={q.options} value={aiSpecValues[q.fieldName] || ''} onChange={(v) => setAiSpecValues((p) => ({ ...p, [q.fieldName]: v }))} />
+          <OptionChips ariaLabel={q.fieldName} options={q.options} value={aiSpecValues[q.fieldName] || ''} onChange={(v) => { bes('chip', `ai:${q.fieldName}`); setAiSpecValues((p) => ({ ...p, [q.fieldName]: v })); }} />
         </div>
       ))}
     </div>
@@ -1989,7 +2001,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
                   {baq.opening.options?.length ? (
                     <div className="mt-2.5 flex flex-wrap gap-1.5">
                       {baq.opening.options.map((o) => (
-                        <button key={o} type="button" onClick={() => setBaqAnswers((a) => ({ ...a, opening: o }))}
+                        <button key={o} type="button" onClick={() => { bes('chip', 'opening'); setBaqAnswers((a) => ({ ...a, opening: o })); }}
                           className={`rounded-full border px-3 py-1.5 text-[13px] ${baqAnswers.opening === o ? 'border-teal-600 bg-teal-600 text-white' : 'border-teal-300 bg-white text-teal-800'}`}>{o}</button>
                       ))}
                     </div>
@@ -2005,7 +2017,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
                           {g.options?.length ? (
                             <div className="mt-1.5 flex flex-wrap gap-1.5">
                               {g.options.map((o) => (
-                                <button key={o} type="button" onClick={() => setBaqAnswers((a) => ({ ...a, [`gap${i}`]: o }))}
+                                <button key={o} type="button" onClick={() => { bes('chip', `gap${i}`); setBaqAnswers((a) => ({ ...a, [`gap${i}`]: o })); }}
                                   className={`rounded-full border px-2.5 py-1 text-[12.5px] ${baqAnswers[`gap${i}`] === o ? 'border-teal-600 bg-teal-50 text-teal-800' : 'border-gray-300 text-gray-700'}`}>{o}</button>
                               ))}
                             </div>
@@ -2248,7 +2260,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           sr-only (off-screen, still clickable). Dropped `capture="environment"`: it forced the camera and blocked
           gallery/catalog uploads (buyers upload existing product/spec images); the native chooser now offers both.
           iOS converts a Photos pick to JPEG for accept="image/*", so the canvas resize in onPhoto still decodes. */}
-      <input ref={fileRef} type="file" accept="image/*" className="sr-only" tabIndex={-1} aria-hidden="true" onChange={(e) => { const f = e.target.files?.[0]; if (f) onPhoto(f); e.currentTarget.value = ''; }} />
+      <input ref={fileRef} type="file" accept="image/*" className="sr-only" tabIndex={-1} aria-hidden="true" onChange={(e) => { const f = e.target.files?.[0]; if (f) { bes('upload'); onPhoto(f); } e.currentTarget.value = ''; }} />
       {/* Voice recorder needs its OWN overlay — VoiceRecorder renders a bare card (no positioning), so without
           this wrapper it was hidden behind the z-50 modal (the "mic not working" bug). Bottom-sheet on mobile. */}
       {showVoice && (
