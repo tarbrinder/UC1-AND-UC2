@@ -186,13 +186,32 @@ def analyze_glid(glid, outdir):
         wa_products = wa_s.get("products_enquired") or []
         wa_typed = wa_s.get("buyer_typed_enquiries") or _get(wa_raw, "inbound", "buyer_typed_enquiries", default=[])
         wa_h_status, wa_h_count = health("whatsapp")
+        # 'discussed_wa' is an INTERNAL tag applied at the bi-buyer-brain MERGE layer (verified directly:
+        # requirements[].sources contains it) — it is NOT, by design, echoed verbatim into requirement-brain's
+        # buyer-facing decision text (which is deliberately human-phrased, e.g. "from your posted requirement").
+        # So checking the final output string for the literal tag tests the wrong layer. The functional proxy:
+        # does a brain recommendation/primary NAME meaningfully token-overlap a WA product_enquired name (i.e.
+        # the WA signal landed on a requirement the buyer actually sees)?
+        import re as _re
+        def _toks(s):
+            return set(w for w in _re.sub(r"[^a-z0-9 ]", "", str(s).lower()).split() if len(w) > 2)
+        rec_names = [r.get("product", "") for r in (_get(m, "recommendations", default=[]) or [])]
+        primary_name = _get(m, "primary", "product")
+        if primary_name:
+            rec_names = rec_names + [primary_name]
+        fused = False
+        for p in (wa_products + [t.get("product", "") for t in wa_typed if isinstance(t, dict)]):
+            pt = _toks(p)
+            if pt and any(len(pt & _toks(r)) >= 2 for r in rec_names):
+                fused = True
+                break
         row["WhatsApp"] = {
             "raw_present": bool(wa_products or wa_typed),
             "raw_products_enquired": len(wa_products),
             "raw_typed_enquiries": len(wa_typed),
             "node_health": f"{wa_h_status}({wa_h_count})",
-            "discussed_wa_reaches_output": "discussed_wa" in brain_str,
-            "verdict": "OK" if not (wa_products or wa_typed) else ("OK" if "discussed_wa" in brain_str else "GAP: products_enquired present but discussed_wa never tagged"),
+            "wa_product_fused_into_a_seen_requirement": fused,
+            "verdict": "OK" if not (wa_products or wa_typed) else ("OK" if fused else "GAP: products_enquired present but no matching recommendation/primary found"),
         }
 
     # BPOD / profile
@@ -232,19 +251,30 @@ def analyze_glid(glid, outdir):
     else:
         api_cov = pns_api_s.get("coverage") or {}
         full_cov = pns_full_s.get("coverage") or {}
-        api_app = _get(pns_api_s, "requirement", "intended_application")
+        api_req = pns_api_s.get("requirement") or {}
+        api_app = api_req.get("intended_application")
+        # "present" must mean substantive content — an empty shell {"products":[],"intended_application":null,
+        # "buyer_queries":[]} is a genuinely-truthy dict with NOTHING in it (a real "no usable call signal"
+        # outcome, e.g. calls found in Redash but no audio / no extraction) — that must read as no-data, not a GAP.
+        api_has_content = bool(api_req.get("products") or api_app or api_req.get("buyer_queries"))
         calls_h_status, calls_h_count = health("calls")
         app_decision = next((d for d in decisions if d.get("field") in ("buyer_context", "application")), None)
+        if not api_has_content:
+            verdict = "no-data (raw requirement object present but empty — e.g. calls found but no audio/extraction)"
+        elif api_app and not app_decision:
+            verdict = f"GAP: intended_application present in raw ({api_app!r}) but never reaches a buyer_context/application decision — check for a field-name collision (e.g. an ISQ spec literally named 'Application')"
+        elif calls_h_status != "green":
+            verdict = f"GAP: raw has content but node_health.calls={calls_h_status}({calls_h_count}) — the calls-call fetch may not be reaching the engine for this buyer"
+        else:
+            verdict = "OK"
         row["PNS-Calls"] = {
-            "raw_pns_api_present": bool(pns_api_s.get("requirement")),
+            "raw_pns_api_has_content": api_has_content,
             "raw_pns_full_present": (bool(pns_full_s.get("requirement")) if pns_full_ok else ("FETCH-FAILED" if "raw_pns_full" in meta else "skipped")),
             "api_coverage": api_cov, "full_coverage": (full_cov if pns_full_ok else None),
             "full_adds_over_api": ((full_cov.get("pns_llm_extracted", 0) > api_cov.get("pns_llm_extracted", 0)) if pns_full_ok and full_cov else "n/a"),
             "node_health_(brain,pns=api)": f"{calls_h_status}({calls_h_count})",
             "application_reaches_decision": bool(app_decision),
-            "verdict": ("no-data" if not pns_api_s.get("requirement")
-                        else ("OK" if calls_h_status == "green" and app_decision else
-                              f"GAP: raw present (app={bool(api_app)}) but brain calls={calls_h_status}({calls_h_count}), application_decision={bool(app_decision)}")),
+            "verdict": verdict,
         }
 
     return row
@@ -252,7 +282,21 @@ def analyze_glid(glid, outdir):
 def main():
     argv = sys.argv[1:]
     skip_full = "--skip-full" in argv
+    reanalyze = next((a.split("=", 1)[1] for a in argv if a.startswith("--reanalyze=")), None)
     argv = [a for a in argv if not a.startswith("--")]
+
+    if reanalyze:
+        # Re-run analyze_glid over an already-fetched run's saved JSON — no network calls. Use this
+        # after fixing a verdict-logic bug in this script, to confirm the fix WITHOUT re-hitting n8n.
+        outdir = os.path.join(os.path.dirname(__file__), "fidelity-runs", reanalyze)
+        if not os.path.isdir(outdir):
+            print(f"no such run: {outdir}", file=sys.stderr); sys.exit(1)
+        glids = sorted(d for d in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, d)))
+        rows = [analyze_glid(g, outdir) for g in glids]
+        json.dump(rows, open(os.path.join(outdir, "_fidelity_report.json"), "w"), indent=1)
+        print(json.dumps({"run_id": reanalyze, "outdir": outdir, "reanalyzed": True, "rows": rows}, indent=1))
+        return
+
     glids = argv if argv else DEFAULT_GLIDS
 
     global _sema
