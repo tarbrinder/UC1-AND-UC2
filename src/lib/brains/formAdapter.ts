@@ -78,7 +78,7 @@ export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
     if (QTY.test(d.field)) { quantity = val(d); continue; }
     if (QTY_UNIT.test(d.field)) { unit = val(d); continue; }
     if (DELIV.test(d.field)) { deliveryLocation = val(d); continue; }
-    if (/^(order_value|requirement_type|purchase_frequency|application)$/i.test(d.field)) continue; // context, not an ISQ chip
+    if (/^(order_value|requirement_type|purchase_frequency|application|buyer_context)$/i.test(d.field)) continue; // context, not an ISQ chip
     specValues[d.field] = val(d);
   }
   // entry_mode → where to land. Enrich/confirm start on specs (product known); cold starts on product.
@@ -118,7 +118,7 @@ export function recommendationToSeed(rec: { product: string; mcat?: string; is_e
     if (QTY.test(s.name)) { quantity = s.value; continue; }
     if (QTY_UNIT.test(s.name)) { unit = s.value; continue; }
     if (DELIV.test(s.name)) { deliveryLocation = s.value; continue; }
-    if (/^(order_value|requirement_type|purchase_frequency|application)$/i.test(s.name)) continue; // context, not an ISQ chip
+    if (/^(order_value|requirement_type|purchase_frequency|application|buyer_context)$/i.test(s.name)) continue; // context, not an ISQ chip
     specValues[s.name] = s.value;
   }
   return {
