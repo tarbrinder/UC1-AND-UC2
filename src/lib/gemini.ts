@@ -1714,19 +1714,23 @@ Rules: NEVER ask anything already in already_known. Plain buyer words, no jargon
 export interface CuratedPlan {
   opening?: { q: string; why: string; options?: string[] };
   prefills: { field: string; value: string; source: string; corrected_from?: string }[];   // Progressive Truth Enrichment
-  gaps: { q: string; kind: 'non_spec' | 'spec'; why: string; options?: string[] }[];
+  extras?: Record<string, string>;                  // buyer-stated facts that don't map to any ISQ field name (was getSpecHints' "extras")
+  field_hints?: Record<string, string>;             // short "why it matters" captions for page-1 ISQ fields (was getSpecHints' isqHints)
+  gaps: { q: string; kind: 'non_spec' | 'spec'; why: string; options?: string[]; helperText?: string }[];
   kyb_ask?: { doc: string; why: string } | null;
   __raw?: { system: string; user: string; output: string };
 }
 export async function runCuratedPlanner(input: {
   requirement: string;
-  filled?: Record<string, string>;                 // specs/qty/unit/location we already hold (the seed)
-  buyerSpecs?: string[];                            // ISQ field names shown on page 1 (never re-ask)
+  categoryName?: string;                            // mapped category label (MAY be wrong/too-broad — the LLM must judge fit)
+  filled?: Record<string, string>;                  // specs/qty/unit/location we already hold (the seed)
+  buyerSpecs?: string[];                             // ISQ field names shown on page 1 (never re-ask)
   buyerSpecOptions?: Record<string, string[]>;
-  sellerSpecs?: string[];
+  sellerSpecs?: string[];                            // getISQs SELLER-flagged spec names (supplementary hint)
   categoryTopSpecs?: { q: string; pct?: number; vals?: string[] }[];
   categoryPersonas?: unknown;
   categoryB2b?: unknown;
+  categoryCorpus?: unknown;                         // raw category corpus (n8n parse_rows or legacy intelligence obj), passed WHOLE — soft context, may be noisy
   buyerFacts?: Record<string, unknown>;
   basket?: string[];
   buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[]; whatsapp_specs?: { name: string; value: string }[]; objections?: string[]; business_intent?: string[] };
@@ -1735,35 +1739,59 @@ export async function runCuratedPlanner(input: {
 }): Promise<CuratedPlan> {
   const known = Object.entries(input.filled || {}).filter(([, v]) => v && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join('; ') || 'None';
   const specsDetail = (input.buyerSpecs || []).map((n) => { const o = input.buyerSpecOptions?.[n]; return o && o.length ? `${n} [${o.slice(0, 8).join(', ')}]` : n; }).join('; ') || 'None';
-  const sys = `You are the Curated-RFQ Engine for IndiaMART. You KNOW this buyer (their facts, basket, and their OWN WhatsApp/call signals) and what sellers ACTUALLY ask in this category. Your objective is to maximise understanding of THIS requirement with the LEAST buyer effort — prefill/confirm what you already know, and ask only the fewest decisive gaps.
+  let corpusBlock = '';
+  if (input.categoryCorpus != null) {
+    try { const s = JSON.stringify(input.categoryCorpus); if (s && s !== '{}' && s !== '[]') corpusBlock = s.length > 200000 ? s.slice(0, 200000) + '…(truncated safety cap)' : s; } catch { /* unserialisable → skip */ }
+  }
+  const sys = `You are the Curated-RFQ Engine for IndiaMART — the ONE understanding→ranking call for this requirement (it replaces separate hint/prefill/gap-question passes). You KNOW this buyer (their facts, basket, WhatsApp/call signals) and what sellers ACTUALLY ask in this category. Objective: maximise understanding of THIS requirement with the LEAST buyer effort.
 Return ONLY JSON:
-{"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}],"kyb_ask":{"doc":"GST|Udyam|PAN|Company name","why":"buyer-benefit reason"}}
-RULES:
-- prefills = fill or CORRECT a field ONLY from the buyer's OWN signals below (buyer_signals / also_sourcing) — e.g. buyer_signals.whatsapp_specs / call_specs are values the buyer typed/said (gsm, capacity) → PREFILL them; call_application is a use-case they stated. NEVER prefill from a category norm (that is a gap/suggestion). Set corrected_from ONLY when a fresher buyer signal disagrees with an already_known value (prefer the LATEST signal). If no real buyer signal supports a value, DO NOT emit it.
-- buyer_signals.objections (e.g. "too far","high price","no response") are the buyer's past pain — reframe ONE gap around the most relevant (e.g. "Last time sellers were too far — local suppliers only?"), never as a prefill.
-- buyer_signals.business_intent (reselling / wholesale / distribution) is explicit B2B evidence — when present, set kyb_ask even if the category signal is weak.
-- opening = ONE short intent/use-case question personalised to THIS buyer (what is it FOR / what scale / new-or-expand), inferred from basket + facts + signals. 2-4 tap options.
-- gaps = the fewest decisive questions NOT already in already_known and NOT covered by a page-1 buyer spec (judge by MEANING + overlapping options, not exact name). NON-SPEC first, then top category specs. Max 3 non-spec. Options-only (3-8 concrete chips), never open Brand/Make/Model.
-- QUANTITY lives on the landing page (a first-class field, kept from the buyer's specs). If already_known contains a quantity, NEVER ask it. If quantity is NOT known, you MAY include ONE quantity question — but ONLY when a quantity is meaningful for THIS product (a consumable / packaging / raw-material / component: yes; a one-off capital good, a machine, or a whole plant / setup: NO — never ask "how many" for a plant). Use judgement; omit it when it doesn't fit.
-- kyb_ask = include ONLY if the category is clearly B2B/bulk AND the buyer has no GST on file; pick the single best-value doc; phrase the why as a buyer benefit (e.g. "verified buyers get more seller responses"). Omit otherwise.
-- Plain buyer words, ≤12 words per question, no jargon (never say CSL/mcat/ISQ).`;
+{"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you typed|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"extras":{"fact not matching any page-1 field name":"value"},"field_hints":{"a page-1 field name":"≤6-word why it matters"},"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}],"kyb_ask":{"doc":"GST|Udyam|PAN|Company name","why":"buyer-benefit reason"}}
+
+BUYER'S REAL INTENT — HIGHEST AUTHORITY:
+1. INTENT IS SUPREME. From the requirement text + buyer_facts + buyer_signals, decide what the buyer TRULY wants.
+2. MISMATCH GUARD (critical): the mapped category_name / seller_top_questions / page1_buyer_specs come from an ID that CAN be wrong, too broad, or too narrow (e.g. buyer wants a "generator toy" but the category is "diesel generator"). If they clearly don't fit the real requirement, IGNORE the category evidence, seller_flagged_specs, AND page1_buyer_specs entirely, and plan PURELY from the requirement text + your own B2B knowledge. Never let a wrong category pollute a question.
+3. WHEN THE CATEGORY MATCHES: mine seller_top_questions / category_corpus (if present) for what sellers ask MOST to qualify a buyer; prefer high-frequency specs; build option chips from real observed values when present.
+4. ORDER like real seller calls flow: if intent/use-case is asked first in this category, put the opening/intent gap first, then specs.
+
+PREFILLS (fill or correct WITHOUT asking):
+- Source ONLY from: buyer_signals (whatsapp_specs/call_specs = values the buyer typed/said; call_application = a stated use-case), OR the requirement text itself stating a spec value (e.g. "18 inch alloy wheel" states Wheel Size=18 inch → source:"what you typed"). NEVER prefill from a category norm — that is a gap/suggestion, never a fact.
+- Set corrected_from ONLY when a fresher buyer signal disagrees with an already_known value (prefer the LATEST signal).
+- If no real buyer signal or requirement-text token supports a value, DO NOT emit it — never fabricate.
+- extras = a buyer-stated fact (from buyer_signals or the requirement text) that does NOT match any page1_buyer_specs name — never invent one.
+- field_hints = for UP TO 6 of the page1_buyer_specs that would genuinely benefit from a short caption explaining why a seller needs it (skip obvious ones like "Color").
+
+GAPS (the fewest decisive questions):
+- NEVER ask anything already in already_known OR covered by a page1_buyer_specs entry — judge by MEANING + overlapping options, NOT exact field name (a buyer spec captures a concept even under a different label: "Power (kVA)" already covers "Rated Power"/"Capacity"; "Brand" covers "Make"/"Manufacturer").
+- buyer_signals.objections (e.g. "too far","high price","no response") are the buyer's past pain — reframe ONE gap around the most relevant one, never as a prefill.
+- NON-SPEC gaps first (intent/use-case, timeline, cadence), then top category specs. Max 3 non-spec. Options-only (3-8 concrete chips) — NEVER open-ended, NEVER Yes/No-only, NEVER "Other".
+- NEVER ask Brand/Make/Model/Manufacturer/OEM/country-of-origin as an open question (narrows the seller pool) — unless buyer_signals states one, then it's a PREFILL, not a gap.
+- CADENCE — include a purchase-frequency gap ONLY if genuinely meaningful for this product AND not already known, and only if it earns a slot over other candidates. Skip for a genuine one-off.
+- QUANTITY is a first-class landing-page field, not a gap-question topic here. If already_known contains a quantity, NEVER ask it. If NOT known, you MAY include ONE quantity gap — ONLY when quantity is meaningful for this product (consumable/packaging/raw-material/component: yes; a one-off capital good, machine, or whole plant/setup: NEVER ask "how many").
+- Aim for up to 5 total gaps when the product genuinely has that many meaningful ones beyond what's known — do not under-ask with just 1-2 unless the requirement truly needs no more.
+- Plain buyer words, ≤12 words per question, no jargon (never say CSL/mcat/ISQ/category ID).
+
+kyb_ask = include ONLY if the category is clearly B2B/bulk AND the buyer has no GST on file; pick the single best-value doc; phrase the why as a buyer benefit. Omit otherwise.
+buyer_signals.business_intent (reselling/wholesale/distribution) is explicit B2B evidence — when present, set kyb_ask even if the category signal is weak.`;
   const usr = JSON.stringify({
-    requirement: input.requirement, already_known: known && known !== 'None' ? known : undefined,
+    requirement: input.requirement, category_name: input.categoryName || 'unknown', already_known: known && known !== 'None' ? known : undefined,
     page1_buyer_specs: specsDetail !== 'None' ? specsDetail : undefined,
     seller_flagged_specs: input.sellerSpecs?.slice(0, 20),
     seller_top_questions: input.categoryTopSpecs, category_personas: input.categoryPersonas, category_b2b_b2c: input.categoryB2b,
+    category_corpus: corpusBlock || undefined,
     buyer_facts: input.buyerFacts, also_sourcing: input.basket, buyer_signals: input.buyerSignals, flow: input.entryMode,
   });
   try {
-    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 2200, temperature: 0.2 });
+    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 3000, temperature: 0.2 });
     const j = JSON.parse(raw) as CuratedPlan;
-    // Grounding guard: a prefill VALUE must be backed by a real buyer signal (never a fabricated fill).
+    // Grounding guard: a prefill/extra VALUE must be backed by a real buyer signal or the requirement text (never a fabricated fill).
     const signalText = [input.requirement, JSON.stringify(input.buyerSignals || {}), (input.basket || []).join(' '), Object.values(input.filled || {}).join(' ')].join(' ').toLowerCase();
     const groundToks = new Set(signalText.match(/[a-z0-9]+/g) || []);
     const backed = (v: string) => { const t = (String(v).toLowerCase().match(/[a-z0-9]+/g) || []).filter((x) => x.length >= 3 || /\d/.test(x)); return t.length ? t.some((x) => groundToks.has(x)) : false; };
     const prefills = Array.isArray(j.prefills) ? j.prefills.filter((p) => p && p.field && p.value && backed(p.value)) : [];
+    const extras = j.extras && typeof j.extras === 'object' ? Object.fromEntries(Object.entries(j.extras).filter(([, v]) => v && backed(String(v)))) : undefined;
+    const field_hints = j.field_hints && typeof j.field_hints === 'object' ? j.field_hints : undefined;
     const gaps = Array.isArray(j.gaps) ? j.gaps.slice(0, 6) : [];
-    return { opening: j.opening, prefills, gaps, kyb_ask: j.kyb_ask ?? null, __raw: { system: sys, user: usr, output: raw } };
+    return { opening: j.opening, prefills, extras, field_hints, gaps, kyb_ask: j.kyb_ask ?? null, __raw: { system: sys, user: usr, output: raw } };
   } catch { return { prefills: [], gaps: [] }; }
 }
 

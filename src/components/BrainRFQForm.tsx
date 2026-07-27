@@ -15,7 +15,7 @@ import VoiceRecorder from './VoiceRecorder';
 import IndiaMartHeader from './IndiaMartHeader';
 import SellerSearchProgress from './SellerSearchProgress';
 import { searchSellers, type SellerResult } from '../lib/sellerSearch';
-import { analyzeImage, voiceToSpecs, hasGeminiKey, getSpecHints, getMissingSpecs, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan } from '../lib/gemini';
+import { analyzeImage, voiceToSpecs, hasGeminiKey, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchProductImages, upsizeImimg } from '../lib/enrichment';
 import { matchUnit } from '../lib/quantity';
 import { emit, EV, emitApiError } from '../lib/emit';
@@ -98,10 +98,9 @@ const BUSINESS_TYPES = ['Online Business', 'Exporter', 'Manufacturer', 'Retailer
 // SimpleRFQForm AI calls run on the form's /api/llm proxy path (key injected server-side, never bundled; all pass
 // route:'form'). Per-call MODEL routing (owner 2026-07-24): hints + mic → the fast lite tier (3.5-flash-lite);
 // image + page-2 AI-specs → the stronger tier (3.6-flash). Standard has no AI. (Buyer-card is separate — its own key.)
-const RFQ_MODEL_HINTS = 'google/gemini-3.5-flash-lite'; // getSpecHints (page-1 hints/name-detect)
 const RFQ_MODEL_MIC = 'google/gemini-3.5-flash-lite';   // voiceToSpecs (mic)
 const RFQ_MODEL_IMAGE = 'google/gemini-3.6-flash';      // analyzeImage (photo)
-const RFQ_MODEL_SPECS = 'google/gemini-3.6-flash';      // getMissingSpecs (page-2 AI specs planner)
+const RFQ_MODEL_SPECS = 'google/gemini-3.6-flash';      // runCuratedPlanner (the unified page-1 prefill + page-2 gap-question planner)
 const RFQ_MODEL_USECASE = 'google/gemini-3.6-flash';    // inferSpecsFromApplication (use-case assist) — reasoning-heavy → stronger tier
 const hasFormLLM = () => RFQ_LLM_ENABLED || hasGeminiKey();
 
@@ -218,14 +217,14 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const extraEditedRef = useRef<Set<string>>(new Set()); // extra keys the buyer edited/removed → don't let a re-run clobber them
   const [specsLoading, setSpecsLoading] = useState(false);
   const [mcatId, setMcatId] = useState('');
-  // Page-1 buyer-spec hints (fast getSpecHints): product-name pre-fills + field hints. (getSpecHints also returns
-  // `redundantISQSpecs`, but we no longer HIDE specs with it — async AI must ENRICH, never yank an already-shown
-  // field. Hiding caused specs to "appear then vanish" ~1s after the page rendered; we show all buyer specs.)
+  // Page-1 buyer-spec hints (from the unified Curated-RFQ planner's field_hints): per-field captions. We never
+  // HIDE a spec based on the planner's read — async AI must ENRICH, never yank an already-shown field (hiding
+  // caused specs to "appear then vanish" ~1s after the page rendered; we show all buyer specs).
   const [isqHints, setIsqHints] = useState<Record<string, string>>({});
-  // Page-2 AI specs (getMissingSpecs over the live category node): the best 5 options-only questions.
+  // Page-2 "smart questions" (the unified planner's ranked `gaps`): options-only questions not already known.
   const [aiSpecs, setAiSpecs] = useState<AiSpecQuestion[]>([]);
   const [aiSpecsLoading, setAiSpecsLoading] = useState(false);
-  const [aiSpecsError, setAiSpecsError] = useState(false); // getMissingSpecs threw/timed-out — distinct from a genuine "0 questions"
+  const [aiSpecsError, setAiSpecsError] = useState(false); // the planner threw/timed-out — distinct from a genuine "0 questions"
   const [aiSpecValues, setAiSpecValues] = useState<Record<string, string>>({});
   const [aiEpoch, setAiEpoch] = useState(0); // bumped when a photo/voice adds specs → re-runs the AI-specs prompt with them
   const [unitsResolved, setUnitsResolved] = useState(false); // true once GetIsq has returned — gates Continue past the loading race
@@ -322,8 +321,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const fileRef = useRef<HTMLInputElement | null>(null);
   const cardScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingAiSpecs = useRef<Record<string, string> | null>(null);
-  const hintsFiredFor = useRef('');         // mcatId getSpecHints already fired for (once per product)
-  const aiFiredFor = useRef('');            // "mcatId:aiEpoch" getMissingSpecs already fired for (re-fires when a photo/voice adds specs)
+  const plannerFiredFor = useRef('');       // "mcatId:name:aiEpoch:specSig" the unified Curated-RFQ planner already fired for (re-fires on a material change: new mcat, new photo/voice evidence, or a late-arriving ISQ schema)
   const categoryNameRef = useRef('');       // latest category name (McatDtl) for the async AI-spec call
   const photoSpecsRef = useRef<Record<string, string>>({}); // specs a photo/voice extracted → extra INPUT to the AI-specs prompt
   const photoSetKeys = useRef<Set<string>>(new Set()); // ISQ fields whose value came from photo/voice extraction (NOT a buyer edit) → safe to overwrite/clear on a re-extraction (audit #3 photo-reselect)
@@ -500,95 +498,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     });
   }, [isqSpecs]);
 
-  // On product commit → TWO parallel LLM calls, once per mcat:
-  //  (1) getSpecHints (fast) — pre-fill page-1 buyer specs the product name implies, flag not-applicable
-  //      ones (redundant), attach a per-field hint.
-  //  (2) getMissingSpecs (page 2 "AI specs") — over the LIVE n8n category node → the best 5 options-only
-  //      questions a seller needs, deduped vs page-1. Fired NOW so page 2 is ready on arrival.
-  useEffect(() => {
-    if (!committed || !mcatId || !hasFormLLM()) return;
-    const name = productName;
-    const gen = commitGen.current; // guards the two LLM fires against a superseded commit (same-mcat name variants clobber otherwise — audit)
-    const specNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC);
-    // (1) page-1 hints — re-runs per product IDENTITY (mcat + name) AND when new mic/photo evidence lands
-    // (aiEpoch), so a photo added to an already-committed product also refreshes page-1 (not just page-2).
-    // Needs a schema to hint on; AI specs below does NOT (product+category alone is a valid input),
-    // so a zero-ISQ category still gets its AI-specs page instead of a stuck loader.
-    // audit #8: fold the SPEC-SET into the key. Without it, if the slower getISQs appends a buyer spec AFTER the
-    // first hints fire (network-order-dependent), the effect re-runs but this key is unchanged → no re-fire → the
-    // late field gets no hint and no auto-fill of an already-known photo/voice value. A sorted spec-name signature
-    // re-arms hints on a MATERIAL schema change; the gen/hintsFiredFor guards still drop superseded responses.
-    const specSig = specNames.slice().sort().join('|');
-    const hintsKey = `${mcatId}:${name}:${aiEpoch}:${specSig}`;
-    if (isqSpecs.length > 0 && hintsFiredFor.current !== hintsKey) {
-      hintsFiredFor.current = hintsKey;
-      const withOpts: Record<string, string[]> = {};
-      for (const s of isqSpecs) withOpts[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
-      getSpecHints(name, specNames, withOpts, '', photoSpecsRef.current, sellerSpecsRef.current, 'form', RFQ_MODEL_HINTS).then((h) => {
-        if (hintsFiredFor.current !== hintsKey || gen !== commitGen.current) return;
-        setIsqHints(h.isqHints || {});
-        // RECONCILE (owner model): the LLM is grounded (temp 0, "only what the buyer actually provided") and already
-        // maps values to the closest option, so we no longer gate on a brittle substring check. Fill each buyer ISQ
-        // field, SNAPPED to its real option (so "1-Phase" selects the chip, not a near-duplicate). Never overwrite a
-        // value the buyer set. Anything that isn't a buyer field → "Also detected" (nothing lost, no duplicates).
-        if (h.knownFromProductName && Object.keys(h.knownFromProductName).length) {
-          setSpecValues((prev) => {
-            const next = { ...prev };
-            for (const [k, v] of Object.entries(h.knownFromProductName)) {
-              const hit = specNames.find((n) => n.toLowerCase() === k.toLowerCase());
-              if (hit && v && !next[hit]) next[hit] = snapToOption(v, withOpts[hit] || []);
-            }
-            return next;
-          });
-        }
-        // Merge extras — preserve any the buyer edited/removed (extraEditedRef); a re-run on new evidence adds only new ones.
-        if (h.extras && Object.keys(h.extras).length) {
-          setExtraSpecs((prev) => {
-            const next = { ...prev };
-            for (const [k, v] of Object.entries(h.extras)) {
-              if (!v || extraEditedRef.current.has(k.toLowerCase())) continue;
-              if (specNames.some((n) => n.toLowerCase() === k.toLowerCase())) continue; // never shadow a buyer field
-              next[k] = v;
-            }
-            return next;
-          });
-        }
-      }).catch((e) => emitApiError('getSpecHints', e, { mcatId }));
-    }
-    // (2) page-2 AI specs — fire as EARLY as possible (owner: "should run as soon as I've entered the product
-    // name"). We gate on the page-1 specs having SETTLED (!specsLoading) rather than on the buyer leaving the
-    // landing page, so the planner starts the moment GetIsq resolves (right after commit) — its latency then hides
-    // behind the buyer entering quantity + filling page-1, and page-1 spec NAMES are already present for dedup.
-    // Fires for zero-ISQ categories too (specsLoading flips false with no specs). Re-fires on a material change:
-    // new mcat, or new mic/photo evidence (aiEpoch bump); a re-commit re-arms aiFiredFor so no double-ask sticks.
-    if (specsLoading) return;
-    const aiKey = `${mcatId}:${aiEpoch}`;
-    if (aiFiredFor.current !== aiKey) {
-      aiFiredFor.current = aiKey;
-      setAiSpecsLoading(true);
-      const buyerAnswered = { ...specValues };
-      const evidenceSnapshot = { ...photoSpecsRef.current };
-      (async () => {
-        // Page-1 spec → its options, so the planner sees what each buyer spec already captures and won't
-        // re-ask it under a synonym (e.g. "Enclosure Type" vs "Genset Type").
-        const buyerSpecOptions: Record<string, string[]> = {};
-        for (const s of isqSpecs) buyerSpecOptions[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
-        try {
-          // ONE planning call: buyer intent (product/photo/mic) + page-1 specs + seller-flagged names +
-          // the RAW category corpus passed WHOLE (categoryCorpusRef; null → planner uses its intent+spec fallback).
-          const qs = await getMissingSpecs({ productName: name, categoryName: categoryNameRef.current, buyerSpecs: specNames, buyerSpecOptions, filledSpecs: buyerAnswered, evidenceFacts: evidenceSnapshot, sellerSpecs: sellerSpecsRef.current, categoryCorpus: categoryCorpusRef.current, route: 'form', model: RFQ_MODEL_SPECS });
-          if (aiFiredFor.current === aiKey && gen === commitGen.current) {
-            setAiSpecs(qs); setAiSpecsError(false);
-            // Evidence-backed questions arrive PRE-ANSWERED (lossless): seed the prefill as the selected
-            // value — the buyer can still change it, and a buyer-set value is never overwritten.
-            setAiSpecValues((prev) => { const next = { ...prev }; for (const q of qs) if (q.prefill && !next[q.fieldName]) next[q.fieldName] = q.prefill; return next; });
-          }
-        } catch (e) { emitApiError('getMissingSpecs', e, { mcatId, aiEpoch }); emit(EV.AISPECS_FAILED, { mcatId, aiEpoch, surface: surfaceName }); if (aiFiredFor.current === aiKey && gen === commitGen.current) { setAiSpecsError(true); if (aiEpoch === 0) setAiSpecs([]); } } // flag the failure; but on a RE-PLAN (aiEpoch>0, e.g. a photo added on aispecs) KEEP the last-good questions so the buyer isn't force-navigated off the page (P2-258)
-        finally { if (aiFiredFor.current === aiKey && gen === commitGen.current) setAiSpecsLoading(false); }
-      })();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [committed, mcatId, isqSpecs, productName, aiEpoch, specsLoading]);
+  // On product commit, the UNIFIED Curated-RFQ planner fires (see the single effect further below, near `baq`) —
+  // it replaces what used to be TWO separate calls here (getSpecHints for page-1 prefill/hints, getMissingSpecs
+  // for page-2 gap questions): ONE understanding→ranking call now prefills page-1 (+ extras + field hints) AND
+  // ranks page-2's gaps, fed by the SAME buyer/seller/category context both former calls used.
 
   // ── Real seller retrieval — fire when the buyer LEAVES the first spec page (owner) ───────────────────────
   // The windmill call takes ~30s, so we start it the instant the buyer reaches page 2 and let it run while they
@@ -629,7 +542,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       if (catFetchTok.current !== tok) return;                 // stale (mcat changed / unmount)
       if (r.status === 'hit' && r.corpus) {
         categoryCorpusRef.current = r.corpus;
-        if (aiFiredFor.current) { aiFiredFor.current = ''; setAiEpoch((e) => e + 1); } // planner already ran without it → re-plan with the corpus
+        if (plannerFiredFor.current) { plannerFiredFor.current = ''; setAiEpoch((e) => e + 1); } // planner already ran without it → re-plan with the corpus
       }
     }).catch((e) => emitApiError('fetchCategoryCorpus', e, { mcatId }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -699,15 +612,16 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     setSpecsLoading(true); setUnitsResolved(false); setIsqSpecs([]); setSpecValues({}); setUnitOptions([]); setUnit(''); setProductImageUrl(''); setProductImages([]); setResolving(false); setCommitted(true);
     setMcatId(id); categoryNameRef.current = ''; sellerSpecsRef.current = []; pushRecent(name);
     emit(EV.PRODUCT_COMMITTED, { mcatId: id, productName: name, surface: surfaceName });
-    // Re-arm the LLM fire-guards so a re-commit (same or new mcat) re-fires getSpecHints/getMissingSpecs
-    // and clears aiSpecsLoading — without this a same-product re-commit hangs the aispecs page forever.
-    hintsFiredFor.current = ''; aiFiredFor.current = '';
+    // Re-arm the unified planner's fire-guard so a re-commit (same or new mcat) re-fires it and clears
+    // aiSpecsLoading — without this a same-product re-commit hangs the aispecs page forever.
+    plannerFiredFor.current = '';
     // LOSSLESS across a product change: mic/photo evidence (photoSpecsRef) is JOURNEY-level, never wiped —
     // the typed name anchors the NEW category while voice/photo facts survive as autofill candidates
     // against the new schema + evidence input to the AI-specs prompt. Buyer page answers DO reset (by design).
     if (Object.keys(photoSpecsRef.current).length) pendingAiSpecs.current = { ...photoSpecsRef.current };
     setIsqHints({}); setAiSpecs([]); setAiSpecValues({}); setAiSpecsError(false); setAiSpecsLoading(hasFormLLM());
-    setExtraSpecs({}); extraEditedRef.current = new Set(); // re-derived by getSpecHints from the (surviving) evidence + new name
+    setExtraSpecs({}); extraEditedRef.current = new Set(); // re-derived by the unified planner from the (surviving) evidence + new name
+    setBaq(null); setPlanCorrections([]); setBaqLoading(hasFormLLM()); // clear the OLD product's opening question/strip immediately, not just once the new planner call resolves
     // P2-206: the 3 secondary catalog calls (getISQs enrichment · McatDtl image/category · IMSearchAPI gallery) all
     // depend only on `id`, so fire them CONCURRENTLY with the primary GetIsq below instead of serially after its
     // await. Page-1 spec correctness no longer depends on ordering: getISQs appends by functional merge, and GetIsq's
@@ -773,45 +687,81 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     }
   }, [_seed, commitProduct]);
 
-  // ── The INTELLIGENCE LAYER: the buyer-aware first question. On mount, generate the ONE contextual
-  //    intent question ("why do you need this?") + ≤2 non-spec gaps from WHO the buyer is × the category's
-  //    real seller questions. Shown prominently above the specs. Debug-captured via LLM_RAW('buyer-aware-questions').
+  // ── The UNIFIED Curated-RFQ planner — ONE understanding→ranking call. This replaces what used to be THREE
+  //    separate calls: the buyer-aware opening question, getSpecHints (page-1 prefill + per-field hints +
+  //    "also detected" extras), and getMissingSpecs (page-2 gap questions). Fires for EVERY committed product —
+  //    seeded (enrich/repost) OR freshly typed (cold-start gets the curated experience too, not just seeded
+  //    flows) — and RE-FIRES on a material change: new mcat, new photo/voice evidence (aiEpoch bump), or a
+  //    late-arriving ISQ schema (specSig) — mirrors the old hintsKey/aiKey discipline so no evidence is missed.
   const [baq, setBaq] = useState<CuratedPlan | null>(null);
   const [planCorrections, setPlanCorrections] = useState<CuratedPlan['prefills']>([]);
   const [baqLoading, setBaqLoading] = useState(false);
   const [baqAnswers, setBaqAnswers] = useState<Record<string, string>>({});
-  const baqFired = useRef(false);
   useEffect(() => {
-    if (!_seed?.productName || baqFired.current || !hasFormLLM()) return;
-    if (!committed || !isqSpecs.length) return;   // UNDERSTAND→USE needs the ISQ schema (buyer + seller specs) loaded first
-    baqFired.current = true;
-    setBaqLoading(true);
-    const buyerSpecNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC);
+    if (!committed || !mcatId || !hasFormLLM()) return;
+    if (specsLoading) return; // wait for page-1 specs to settle (fires for zero-ISQ categories too, once settled)
+    const name = productName;
+    const gen = commitGen.current; // guards against a superseded commit (async race — same discipline the old two calls had)
+    const specNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC);
+    const specSig = specNames.slice().sort().join('|');
+    const fireKey = `${mcatId}:${name}:${aiEpoch}:${specSig}`;
+    if (plannerFiredFor.current === fireKey) return;
+    plannerFiredFor.current = fireKey;
+    setBaqLoading(true); setAiSpecsLoading(true);
     const buyerSpecOptions: Record<string, string[]> = {};
     for (const s of isqSpecs) buyerSpecOptions[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
     const filled: Record<string, string> = { ...specValues };
     if (quantity) filled['Quantity'] = quantity;
     if (unit) filled['Quantity Unit'] = unit;
     if (deliveryLocation) filled['Delivery location'] = deliveryLocation;
-    // ONE unified Curated-RFQ planner call (collapses buyer-aware + progressive enrichment): understand the
-    // buyer, prefill/correct from their OWN signals, and ask the fewest decisive gaps.
     runCuratedPlanner({
-      requirement: _seed.productName, filled, buyerSpecs: buyerSpecNames, buyerSpecOptions,
-      sellerSpecs: sellerSpecsRef.current, categoryTopSpecs: _seed.categoryTopSpecs,
-      buyerFacts: _seed.buyerFacts, basket: _seed.basket, buyerSignals: _seed.buyerSignals,
-      entryMode: _seed.entryMode, model: RFQ_MODEL_SPECS,
+      requirement: name, categoryName: categoryNameRef.current, filled, buyerSpecs: specNames, buyerSpecOptions,
+      sellerSpecs: sellerSpecsRef.current, categoryTopSpecs: _seed?.categoryTopSpecs, categoryCorpus: categoryCorpusRef.current,
+      buyerFacts: _seed?.buyerFacts, basket: _seed?.basket, buyerSignals: _seed?.buyerSignals,
+      entryMode: _seed?.entryMode, model: RFQ_MODEL_SPECS,
     }).then((r) => {
-      setBaq(r);
-      // PROGRESSIVE TRUTH ENRICHMENT: apply the planner's prefills/corrections onto the spec fields (never a
-      // fabricated value — the planner already grounding-guards them), and surface them in the step-1 strip.
+      if (plannerFiredFor.current !== fireKey || gen !== commitGen.current) return;
+      // Split the ONE ranked gap list so the SAME question never appears twice: exactly 2 questions ride the
+      // very top (the opening/intent question + the single top-ranked gap); everything else becomes page-2
+      // "smart questions". Without this split, banner and page-2 would both render off the identical r.gaps array.
+      const bannerGaps = (r.gaps || []).slice(0, 1);
+      const pageGaps = (r.gaps || []).slice(1);
+      setBaq({ ...r, gaps: bannerGaps }); setAiSpecsError(false);
+      // PROGRESSIVE TRUTH ENRICHMENT: apply prefills/corrections onto the spec fields (never fabricated — the
+      // planner already grounding-guards them) and surface them in the step-1 "filled from your history" strip.
       if (r.prefills?.length) {
         const map: Record<string, string> = {};
         for (const p of r.prefills) if (p.field && p.value) map[p.field] = p.value;
         if (Object.keys(map).length) applyExtractedSpecs(map);
         setPlanCorrections(r.prefills);
       }
-    }).catch(() => setBaq(null)).finally(() => setBaqLoading(false));
-  }, [_seed, committed, isqSpecs]);
+      // extras — buyer-stated facts that don't map to any ISQ field name → "Also detected" (preserve buyer edits).
+      if (r.extras && Object.keys(r.extras).length) {
+        setExtraSpecs((prev) => {
+          const next = { ...prev };
+          for (const [k, v] of Object.entries(r.extras!)) {
+            if (!v || extraEditedRef.current.has(k.toLowerCase())) continue;
+            if (specNames.some((n) => n.toLowerCase() === k.toLowerCase())) continue; // never shadow a buyer field
+            next[k] = v;
+          }
+          return next;
+        });
+      }
+      setIsqHints(r.field_hints || {});
+      // gaps → the page-2 "smart questions" chips, same AiSpecQuestion shape the existing render already expects.
+      setAiSpecs(pageGaps.map((g) => ({ fieldName: g.q, options: g.options || [], helperText: g.why, kind: g.kind === 'non_spec' ? 'intent' : 'spec' } as AiSpecQuestion)));
+    }).catch((e) => {
+      setBaq(null);
+      emitApiError('runCuratedPlanner', e, { mcatId, aiEpoch });
+      emit(EV.AISPECS_FAILED, { mcatId, aiEpoch, surface: surfaceName });
+      // P2-258: on a RE-PLAN (aiEpoch>0, e.g. a photo added on the aispecs page) KEEP the last-good questions so
+      // the buyer isn't force-navigated off the page; only a genuine first-load failure clears them.
+      if (plannerFiredFor.current === fireKey && gen === commitGen.current) { setAiSpecsError(true); if (aiEpoch === 0) setAiSpecs([]); }
+    }).finally(() => {
+      if (plannerFiredFor.current === fireKey && gen === commitGen.current) { setBaqLoading(false); setAiSpecsLoading(false); }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [committed, mcatId, isqSpecs, productName, aiEpoch, specsLoading]);
 
   // ── LLM-on-image: a seeded product image → analyzeImage → MORE specs, via the same merge path as an
   //    upload. Best-effort: cross-origin image fetch may be CORS-blocked (imimg.com) → skip silently. ──
@@ -865,9 +815,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   }, [_seed, committed]);
 
   // Feed photo/voice-extracted specs into BOTH pipelines: page-1 fill (pendingAiSpecs → ISQ fields) AND
-  // the page-2 AI-specs prompt (photoSpecsRef → getMissingSpecs input). Bumping aiEpoch re-runs page 2
-  // with the new context. The product name, once the buyer has typed it, is NEVER overwritten (it's the
-  // primary signal) — a photo only ADDS specs; it names the product only when the buyer left it blank.
+  // the unified planner's next run (photoSpecsRef/specValues → its `filled` input, via aiEpoch bump).
+  // Bumping aiEpoch re-runs the planner with the new context. The product name, once the buyer has typed
+  // it, is NEVER overwritten (it's the primary signal) — a photo only ADDS specs; it names the product
+  // only when the buyer left it blank.
   const applyExtractedSpecs = (specs: Record<string, string>) => {
     if (!Object.keys(specs).length) return;
     // A LATER extraction for the SAME product REPLACES the prior photo/voice evidence (audit #3 photo-reselect):
@@ -1042,7 +993,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   };
 
   const setSpecValue = (k: string, v: string) => { photoSetKeys.current.delete(k); useCaseSetKeys.current.delete(k); setSpecValues((p) => ({ ...p, [k]: v })); }; // a buyer edit makes the field buyer-owned — neither a later photo/voice extraction nor the use-case assist will overwrite it (audit #3 + use-case priority)
-  // "Also detected" edits — mark the key as buyer-touched so a getSpecHints re-run never clobbers it.
+  // "Also detected" edits — mark the key as buyer-touched so a planner re-run never clobbers it.
   const setExtraValue = (k: string, v: string) => { extraEditedRef.current.add(k.toLowerCase()); setExtraSpecs((p) => ({ ...p, [k]: v })); };
   const removeExtra = (k: string) => { extraEditedRef.current.add(k.toLowerCase()); setExtraSpecs((p) => { const n = { ...p }; delete n[k]; return n; }); };
 
@@ -1143,13 +1094,13 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   }, [committed, unitsResolved, hasUnits, quantity, stage, mcatId]);
 
   // Owner (2026-07-23, reversed the earlier auto-skip): on an AI-specs FAILURE we no longer auto-advance past
-  // the page. The buyer stays and sees a RETRY (re-fires getMissingSpecs) plus a quiet "continue anyway" — a
-  // transient gateway hiccup shouldn't silently rob the buyer of the smart questions. Loader shows while in flight.
+  // the page. The buyer stays and sees a RETRY (re-fires the unified planner) plus a quiet "continue anyway" —
+  // a transient gateway hiccup shouldn't silently rob the buyer of the smart questions. Loader shows while in flight.
   const retryAiSpecs = () => {
-    aiFiredFor.current = '';            // re-arm the once-per-(mcat:epoch) guard
+    plannerFiredFor.current = '';       // re-arm the once-per-(mcat:name:epoch:specSig) guard
     setAiSpecsError(false);
     setAiSpecsLoading(true);            // instant loader feedback
-    setAiEpoch((e) => e + 1);           // new aiKey → the planner effect re-fires
+    setAiEpoch((e) => e + 1);           // new fireKey → the planner effect re-fires
   };
 
   // ── BuyLead (BL) eligibility (owner) — a BL is generated when the buyer gave a real signal: a QUANTITY, OR at
@@ -1426,7 +1377,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     </>
   );
 
-  // ── Spec fields (ALL buyer specs, one list). Shows the getSpecHints per-field hint when present. ──
+  // ── Spec fields (ALL buyer specs, one list). Shows the unified planner's field_hint when present. ──
   const renderSpecField = (s: ISQSpec) => {
     const opts = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
     const hint = isqHints[s.IM_SPEC_MASTER_DESC];
@@ -1439,9 +1390,9 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     );
   };
 
-  // Show ALL buyer specs (owner: "show all buyer specs on page 1"). We deliberately DON'T hide "redundant" ones
-  // from getSpecHints — hiding them asynchronously made specs "appear then vanish" ~1s after the page rendered
-  // (the owner-reported bug). getSpecHints still PRE-FILLS known values + adds hints; it just never removes a field.
+  // Show ALL buyer specs (owner: "show all buyer specs on page 1"). We deliberately DON'T hide any as
+  // "redundant" — hiding them asynchronously made specs "appear then vanish" ~1s after the page rendered
+  // (the owner-reported bug). The planner still PREFILLS known values + adds hints; it just never removes a field.
   const visibleSpecs = isqSpecs;
   // "Also detected" — extracted buyer-truth that isn't a buyer ISQ field; editable/removable, and shipped.
   const extraKeys = Object.keys(extraSpecs);
@@ -1478,7 +1429,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     </div>
   );
 
-  // ── Page 2 · AI specs (getMissingSpecs over the live category node) — options-only questions ──
+  // ── Page 2 · AI specs (the unified planner's ranked `gaps`) — options-only questions ──
   // Filter out any question a late authoritative getISQs has since made a page-1 ISQ field (no dup ask).
   const isqNameSet = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase()));
   const visibleAiSpecs = aiSpecs.filter((q) => !isqNameSet.has(q.fieldName.toLowerCase()));
