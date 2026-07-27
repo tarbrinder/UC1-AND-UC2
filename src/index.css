@@ -2,6 +2,53 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Accessibility: honour the OS "reduce motion" setting (fixes P2-227 / P3-315 / A11Y-08 / A11Y-20).
+   Neutralises the infinite/decorative loops (glow-ring, voice bars, float, shimmer, progress, pulse) + entrances. ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── IST-based dark theme, SELF-SCOPED to the RFQ forms (see lib/theme.ts) ──────────────────────────────
+   Only elements under a `.rfq-root.rfq-dark` shell are affected — V3/V4/BuyerLedgerView never carry `rfq-root`,
+   so this can't leak to the rest of the app. Overrides the neutral-gray Tailwind utilities the forms use;
+   teal/green/amber/red accents keep their hue (softened for dark). No per-element edits → nothing gets missed. */
+.rfq-root.rfq-dark { color-scheme: dark; background-color: #0d141d; color: #e6eaf0; }
+.rfq-root.rfq-dark .bg-white { background-color: #141d28 !important; }
+.rfq-root.rfq-dark .bg-gray-50 { background-color: #1b2430 !important; }
+.rfq-root.rfq-dark .bg-gray-50\/70 { background-color: #1b2430 !important; }
+.rfq-root.rfq-dark .bg-gray-100 { background-color: #232e3b !important; }
+.rfq-root.rfq-dark .bg-gray-900 { background-color: #e6eaf0 !important; }        /* rare inverse chips */
+.rfq-root.rfq-dark .text-gray-900,
+.rfq-root.rfq-dark .text-gray-800,
+.rfq-root.rfq-dark .text-gray-700 { color: #e6eaf0 !important; }
+.rfq-root.rfq-dark .text-gray-600,
+.rfq-root.rfq-dark .text-gray-500 { color: #aeb6c2 !important; }
+.rfq-root.rfq-dark .text-gray-400,
+.rfq-root.rfq-dark .text-gray-300 { color: #8a93a1 !important; }
+.rfq-root.rfq-dark .border-gray-100,
+.rfq-root.rfq-dark .border-gray-200,
+.rfq-root.rfq-dark .border-gray-300 { border-color: #2b3644 !important; }
+.rfq-root.rfq-dark .divide-gray-100 > * + * { border-color: #2b3644 !important; }
+.rfq-root.rfq-dark .bg-teal-50,
+.rfq-root.rfq-dark .bg-teal-50\/70,
+.rfq-root.rfq-dark .bg-teal-50\/60,
+.rfq-root.rfq-dark .bg-teal-50\/40 { background-color: rgba(20,184,166,0.14) !important; }
+.rfq-root.rfq-dark .bg-amber-50 { background-color: rgba(245,158,11,0.14) !important; }
+.rfq-root.rfq-dark .bg-green-50 { background-color: rgba(34,197,94,0.16) !important; }
+.rfq-root.rfq-dark .bg-red-50 { background-color: rgba(239,68,68,0.16) !important; }
+.rfq-root.rfq-dark input,
+.rfq-root.rfq-dark textarea,
+.rfq-root.rfq-dark select { background-color: #141d28 !important; color: #e6eaf0 !important; }
+.rfq-root.rfq-dark input::placeholder,
+.rfq-root.rfq-dark textarea::placeholder { color: #6b7480 !important; }
+/* The buyer's uploaded photo / catalog imagery keep true colour (don't get tinted by the dark surface). */
+.rfq-root.rfq-dark img { filter: none; }
+
 /* ── Auto-hiding scrollbar: invisible at rest, thin bar appears only while scrolling ── */
 .scroll-auto-hide {
   scrollbar-width: none;            /* Firefox: hidden by default */

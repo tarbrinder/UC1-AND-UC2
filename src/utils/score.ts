@@ -1,4 +1,5 @@
 import type { RFQFormData, ISQSpec } from '../types';
+import { qtyIsMeaningful } from './formValidation';
 
 export interface ScoreCheck {
   label: string;
@@ -64,7 +65,7 @@ export function calcScore(
   };
 
   add('Product', 'Product name', 10, (form.productName?.trim().length ?? 0) > 2);
-  add('Product', 'Quantity', 10, !!form.quantity?.trim(), quantityApplicable);
+  add('Product', 'Quantity', 10, qtyIsMeaningful(form.quantity), quantityApplicable); // only a real number > 0 earns the points (not '.', '0', '1.2.3')
   add('Product', 'Product image', 10, hasImage);
 
   // Specs score incrementally — each of the first 3 specs is worth a third of

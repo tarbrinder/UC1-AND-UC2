@@ -54,10 +54,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     <ToastContext.Provider value={{ show }}>
       {children}
       {createPortal(
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] flex flex-col gap-2 items-center pointer-events-none">
+        <div role="region" aria-live="polite" aria-atomic="false" aria-label="Notifications" className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] flex flex-col gap-2 items-center pointer-events-none">
           {toasts.map(t => (
             <div
               key={t.id}
+              role={t.type === 'error' ? 'alert' : 'status'}
               className={`pointer-events-auto animate-toast-in flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border text-sm font-medium max-w-sm w-full bg-white ${BORDER[t.type]} text-gray-700`}
             >
               {ICONS[t.type]}

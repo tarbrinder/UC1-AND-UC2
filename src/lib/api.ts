@@ -8,8 +8,10 @@ export const API_BASE = ((import.meta.env.VITE_API_BASE as string | undefined) ?
   ''
 );
 
-/** Prefix a relative `/api/*` path with the configured base. */
-export const api = (path: string): string => `${API_BASE}${path}`;
+/** Prefix a relative `/api/*` path with the configured base. Absolute URLs (3rd-party geo: ipapi.co,
+ *  bigdatacloud) pass through UNCHANGED — else a set VITE_API_BASE would corrupt them into
+ *  `https://gwhttps://ipapi.co/…` and silently break city/location detection (fixes P2-211). */
+export const api = (path: string): string => (/^https?:\/\//i.test(path) ? path : `${API_BASE}${path}`);
 
 // ─── n8n webhook (single source of truth) ─────────────────────────────────────
 // One dedicated, collision-proof hook for the live v10.2 workflow (imported from

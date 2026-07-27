@@ -9,8 +9,16 @@ import type { OfferLLMOut } from './offerEnrich';
 import type { UC2LLMOut } from './uc2Enrichment';
 import { SIGNAL_PRIORITY } from './provenance';
 
-const LLM_KEY = import.meta.env.VITE_LLM_KEY as string;
-const ENDPOINT = api('/api/llm/chat/completions');
+// The legacy default gateway key is NO LONGER read into the bundle. It used to be `import.meta.env.VITE_LLM_KEY`,
+// a REAL key that Vite inlined into dist (audit P0). All LLM calls now route through the proxy, which injects the
+// key server-side; hasGeminiKey() reflects availability via the public VITE_LLM_ENABLED flag (see RFQ_LLM_ENABLED).
+// AUTH MODEL (2026-07-23): the RFQ LLM keys are NEVER in the browser bundle. The dev proxy (vite.config) injects
+// `Authorization: Bearer <key>` per path — /api/llm (form key) · /api/cardllm (buyer-card key) — exactly like it
+// already does for Befisc/Sign3/Firecrawl. Prod must replicate that same injection. VITE_LLM_ENABLED is a PUBLIC
+// feature flag (NOT a secret) that only gates whether AI UI is offered; the real key lives server-side only.
+const RFQ_LLM_ENABLED = ((import.meta.env.VITE_LLM_ENABLED as string) || '').trim() === '1';
+const ENDPOINT = api('/api/llm/chat/completions');            // form key injected by the proxy
+const ENDPOINT_CARD = api('/api/cardllm/chat/completions');   // buyer-card key injected by the proxy (distinct prefix, no /api/llm collision)
 
 // Two-tier model strategy. Most calls are short, structured, low-reasoning text
 // tasks (hints, "Not sure?", requirement summary, question generation) → the
@@ -20,11 +28,11 @@ const ENDPOINT = api('/api/llm/chat/completions');
 const MODEL_FAST = 'google/gemini-2.5-flash-lite';
 const MODEL_RICH = 'google/gemini-2.5-flash';
 
-// Owner-scoped LLM key for the SimpleRFQForm AND the buyer-profile-card extractor (extractBuyerProfileLLM).
-// Provisioned for flash-lite ONLY (flash → 401 team_model_access_denied), so both surfaces run on lite.
-// Absent → callers fall back to the default VITE_LLM_KEY + their normal model. Everything ELSE (V3/V4
-// planner/intent, n8n) stays on the default key.
-export const RFQ_FORM_LLM_KEY = ((import.meta.env.VITE_RFQ_LLM_KEY as string) || '').trim() || undefined;
+// Buyer-profile-card LLM gate. Kept as an exported name (BuyerLedgerView / mergedTwinStore import it as a
+// truthiness gate) but it is now a BOOLEAN — the actual buyer-card key is proxy-injected on /api/llm-card and
+// never bundled. Runs on flash-lite (the buyer-card key 401s on flash), isolated from the form's /api/llm path.
+export const RFQ_FORM_LLM_KEY: boolean = RFQ_LLM_ENABLED;
+export { RFQ_LLM_ENABLED };
 export const RFQ_FORM_LLM_MODEL = MODEL_FAST;
 
 // ── India B2B context (injected into EVERY prompt) ────────────────────
@@ -35,7 +43,7 @@ export const RFQ_FORM_LLM_MODEL = MODEL_FAST;
 const INDIA_CTX =
   'CONTEXT — INDIA B2B ONLY. This is IndiaMART, an India business-to-business marketplace. EVERYTHING you output must be in Indian context. MONEY/BUDGET/PRICE: ALWAYS Indian Rupees with the ₹ symbol and Indian numbering — use bands like "Under ₹50,000", "₹50,000–₹2 lakh", "₹2–10 lakh", "₹10 lakh+", "₹1 crore+". Use lakh/crore, NEVER million/billion, NEVER $/USD/"dollar". Places = Indian cities/states; standards = BIS/ISI/IS; norms = GST, Indian trade terms. Never use foreign currencies, units, places, or examples.';
 
-export const hasGeminiKey = () => Boolean(LLM_KEY?.trim());
+export const hasGeminiKey = () => RFQ_LLM_ENABLED;
 
 // Belt-and-suspenders: if a model still emits a "$"/USD token in any buyer-facing
 // string, swap the symbol to ₹ (amounts are nominal bands, not FX conversions).
@@ -52,7 +60,7 @@ interface LLMOpts {
   temperature?: number; // F1/F2: low temp on CLASSIFICATION calls (archetype, twin) → consistent labels across runs
   label?: string; // A4: which logical call this is (e.g. 'deriveIntent') — for the LLM Call Health ring
   timeoutMs?: number; // audit 2026-07-13: per-call deadline (AbortController) so a hung gateway can't spin the loader forever
-  apiKey?: string; // per-call key override (e.g. the RFQ-form-only key) — falls back to the module VITE_LLM_KEY
+  route?: 'form' | 'card'; // which proxy path (and therefore which server-injected key) this call uses; default 'form'
 }
 
 // ── A4 (G12): per-call LLM health ring — answers "did each LLM call fire, succeed, how long". ──
@@ -125,11 +133,11 @@ export function onLLMActivity(cb: LLMActivityCb): () => void {
 export const llmActive = (): number => llmInFlight;
 
 async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } }): Promise<string> {
-  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm', timeoutMs = 240000, apiKey } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
-  const key = (apiKey && apiKey.trim()) || LLM_KEY; // per-call override (RFQ-form-only key) → default
+  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm', timeoutMs = 240000, route = 'form' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
+  const endpoint = route === 'card' ? ENDPOINT_CARD : ENDPOINT; // proxy injects the Bearer key per path — never bundled
   // audit 2026-07-13 (P1): no timeout meant a hung gateway never resolved — llmInFlight stuck, global 'working…' loader
   // spun forever with no health record. 240s default comfortably clears the ~100s extract; a truly hung socket now aborts.
-  if (!key || !key.trim()) { recordLLM({ label, ok: false, ms: 0, status: 0, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) }); throw new Error('no LLM key'); }
+  if (!RFQ_LLM_ENABLED) { recordLLM({ label, ok: false, ms: 0, status: 0, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) }); throw new Error('LLM disabled'); }
   const t0 = Date.now();
   let status = 0;
   const ac = new AbortController();
@@ -148,7 +156,7 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
     // all bounded by the shared abort timer.
     let res!: Response;
     for (let attempt = 0; ; attempt++) {
-      res = await fetch(ENDPOINT, { method: 'POST', headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }, body: payload, signal: ac.signal });
+      res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, signal: ac.signal }); // Authorization injected by the proxy per path — key never leaves the server
       status = res.status;
       if (res.ok || (status !== 429 && status < 500) || attempt >= 2 || ac.signal.aborted) break;
       await new Promise((r) => setTimeout(r, (2 ** attempt) * 900 + 400)); // ~1.3s, then ~2.2s
@@ -228,7 +236,7 @@ export async function extractBuyerProfileLLM(system: string, user: string): Prom
     // maxTokens stays 32000 (NOT reduced): the v33 contract is ~2x heavier (policy + confidence breakdown +
     // source-consumption arrays per attribute) — 16k truncated the JSON → parse-fail → blank card. flash-lite's
     // output ceiling (~64k, same family as flash) covers it, so lite runs at the same headroom.
-    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 32000, model: RFQ_FORM_LLM_KEY ? RFQ_FORM_LLM_MODEL : MODEL_RICH, apiKey: RFQ_FORM_LLM_KEY, label: 'extractBuyerProfile' }, meta);
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 32000, model: RFQ_LLM_ENABLED ? RFQ_FORM_LLM_MODEL : MODEL_RICH, route: 'card', label: 'extractBuyerProfile' }, meta);
     applyMeta();
     const parsed = JSON.parse(out) as Record<string, unknown>;
     const attrs = Array.isArray((parsed as { attributes?: unknown }).attributes) ? (parsed as { attributes: unknown[] }).attributes
@@ -303,7 +311,7 @@ export async function voiceToSpecs(
   mimeType: string,
   productName: string,
   isqSpecNames: string[],
-  apiKey?: string,
+  route: 'form' | 'card' = 'form',
   model?: string
 ): Promise<{
   rawTranscript: string;
@@ -350,12 +358,15 @@ Return ONLY valid JSON:
   "mappedSpecs": { "SpecFieldName": "value" },
   "customSpecs": [{ "fieldName": "name", "value": "value" }]
 }
-The audio may be in Hindi, English or Hinglish — transcribe faithfully, then extract. mappedSpecs keys must exactly match known spec fields. customSpecs is for anything else. Map deliveryTimeline/paymentTerms/creditPeriod to the EXACT option strings above (so the form can pre-select them).`,
+The audio may be in Hindi, English or Hinglish — transcribe faithfully, then extract. mappedSpecs keys must exactly match known spec fields. customSpecs is for ANYTHING ELSE the buyer stated (any B2B attribute — never drop a stated detail just because it isn't a known field). Map deliveryTimeline/paymentTerms/creditPeriod to the EXACT option strings above (so the form can pre-select them).
+GROUNDING (critical): extract ONLY what the buyer ACTUALLY SAID. If a detail was not spoken, return null (or omit it from mappedSpecs/customSpecs). NEVER guess, infer, or fill a typical/default value that wasn't stated. A number with a rating/dimension unit (e.g. "5 kVA", "6 mm", "230 volt") is a SPEC value, NOT the order quantity.`,
         },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'voiceToSpecs', apiKey });   // audit P2: raised from 2048 — a long transcript could clip mid-JSON and lose the whole extraction
-  return JSON.parse(text);
+  ], { model: model || MODEL_RICH, maxTokens: 4000, temperature: 0, label: 'voiceToSpecs', route, timeoutMs: 15000 });   // temp 0 = deterministic extraction (audit); TIMEOUT 15s (was 10s) — audio transcription + a 429 backoff can push a long note past 10s; 4000 tokens (audit #6: echoes the full rawTranscript, so a long Hindi/Hinglish note can overrun a 2000 cap → truncated JSON)
+  // audit #6: a truncated/invalid body must NOT throw — that would kill the whole mic feature. Fall back to empty.
+  try { return JSON.parse(text); }
+  catch { return { rawTranscript: '', productName: null, quantity: null, quantityUnit: null, deliveryLocation: null, deliveryTimeline: null, paymentTerms: null, creditPeriod: null, mappedSpecs: {}, customSpecs: [] }; }
 }
 
 // ── Image analysis ────────────────────────────────────────────────────
@@ -366,7 +377,7 @@ export async function analyzeImage(
   isqFieldNames: string[],
   isqFieldOptions: Record<string, string[]>,
   application = '',
-  apiKey?: string,
+  route: 'form' | 'card' = 'form',
   model?: string
 ): Promise<{
   productName: string;
@@ -410,16 +421,19 @@ Identify this B2B product and its key specs.${useCase} Return JSON:
   "additionalDetails": ""
 }`;
 
+  const GROUND = `\nGROUNDING (critical): report ONLY what is actually VISIBLE/READABLE in this image. If it is not a product (blurry, irrelevant, a person, a screenshot) return productName:null and empty specs. NEVER infer a spec from category priors or a "typical" value — only what you can see. Put ANY visible attribute that isn't a listed field into additionalSpecifications (never drop it). A rating/dimension number (e.g. "5 kVA", "6 mm") is a SPEC value, NOT the order quantity.`;
   const text = await callLLM([
     {
       role: 'user',
       content: [
         { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-        { type: 'text', text: prompt },
+        { type: 'text', text: prompt + GROUND },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 16000, label: 'analyzeImage', apiKey });   // audit P2: raised from 1024 — avoid clipping the JSON on a detailed image read
-  return JSON.parse(text);
+  ], { model: model || MODEL_RICH, maxTokens: 2000, temperature: 0, label: 'analyzeImage', route, timeoutMs: 20000 });   // temp 0 = deterministic extraction (audit); TIMEOUT 20s (was 10s) — image analysis on the heavier 3.6-flash tier can exceed 10s; the "Reading your photo…" indicator covers the wait; 2000 tokens ample
+  // audit #6: guard against truncated/invalid JSON so a bad body can't throw and break the photo feature.
+  try { return JSON.parse(text); }
+  catch { return { productName: '', specifications: {}, additionalSpecifications: {}, quantity: null, additionalDetails: '' }; }
 }
 
 // ── Cold-mode: generate the non-spec questions to ask, by segment ─────
@@ -531,7 +545,7 @@ Rules:
 - Keep only questions relevant to THIS product & segment; DROP the rest.
 - Skip anything already implied by the chosen specs or covered by the spec fields.
 - TOPIC-OVERLAP GUARD: never put a question on the final step ("requirement"/"persona") whose topic is ALREADY one of the spec fields above. E.g. if a spec field like "Usage"/"Application" exists, do NOT add an "intended usage/application" question; if "Warranty" is a spec, don't ask warranty; if "Material" is a spec, don't ask material. When the topic is already a spec field, either anchor a genuinely COMPLEMENTARY "specs" question to it, or drop it entirely.
-- The form ALREADY asks these elsewhere — do NOT ask them or any rephrasing/synonym of them: delivery timeline / when they need it / how soon / purchase timing, payment terms or mode, preferred supplier type, delivery city/location, company size, GST, purchase frequency, industry. Focus on OTHER intent/usage/quality/persona signals.
+- The form ALREADY asks these elsewhere — do NOT ask them or any rephrasing/synonym of them: delivery timeline / when they need it / how soon / purchase timing, payment terms or mode, preferred supplier type, company size, GST, purchase frequency, industry. ANY LOCATION question is FORBIDDEN — delivery/supply/site/shipping/installation location, "where will you use/install/receive it", city / state / region / pincode / area: the location is a hidden dedicated field. Focus on OTHER intent/usage/quality/persona signals.
 - TAILOR options to this product (e.g., "Usage" for a generator → Factory backup / Hospital / Site, not Home/Business). CHIPS ONLY: every question MUST have 3-5 specific option chips — NEVER free-text/empty options (the form adds an "Other…" chip). NEVER ask quantity/order-size, delivery, timeline, or payment — those are dedicated form fields.
 - You MAY add category-specific questions beyond the seed if they reveal buyer intent/seriousness.
 - ${args.askPersona ? 'Persona questions allowed.' : 'Do NOT ask persona questions.'}
@@ -1415,7 +1429,9 @@ export async function inferSpecsFromApplication(
   productName: string,
   application: string,
   isqSpecNames: string[],
-  isqSpecsWithOptions: Record<string, string[]>
+  isqSpecsWithOptions: Record<string, string[]>,
+  route: 'form' | 'card' = 'form',
+  model?: string
 ): Promise<{
   specs: Record<string, { value: string; confidence: number }>;
   rationale: string;
@@ -1447,8 +1463,9 @@ Return ONLY JSON:
   "rationale": "ONE short sentence framed as typical/common domain inference (e.g. 'Typical for car-wash tyre polish: usually silicon-based, high-gloss, spray form'), NOT as the buyer's stated requirement"
 }`,
     },
-  ], { label: 'inferSpecsFromApplication' });
-  const p = JSON.parse(text);
+  ], { label: 'inferSpecsFromApplication', temperature: 0, model: model || MODEL_FAST, route, timeoutMs: 20000 }); // TIMEOUT 20s (was 10s): use-case reasoning on 3.6-flash ~7s+; the "Analysing your requirement…" loader covers the wait
+  let p: { specs?: Record<string, unknown>; rationale?: unknown };
+  try { p = JSON.parse(text); } catch { p = {}; } // truncated/invalid body must not throw (kills the assist)
   // Normalize: accept both the new {value,confidence} shape and a bare string (backward-compatible).
   const specs: Record<string, { value: string; confidence: number }> = {};
   for (const [k, sv] of Object.entries(p?.specs || {})) {
@@ -1567,11 +1584,14 @@ export async function getSpecHints(
   isqSpecsWithOptions: Record<string, string[]>,
   twinContext = '',
   evidenceFacts?: Record<string, string>, // EXPLICIT buyer facts from mic/photo — mapped onto ISQ fields (the "light spec mapper", folded in)
-  apiKey?: string
+  sellerSpecNames: string[] = [],          // seller-flagged fields — REFERENCE only, to name an extra with a real field name when one fits
+  route: 'form' | 'card' = 'form',
+  model?: string                           // caller-chosen model (else the default fast/lite tier)
 ): Promise<{
   knownFromProductName: Record<string, string>;
   redundantISQSpecs: string[];
   isqHints: Record<string, string>;
+  extras: Record<string, string>;          // buyer-truth facts that DON'T fit a buyer ISQ field → surfaced as key-values, never lost
 }> {
   const evidence = evidenceFacts && Object.keys(evidenceFacts).length
     ? Object.entries(evidenceFacts).filter(([, v]) => v && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join('; ')
@@ -1582,28 +1602,60 @@ export async function getSpecHints(
       content: `${INDIA_CTX}
 You are a B2B product spec expert for IndiaMART.
 Product: "${productName}"
-${twinContext ? `Buyer background (use ONLY to make "isqHints" more relevant — do NOT use it to fill "knownFromProductName" with anything the product name does not itself entail, and NEVER infer a brand from it): ${twinContext}\n` : ''}${evidence ? `Buyer-STATED facts (EXPLICIT statements from the buyer's voice/photo — these ARE buyer truth, map each onto its matching ISQ field below and include it in "knownFromProductName" with the field's exact name; synonyms/units may differ, e.g. "5 kVA" → "Power (kVA)"): ${evidence}\n` : ''}ISQ fields: ${JSON.stringify(isqSpecNames)}
+${twinContext ? `Buyer background (use ONLY to make "isqHints" more relevant — do NOT use it to fill "knownFromProductName" with anything the product name does not itself entail, and NEVER infer a brand from it): ${twinContext}\n` : ''}${evidence ? `Buyer-STATED facts (EXPLICIT statements from the buyer's voice/photo — these ARE buyer truth, map each onto its matching ISQ field below and include it in "knownFromProductName" with the field's exact name; synonyms/units may differ, e.g. "5 kVA" → "Power (kVA)"): ${evidence}\n` : ''}Buyer ISQ fields (page-1 chips): ${JSON.stringify(isqSpecNames)}
 Fields with options: ${JSON.stringify(isqSpecsWithOptions)}
-
-Only put a value in "knownFromProductName" if it is UNAMBIGUOUSLY entailed by the product name OR explicitly present in the buyer-STATED facts above (map to the closest option string when one fits). If you are not ~certain, leave it out.
-NEVER INFER a Brand / Make / Manufacturer / OEM / Model from the product alone — that narrows the seller pool and is forbidden. NEVER guess.
+${sellerSpecNames.length ? `Seller-relevant fields (REFERENCE only — if an extra fact matches one of these, use its exact name as the extra's key): ${JSON.stringify(sellerSpecNames)}\n` : ''}
+RECONCILE every fact the buyer TRULY provided (from the product name + the stated facts above) into exactly ONE bucket — never both, no duplicates:
+1. "knownFromProductName" — a fact that maps to a BUYER ISQ field. Use the ISQ field's EXACT name as the key; map the value to the closest option string when one fits (e.g. "single phase" → "1-Phase", "5 kVA" → "5 kVA"). Only include a fact that is UNAMBIGUOUSLY entailed by the product name OR explicitly stated above.
+2. "extras" — a real buyer-provided fact that does NOT fit any buyer ISQ field (it may match a seller-relevant field, or be a brand-new attribute). Keep it as a clean key: value so it is never lost. NEVER put an ISQ-field fact here.
+GROUNDING (STRICT — this is the #1 rule): a value belongs in "knownFromProductName" ONLY if its words/numbers LITERALLY appear in the product name or the stated facts above. NEVER guess, NEVER infer a typical/default/most-common value, NEVER invent a fact. If the product name is just a generic category with NO stated size/type/grade/material/condition (e.g. "paper cutting machine" alone, "diesel generator" alone), then "knownFromProductName" MUST be empty {} — do NOT fill Size/Operation Type/Condition/Voltage/etc. with a likely value. Only "paper cutting machine 20 inch" lets you fill Size="20 inch"; "single phase motor" lets you fill Phase="1-Phase". NEVER infer Brand / Make / Manufacturer / OEM / Model from the product name (that narrows the seller pool) — a brand goes in extras ONLY if the buyer explicitly stated it. A rating/dimension number ("5 kVA", "6 mm") is a spec, never a quantity.
 
 Return ONLY JSON:
 {
-  "knownFromProductName": { "SpecName": "value UNAMBIGUOUSLY implied by the product name (never a brand)" },
+  "knownFromProductName": { "ExactISQFieldName": "value (closest option string when one fits; never a brand)" },
+  "extras": { "AttributeName": "value the buyer gave that isn't a buyer ISQ field" },
   "redundantISQSpecs": ["spec names not applicable for this product"],
-  "isqHints": { "SpecName": "short helpful hint, max 8 words" }
+  "isqHints": { "ISQFieldName": "short helpful hint, max 8 words" }
 }`,
     },
-  ], { label: 'getSpecHints', apiKey });
-  let parsed: { knownFromProductName?: Record<string, string>; redundantISQSpecs?: string[]; isqHints?: Record<string, string> };
-  try { parsed = JSON.parse(text); } catch { parsed = {}; } // hints are best-effort — a bad body must not throw
-  // Bias guard at the source: a name-detect must NEVER be a brand/make field.
+  ], { label: 'getSpecHints', temperature: 0, maxTokens: 1500, model: model || MODEL_FAST, route, timeoutMs: 12000 }); // temp 0 = deterministic reconciliation; TIMEOUT 12s — 3.5-flash-lite is ~2.5s but it fires CONCURRENTLY with getMissingSpecs (shared-key 429 → ~3.5s backoff), so 10s could clip it; 1500 out bounds a runaway
+  let parsed: { knownFromProductName?: Record<string, string>; redundantISQSpecs?: string[]; isqHints?: Record<string, string>; extras?: Record<string, string> };
+  // Harden against a valid-but-non-object body ('null'/'true'/123): JSON.parse doesn't throw on those, but then
+  // parsed.knownFromProductName would. Coerce anything that isn't a plain object to {}.
+  try { const p = JSON.parse(text); parsed = (p && typeof p === 'object') ? p : {}; } catch { parsed = {}; }
+  // Bias guard at the source: a name-detect must NEVER be a brand/make field. Only keep fills that name a REAL
+  // ISQ field (key-validation — the LLM must not invent a buyer field). Everything else the LLM returned as a
+  // buyer fill but that isn't a real ISQ field is demoted to an extra (never dropped).
+  // Normalize for synonym matching (audit #11): drop parenthetical unit suffixes + punctuation so a fill/extra
+  // keyed "Power" reconciles to the real ISQ field "Power (kVA)" instead of surviving as a duplicate.
+  const norm = (s: string) => s.toLowerCase().replace(/\([^)]*\)/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+  const isqSet = new Set(isqSpecNames.map((n) => n.toLowerCase()));
+  const isqByNorm = new Map(isqSpecNames.map((n) => [norm(n), n] as const)); // normalized → canonical ISQ name
   const known: Record<string, string> = {};
+  const extras: Record<string, string> = { ...(parsed.extras && typeof parsed.extras === 'object' ? parsed.extras : {}) };
   for (const [k, v] of Object.entries(parsed.knownFromProductName || {})) {
-    if (!PREFERENCE_KEYWORDS.test(k)) known[k] = v;
+    if (!v || PREFERENCE_KEYWORDS.test(k)) continue;
+    const canonical = isqSet.has(k.toLowerCase()) ? k : isqByNorm.get(norm(k)); // exact, else normalized synonym
+    if (canonical) known[canonical] = v; else extras[k] = v; // key-validate; demote unknown keys to extras
   }
-  return { knownFromProductName: known, redundantISQSpecs: parsed.redundantISQSpecs || [], isqHints: parsed.isqHints || {} };
+  // Never let an extra shadow a buyer ISQ field — exact OR normalized/synonym/parenthetical-unit variant (dedup).
+  for (const k of Object.keys(extras)) if (isqSet.has(k.toLowerCase()) || isqByNorm.has(norm(k))) delete extras[k];
+  // GROUNDING BACKSTOP (deterministic — the model STILL fabricates typical/default fills despite the prompt, e.g.
+  // "paper cutting machine" → Machine Size "36 inch" / Operation "Automatic" / Condition "New", none stated by the
+  // buyer). Drop any knownFromProductName value that shares NO meaningful token with the ACTUAL buyer input (the
+  // product name + explicit photo/voice facts). Synonym/option-snap survives on its alpha token ("single phase" →
+  // "1-Phase" via "phase"); pure fabrications (zero token overlap) are removed so they never pre-select a chip.
+  const groundToks = new Set((`${productName} ${Object.values(evidenceFacts || {}).join(' ')}`.toLowerCase().match(/[a-z0-9]+/g)) || []);
+  const valueGrounded = (v: string) => {
+    const all = v.toLowerCase().match(/[a-z0-9]+/g) || [];
+    if (!all.length) return true; // punctuation-only value (nothing to fabricate)
+    const meaningful = all.filter((t) => t.length >= 3 || /\d/.test(t));
+    // require ≥1 token overlap. If EVERY token is short (e.g. a bare "No"/"Yes"), still test those short tokens so a
+    // fabricated boolean/short default can't pass unchecked. Synonym/option-snap survives on its alpha token.
+    return (meaningful.length ? meaningful : all).some((t) => groundToks.has(t));
+  };
+  for (const k of Object.keys(known)) if (!valueGrounded(known[k])) delete known[k]; // fabricated fill → not shown/selected
+  return { knownFromProductName: known, redundantISQSpecs: parsed.redundantISQSpecs || [], isqHints: parsed.isqHints || {}, extras };
 }
 
 export interface AiSpecQuestion {
@@ -1619,6 +1671,100 @@ export interface AiSpecQuestion {
 // that can be wrong or too specific (e.g. product "BOPP film roll red tape" → category "Red Tape"), so
 // it never overrides the product name. Grounded in the live n8n category node: sellerSpecs (critical_specs
 // by seller-frequency), commonFollowups, dealBlockers, intentPatterns. Options-only, deduped vs page-1.
+// ─── Buyer-aware first question (the intelligence layer) ─────────────────────
+// Given WHO the buyer is (facts + everything they're sourcing) and what sellers ACTUALLY ask in
+// this category, generate the ONE contextual opening question ("why do you need this generator?")
+// + ≤2 non-spec-first follow-ups. Runs through callLLM → auto-captured in LLM_RAW + telemetry (debug/eval).
+export interface BuyerAwareQuestions {
+  opening?: { q: string; why: string; options?: string[] };
+  gaps: { q: string; kind: 'non_spec' | 'spec'; why: string; options?: string[] }[];
+  __raw?: { system: string; user: string; output: string };
+}
+export async function generateBuyerAwareQuestions(input: {
+  requirement: string;
+  buyerFacts?: Record<string, unknown>;
+  basket?: string[];
+  knownSpecs?: Record<string, string>;
+  categoryTopSpecs?: { q: string; pct?: number; vals?: string[] }[];
+  categoryKeywords?: string[];
+  entryMode?: string;
+  model?: string;
+}): Promise<BuyerAwareQuestions> {
+  const sys = `You draft the FIRST questions a buyer sees on IndiaMART's "Post a Requirement" form. You KNOW who this buyer is (their facts + everything they are sourcing) and what sellers ACTUALLY ask in this category.
+Return ONLY JSON:
+{"opening":{"q":"...","why":"...","options":["...","..."]},"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}]}
+- opening = ONE short intent/application question PERSONALISED to THIS buyer — the "what is it for / what scale / new-or-expand" that changes the whole quote. INFER their situation from their basket + facts (e.g. buying a machine + raw material + transport => setting up a unit => ask about the unit; a hospital buyer => ask about backup load). Add 2-4 tap options when natural.
+- gaps = up to 2 follow-ups drawn from the seller's real top questions, NON-SPEC first.
+Rules: NEVER ask anything already in already_known. Plain buyer words, no jargon, no internal terms (never say CSL/mcat/category). Keep every question under ~12 words. Ground each "why" in the seller questions or the buyer's own context.`;
+  const usr = JSON.stringify({ requirement: input.requirement, buyer_facts: input.buyerFacts, also_sourcing: input.basket, already_known: input.knownSpecs, seller_top_questions: input.categoryTopSpecs, category_keywords: input.categoryKeywords, flow: input.entryMode });
+  try {
+    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'buyer-aware-questions', model: input.model || MODEL_FAST, maxTokens: 1400, temperature: 0.3 });
+    const j = JSON.parse(raw) as BuyerAwareQuestions;
+    return { opening: j.opening, gaps: Array.isArray(j.gaps) ? j.gaps.slice(0, 2) : [], __raw: { system: sys, user: usr, output: raw } };
+  } catch { return { gaps: [] }; }
+}
+
+// ─── The UNIFIED Curated-RFQ Planner (collapses buyer-aware + getMissingSpecs + getSpecHints) ─────
+// ONE flash-lite UNDERSTAND→USE call: given everything we KNOW about THIS buyer × the category's real
+// seller questions, it (a) understands the buyer, (b) PREFILLS/CORRECTS fields from the buyer's OWN truth
+// (WhatsApp/calls/basket) with provenance, (c) emits the ONE opening intent question + ranked gaps NOT
+// already known, (d) decides an optional identity ask. Objective = maximise understanding, minimum effort.
+// Firewall: prefills come ONLY from the buyer's own stated signals (a category norm is a SUGGEST-gap, never
+// a prefill); a grounding guard drops any prefill value not backed by a real signal token.
+export interface CuratedPlan {
+  opening?: { q: string; why: string; options?: string[] };
+  prefills: { field: string; value: string; source: string; corrected_from?: string }[];   // Progressive Truth Enrichment
+  gaps: { q: string; kind: 'non_spec' | 'spec'; why: string; options?: string[] }[];
+  kyb_ask?: { doc: string; why: string } | null;
+  __raw?: { system: string; user: string; output: string };
+}
+export async function runCuratedPlanner(input: {
+  requirement: string;
+  filled?: Record<string, string>;                 // specs/qty/unit/location we already hold (the seed)
+  buyerSpecs?: string[];                            // ISQ field names shown on page 1 (never re-ask)
+  buyerSpecOptions?: Record<string, string[]>;
+  sellerSpecs?: string[];
+  categoryTopSpecs?: { q: string; pct?: number; vals?: string[] }[];
+  categoryPersonas?: unknown;
+  categoryB2b?: unknown;
+  buyerFacts?: Record<string, unknown>;
+  basket?: string[];
+  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[] };
+  entryMode?: string;
+  model?: string;
+}): Promise<CuratedPlan> {
+  const known = Object.entries(input.filled || {}).filter(([, v]) => v && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join('; ') || 'None';
+  const specsDetail = (input.buyerSpecs || []).map((n) => { const o = input.buyerSpecOptions?.[n]; return o && o.length ? `${n} [${o.slice(0, 8).join(', ')}]` : n; }).join('; ') || 'None';
+  const sys = `You are the Curated-RFQ Engine for IndiaMART. You KNOW this buyer (their facts, basket, and their OWN WhatsApp/call signals) and what sellers ACTUALLY ask in this category. Your objective is to maximise understanding of THIS requirement with the LEAST buyer effort — prefill/confirm what you already know, and ask only the fewest decisive gaps.
+Return ONLY JSON:
+{"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}],"kyb_ask":{"doc":"GST|Udyam|PAN|Company name","why":"buyer-benefit reason"}}
+RULES:
+- prefills = fill or CORRECT a field ONLY from the buyer's OWN signals below (buyer_signals / also_sourcing) — e.g. a spec the buyer typed on WhatsApp, an application they said on a call. NEVER prefill from a category norm (that is a gap/suggestion). Set corrected_from ONLY when a fresher buyer signal disagrees with an already_known value (prefer the LATEST signal). If no real buyer signal supports a value, DO NOT emit it.
+- opening = ONE short intent/use-case question personalised to THIS buyer (what is it FOR / what scale / new-or-expand), inferred from basket + facts + signals. 2-4 tap options.
+- gaps = the fewest decisive questions NOT already in already_known and NOT covered by a page-1 buyer spec (judge by MEANING + overlapping options, not exact name). NON-SPEC first, then top category specs. Max 3 non-spec. Options-only (3-8 concrete chips), never open Brand/Make/Model.
+- QUANTITY lives on the landing page (a first-class field, kept from the buyer's specs). If already_known contains a quantity, NEVER ask it. If quantity is NOT known, you MAY include ONE quantity question — but ONLY when a quantity is meaningful for THIS product (a consumable / packaging / raw-material / component: yes; a one-off capital good, a machine, or a whole plant / setup: NO — never ask "how many" for a plant). Use judgement; omit it when it doesn't fit.
+- kyb_ask = include ONLY if the category is clearly B2B/bulk AND the buyer has no GST on file; pick the single best-value doc; phrase the why as a buyer benefit (e.g. "verified buyers get more seller responses"). Omit otherwise.
+- Plain buyer words, ≤12 words per question, no jargon (never say CSL/mcat/ISQ).`;
+  const usr = JSON.stringify({
+    requirement: input.requirement, already_known: known && known !== 'None' ? known : undefined,
+    page1_buyer_specs: specsDetail !== 'None' ? specsDetail : undefined,
+    seller_flagged_specs: input.sellerSpecs?.slice(0, 20),
+    seller_top_questions: input.categoryTopSpecs, category_personas: input.categoryPersonas, category_b2b_b2c: input.categoryB2b,
+    buyer_facts: input.buyerFacts, also_sourcing: input.basket, buyer_signals: input.buyerSignals, flow: input.entryMode,
+  });
+  try {
+    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 2200, temperature: 0.2 });
+    const j = JSON.parse(raw) as CuratedPlan;
+    // Grounding guard: a prefill VALUE must be backed by a real buyer signal (never a fabricated fill).
+    const signalText = [input.requirement, JSON.stringify(input.buyerSignals || {}), (input.basket || []).join(' '), Object.values(input.filled || {}).join(' ')].join(' ').toLowerCase();
+    const groundToks = new Set(signalText.match(/[a-z0-9]+/g) || []);
+    const backed = (v: string) => { const t = (String(v).toLowerCase().match(/[a-z0-9]+/g) || []).filter((x) => x.length >= 3 || /\d/.test(x)); return t.length ? t.some((x) => groundToks.has(x)) : false; };
+    const prefills = Array.isArray(j.prefills) ? j.prefills.filter((p) => p && p.field && p.value && backed(p.value)) : [];
+    const gaps = Array.isArray(j.gaps) ? j.gaps.slice(0, 6) : [];
+    return { opening: j.opening, prefills, gaps, kyb_ask: j.kyb_ask ?? null, __raw: { system: sys, user: usr, output: raw } };
+  } catch { return { prefills: [], gaps: [] }; }
+}
+
 export async function getMissingSpecs(args: {
   productName: string;
   categoryName?: string;
@@ -1628,7 +1774,7 @@ export async function getMissingSpecs(args: {
   evidenceFacts?: Record<string, string>; // EXPLICIT buyer facts from mic/photo/typed input — LOSSLESS: any not covered by page 1 MUST surface here pre-answered
   sellerSpecs?: string[];                // getISQs seller-flagged spec names (supplementary hint)
   categoryCorpus?: unknown;              // 2026-07-21: the RAW category corpus (n8n parse_rows: per-call {buyer_intent, buyer_queries, seller_queries, products…}) OR the legacy category_intelligence object — passed WHOLE; the planner distills + orders from it. Absent → product-name + seller-spec fallback.
-  apiKey?: string;
+  route?: 'form' | 'card'; // proxy path (server-injected key); default 'form'
   model?: string; // caller-chosen model (RFQ key is flash-lite-only; flash 401s on it → default lite)
 }): Promise<AiSpecQuestion[]> {
   // Buyer specs WITH their option chips, so the model sees the CONCEPT each page-1 field already covers
@@ -1665,7 +1811,7 @@ DECIDE IN THIS ORDER:
 2. MISMATCH GUARD (critical): if the mapped category / its evidence / the page-1 buyer specs do NOT fit the buyer's real product — e.g. the buyer wants a "generator toy" but the category is "diesel generator" — then IGNORE the category evidence, the seller-flagged specs, AND the (wrong) page-1 buyer specs, and build questions PURELY from the real product. A wrong category must NOT pollute the questions. Say nothing that only makes sense for the wrong category.
 3. WHEN THE CATEGORY MATCHES: mine the CATEGORY EVIDENCE for the specs/questions sellers ask MOST to qualify a buyer; prefer the high-frequency ones. Build each question's option chips from the real values seen in that evidence when present, else from real product-specific values.
 4. ORDER like the calls actually flow: if buyers/sellers open with INTENT / use-case, put the intent question FIRST, then the specs. Otherwise specs first. Return the questions in the EXACT order they should be shown to the buyer.
-5. COVERAGE / NO RE-ASK (STRICT — this is the worst failure): never ask anything a PAGE-1 BUYER SPEC already covers. Judge by MEANING and overlapping OPTIONS, NOT the exact field name — a buyer spec captures a concept even under a different label. Concrete: page-1 "Power (kVA)" already covers "Rated Power"/"Capacity"/"Output/Rating" → do NOT ask those; page-1 "Enclosure Type [Silent/Canopy, Open/Non-Silent]" already covers "Genset Type"/"Noise Level"/"Silent vs Open"/"Canopy" → do NOT ask those; page-1 "Brand" covers "Make"/"Manufacturer". Before adding any question, check every page-1 buyer spec above and DROP it if the concept overlaps. Never re-ask something the buyer already stated; surface that stated value PRE-ANSWERED via "prefill" instead.
+5. COVERAGE / NO RE-ASK (STRICT — this is the worst failure): never ask anything a PAGE-1 BUYER SPEC already covers. Judge by MEANING and overlapping OPTIONS, NOT the exact field name — a buyer spec captures a concept even under a different label. Concrete: page-1 "Power (kVA)" already covers "Rated Power"/"Capacity"/"Output/Rating" → do NOT ask those; page-1 "Enclosure Type [Silent/Canopy, Open/Non-Silent]" already covers "Genset Type"/"Noise Level"/"Silent vs Open"/"Canopy" → do NOT ask those; page-1 "Brand" covers "Make"/"Manufacturer". Before adding any question, check every page-1 buyer spec above and DROP it if the concept overlaps. Never re-ask something the buyer already stated; surface that stated value PRE-ANSWERED via "prefill" instead. QUANTITY / order size / volume / MOQ / "how many" is ALSO already captured on page 1 — NEVER ask it.
 6. CADENCE — your call: include a purchase-frequency question ONLY if it is meaningful for THIS product AND not already a buyer spec, and only if it earns a slot over other candidates (other questions may matter more — you decide). Product-appropriate options: capital good → "One-time","Occasional","Annual (AMC/renewal)"; consumable/raw-material/packaging → "Weekly","Monthly","Quarterly","Ongoing contract"; service → "One-time","Recurring","Retainer / ongoing". Skip entirely for a genuine one-off purchase. Never emit the generic "One-time/Weekly/Monthly/Annual" unless it truly fits.
 
 OUTPUT RULES:
@@ -1676,18 +1822,59 @@ OUTPUT RULES:
 - Plain simple English, ≤10 words per question.
 Return ONLY JSON:
 { "questions": [ { "fieldName": "question or spec name", "kind": "intent|spec|context", "options": ["opt1","opt2","opt3"], "helperText": "≤5-word why it matters", "prefill": "exact option the buyer's evidence supports — OMIT when no evidence" } ] }` },
-  ], { label: 'getMissingSpecs', temperature: 0.3, maxTokens: 4000, timeoutMs: 30000, model: args.model || MODEL_FAST, apiKey: args.apiKey }); // page-2 planner; default flash-lite (RFQ key is lite-only); 4000 output tokens; 30s buyer-facing deadline
+  ], { label: 'getMissingSpecs', temperature: 0, maxTokens: 4000, timeoutMs: 22000, model: args.model || MODEL_FAST, route: args.route ?? 'form' }); // TIMEOUT 22s (was 10s): this is the HEAVIEST form call — full category corpus in + 5 reasoned questions out, now on 3.6-flash (~7-12s) and fired CONCURRENTLY with getSpecHints (a shared-key 429 adds a ~3.5s backoff), so 10s aborted intermittently → "couldn't load smart questions". It's PRE-FETCHED on commit (buyer reaches page-2 seconds later), so a longer cap is invisible; still bounded so a hung gateway can't spin forever. temp 0 (audit #12) — deterministic across aiEpoch re-fires.
   let parsed: { questions?: Array<{ fieldName?: string; kind?: string; options?: unknown; helperText?: string; prefill?: string }> };
-  try { parsed = JSON.parse(text); } catch { parsed = { questions: [] }; } // never throw — a truncated/malformed body must not blank the whole page silently
+  // never throw — a truncated/malformed OR non-object ('null'/123) body must not blank the whole page silently
+  try { const p = JSON.parse(text); parsed = (p && typeof p === 'object') ? p : { questions: [] }; } catch { parsed = { questions: [] }; }
   // Normalise a field name for dedup: drop parenthetical unit suffixes ("Voltage (V)"→"voltage") + punctuation.
   const norm = (s: string) => s.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   // Evidence corpus for the fabrication guard — a prefill is trusted only if a real evidence value backs it.
   const evidenceCorpus = Object.values(args.evidenceFacts || {}).map((v) => String(v).toLowerCase().trim()).filter(Boolean);
-  const evidenceBacks = (v: string) => { const lv = v.toLowerCase().trim(); return evidenceCorpus.some((e) => e.includes(lv) || lv.includes(e)); };
+  // A prefill is evidence-backed only on a WHOLE-TOKEN overlap — not a bare substring. KEEP digit-bearing tokens
+  // regardless of length (audit #5): otherwise "10 kVA"/"60 days" drop the number and validate against evidence
+  // "5 kVA"/"45 days" on the UNIT alone — the very fabrication this guard exists to stop. Every numeric run in
+  // the prefill must appear verbatim as a whole token in some evidence value.
+  const toks = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const evidenceBacks = (v: string) => {
+    const vt = toks(v).filter((t) => t.length >= 3 || /\d/.test(t));
+    if (!vt.length) { const lv = v.toLowerCase().trim(); return evidenceCorpus.some((e) => e === lv); } // all-short value → require an exact evidence match
+    return vt.every((t) => evidenceCorpus.some((e) => toks(e).includes(t))); // every meaningful token must appear as a whole token in some evidence fact
+  };
   // Brand/vendor questions narrow the seller pool → never an OPEN ask. Scoped so it does NOT eat legit
   // objective attributes like "Model Scale"/"Winding material" (bare "model" needs a name/no qualifier).
   const BRAND_Q = /\b(brand|manufacturer|oem|make)\b|\bmodel\s*(name|no\.?|number)\b|preferred\s+(supplier|vendor|brand)|\b(vendor|supplier)\b/i;
+  // Quantity/order-size is captured on page 1 (qty+unit) but STRIPPED from buyerSpecs, so it isn't in `seen` —
+  // guard it explicitly so the planner can never duplicate it as an AI spec (owner-flagged).
+  const QTY_Q = /\b(quantity|qty|order\s*(size|quantity)|volume|units?\s*(required|needed|per)|no\.?\s*of\s*(units|pieces|pcs)|how\s*many|moq|minimum\s*order)\b/i;
+  // LAST-PAGE / DEDICATED FORM FIELDS — the form collects delivery timeline · payment · delivery location · GST ·
+  // business type · industry on its FINAL step, so the AI planner must NEVER surface them as a page-2 question.
+  // The prompt already forbids it, but the LLM still occasionally leaks "Required delivery timeline" and there was
+  // NO parser backstop (only QTY_Q covered quantity) — this is that backstop. Scoped so legit product specs survive
+  // ("Delivery Pressure" for a pump, "Installation Type" → KEPT; only delivery TIMING/LOCATION, payment, GST,
+  // business/industry are blocked). Purchase frequency / cadence is intentionally NOT blocked (a real AI-spec).
+  // NOTE (2026-07-23): broadened to catch ANY location/where question, not just "delivery …". The old guard needed
+  // a "deliver" prefix, so "Supply location", "Site location", "Where will you use it", "Region", "Pincode" leaked
+  // through as page-2 questions. `\blocation\b` / `\bwhere\b` / supply·shipping·site prefixes + region/pincode now
+  // cover them. Still scoped so real specs survive — "Coverage Area", "Installation Type", "Delivery Pressure" are KEPT.
+  const FORM_FIELD_Q = /(\bdeliver\w*\s*(time|timeline|date|schedule|lead|when|by|day|week|location|address|area|city|region|state|pin)|\btimeline\b|\blead\s*time|\bhow\s*soon|\bwhen\s+do\s+you\s+(need|want|require)|\burgen|\bpayment|\badvance\s*payment|\bcredit\s*(term|period|day)|\bgst\b|\bpin\s*code|\bpincode|\bpostal|\binstall\w*\s*(location|address|site|city)|\blocation\b|\bwhere\b|\bshipping\b|\bregion\b|\bsupply\s*(location|area|city|point|address)|\bsite\s*(location|address)|\bcompany\s*size|\bbusiness\s*type|\btype\s*of\s*business|\bindustry\b)/i;
   const seen = new Set(args.buyerSpecs.map(norm));
+  // SYNONYM dedup by OPTION OVERLAP (the exact-name `seen` set alone misses relabelled fields). A page-1 spec's
+  // option set is the surest fingerprint of the CONCEPT it captures; if ≥half of an AI question's options match a
+  // single buyer spec's options (exact-normalised or containment — "silent"⊂"silent canopy", "5 kva"="5 kva"),
+  // it's the same field under a different name → drop it. Catches "Rated Power"↔"Power (kVA)",
+  // "Genset Type"↔"Enclosure Type" the name-only dedup would let through. Applied to open gap-fills only —
+  // an evidence-backed prefill carries a buyer-stated value and is kept (lossless).
+  const buyerOptSets = Object.values(args.buyerSpecOptions || {})
+    .map((opts) => new Set((opts || []).map(norm).filter(Boolean)))
+    .filter((s) => s.size >= 2); // only option sets with ≥2 real discriminating values fingerprint a concept
+  const optMatches = (a: string, bset: Set<string>) => bset.has(a) || [...bset].some((b) => (b.length >= 3 && a.includes(b)) || (a.length >= 3 && b.includes(a)));
+  const optOverlapsBuyer = (options: string[]) => {
+    const ns = options.map(norm).filter(Boolean);
+    if (ns.length < 2) return false; // too few options to safely fingerprint a concept
+    // STRICT MAJORITY (matches*2 > n): a 2-option question needs BOTH to match, so one incidental shared
+    // generic value ("Open", "Yes") can't false-drop a genuinely distinct spec.
+    return buyerOptSets.some((bset) => { const m = ns.filter((o) => optMatches(o, bset)).length; return m * 2 > ns.length; });
+  };
   const out: AiSpecQuestion[] = [];
   let gapCount = 0; // the ≤5 cap applies ONLY to non-prefilled gap-fill questions; evidence-prefilled questions are uncapped. PLANNER ORDER preserved (intent-first when the LLM ordered it so).
   for (const q of parsed.questions || []) {
@@ -1697,7 +1884,10 @@ Return ONLY JSON:
     let prefill = q.prefill ? String(q.prefill).trim() : '';
     if (prefill && !evidenceBacks(prefill)) prefill = ''; // fabrication guard: no evidence → not a buyer-stated fact
     if (prefill && !options.some((o) => o.toLowerCase() === prefill.toLowerCase())) options = [prefill, ...options];
+    if (QTY_Q.test(name)) continue;                         // quantity is a page-1 field — never duplicate it as an AI spec
+    if (FORM_FIELD_Q.test(name)) continue;                  // last-page field (delivery/timeline/payment/location/GST/business/industry) — the final step owns it, never ask it here
     if (BRAND_Q.test(name) && !prefill) continue;          // brand as an open ask — drop (evidence-backed brand stays)
+    if (!prefill && optOverlapsBuyer(options)) continue;   // synonym re-ask (same options as a page-1 spec) — drop the open gap-fill
     if (!prefill && options.length < 2) continue;          // options-only gate — but a pre-answered single-option evidence fact is legit
     if (prefill && !options.length) options = [prefill];
     seen.add(norm(name));

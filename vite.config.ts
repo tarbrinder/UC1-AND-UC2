@@ -27,11 +27,40 @@ export default defineConfig(({ mode }) => {
     } : {}),
     server: {
       proxy: {
-        // IndiaMART LLM gateway
+        // IndiaMART LLM gateway — buyer-CARD path (distinct prefix so it never collides with /api/llm's
+        // startsWith match). Injects the buyer-card key SERVER-SIDE (env.RFQ_BUYERCARD_KEY; legacy VITE_ name as
+        // fallback) so the key never enters the browser bundle. Runs flash-lite. Prod must replicate this injection.
+        '/api/cardllm': {
+          target: 'https://imllm.intermesh.net',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/cardllm/, '/v1'),
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              const cardKey = env.RFQ_BUYERCARD_KEY || env.VITE_RFQ_BUYERCARD_KEY
+              if (cardKey) proxyReq.setHeader('Authorization', `Bearer ${cardKey}`)
+            })
+          },
+        },
+        // IndiaMART LLM gateway — FORM path. Injects the RFQ form key SERVER-SIDE (env.RFQ_LLM_KEY; legacy
+        // VITE_RFQ_LLM_KEY as fallback during transition) so the key never enters the browser bundle. Prod must
+        // replicate this same injection (same model as Befisc/Sign3/Firecrawl below).
         '/api/llm': {
           target: 'https://imllm.intermesh.net',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api\/llm/, '/v1'),
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              const formKey = env.RFQ_LLM_KEY || env.VITE_RFQ_LLM_KEY
+              if (formKey) proxyReq.setHeader('Authorization', `Bearer ${formKey}`)
+            })
+          },
+        },
+        // Curated seller search (windmill "curated_seller_search_v6_7"). The form POSTs to `/api/sellersearch`;
+        // the proxy forwards to the windmill run URL. Auth (`ak`) rides in the request body — no header injection.
+        '/api/sellersearch': {
+          target: 'https://windmill.intermesh.net',
+          changeOrigin: true,
+          rewrite: () => '/api/r/indiamart-workspace/curated_seller_search_v6_7-golive',
         },
         // IndiaMART apps APIs (MCAT + ISQ)
         '/api/imimg': {
@@ -87,12 +116,19 @@ export default defineConfig(({ mode }) => {
           },
         },
         // Seller / entity web-verify crawler (OSINT). FRONTEND-only async job: the form calls
-        // `/api/sellerverify/api/v2/seller/verify` (+ /status/<job>); the proxy forwards to the scraper host.
-        // The X-Gemini-Key is sent browser-side (debug mode) — no server-side injection needed.
+        // `/api/sellerverify/api/v2/seller/verify` (+ /status/<job>); the proxy forwards to the scraper host and
+        // injects X-Gemini-Key SERVER-SIDE (env.LLM_GATEWAY_KEY; legacy VITE_LLM_KEY as fallback) so the Gemini
+        // key never enters the browser bundle (audit P0 — it used to be read client-side).
         '/api/sellerverify': {
           target: 'http://34.93.111.50',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api\/sellerverify/, ''),
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              const gkey = env.LLM_GATEWAY_KEY || env.VITE_LLM_KEY
+              if (gkey) proxyReq.setHeader('X-Gemini-Key', gkey)
+            })
+          },
         },
         // Firecrawl web search (REAL World/OSINT). The form calls `/api/firecrawl/v2/search`; the proxy
         // forwards to api.firecrawl.dev and injects the Bearer SERVER-SIDE (from env.FIRECRAWL_API_KEY)

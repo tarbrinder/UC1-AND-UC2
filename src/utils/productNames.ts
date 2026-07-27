@@ -101,15 +101,16 @@ export function stripQuantityPrefix(query: string): string {
   return stripped.length >= 2 ? stripped : query.trim();
 }
 
-// Capture the leading quantity (+ optional unit) so "100 meter jute rope" can
-// pre-fill quantity=100, unit=meter on step 0.
+// Capture a leading quantity ONLY when it carries a TRUE ORDER unit (pieces / nos / kg / meter / …). The unit is
+// now REQUIRED — a bare number, or a number with a spec/rating/dimension unit ("5 kVA", "6 mm", "230 V"), is NOT
+// treated as an order quantity (that's a spec value, mapped by the LLM). Fixes "5 kVA diesel generator" → qty 5.
 const LEADING_QTY_CAPTURE =
-  /^\s*(\d+(?:[.,]\d+)?)\s*(mm|cm|meter|metre|m|ft|kg|gram|g|tonne|ton|mt|quintal|qt|litre|liter|ltr|l|pieces|piece|pcs|pc|nos|no|units?|sets?|rolls?|bags?|boxes|box|pairs?|pair|dozen|dz)?\b/i;
+  /^\s*(\d+(?:[.,]\d+)?)\s*(pieces?|pcs|pc|nos\b|units?|sets?|rolls?|bags?|boxes?|box|pairs?|pair|dozen|dz|kgs?|quintal|tonnes?|tons?|\bmt\b|litres?|liters?|ltr|meters?|metres?|feet|ft|km)\b/i;
 
 export function parseQuantityFromName(name: string): { quantity: string; unit: string } | null {
   const m = name.match(LEADING_QTY_CAPTURE);
   if (!m) return null;
-  // Require something after the number so a bare "10" product code isn't treated as qty.
+  // Require something after the qty+unit so a bare "100 pieces" with no product isn't treated as a requirement.
   if (!name.slice(m[0].length).trim()) return null;
   return { quantity: m[1].replace(/,/g, ''), unit: (m[2] || '').toLowerCase() };
 }

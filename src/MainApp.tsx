@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Zap, Layers, Mic, FileText, Sparkles, Search, FolderTree, ExternalLink, BarChart3 } from 'lucide-react';
+import { Zap, Layers, Mic, FileText, Sparkles, Search, FolderTree, ExternalLink, BarChart3, Package } from 'lucide-react';
 import RFQModalV3 from './components/RFQModalV3';
 import RFQModalV4 from './components/RFQModalV4';
 import SimpleRFQForm from './components/SimpleRFQForm';
@@ -71,6 +71,7 @@ export default function MainApp() {
         { title: 'Category', tag: 'Popup', desc: 'Corpus-driven: the whole category-intelligence corpus feeds one LLM call for the questions (needs v51 n8n).', Icon: FolderTree, onClick: () => openSimple('category') },
         { title: 'Simple · standalone', tag: 'Full page', desc: 'The Simple form on its own full page, no dashboard chrome. Opens ?rfq=simple.', Icon: ExternalLink, onClick: () => { window.location.href = '?rfq=simple'; } },
         { title: 'Category · standalone', tag: 'Full page', desc: 'The Category form on its own full page. Opens ?rfq=category.', Icon: ExternalLink, onClick: () => { window.location.href = '?rfq=category'; } },
+        { title: 'Standard Product', tag: 'Brand', desc: 'Exact catalog product from a brand page ("Get Best Price") — 6 pre-set specs + describe, no search, no LLM. Opens ?rfq=standard.', Icon: Package, onClick: () => { window.location.href = '?rfq=standard&sid=456523'; } },
       ],
     },
     {
