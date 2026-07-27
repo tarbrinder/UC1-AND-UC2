@@ -57,6 +57,18 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
   const evAtoms = o.evidence ?? [];
   const evIndex = evAtoms.length ? new Map(evAtoms.map((a) => [a.id, a])) : null;
   const evUsed = new Set(p.decisions.flatMap((d) => d.evidence ?? []));   // atoms that actually reached a decision
+  // Map an atom back to the node that produced it. atom.source is the SIGNAL vocabulary
+  // (posted/viewed/searched/discussed_wa/interested) or a '+'-joined cluster; node keys are csl/rfq/whatsapp/…
+  const nodeOf = (a: { source?: string }): string => {
+    const s = String(a.source ?? '');
+    if (/posted/.test(s)) return 'rfq';
+    if (/discussed_wa|whatsapp/.test(s)) return 'whatsapp';
+    if (/viewed|searched/.test(s)) return 'csl';
+    if (/interested|profile|kyb/.test(s)) return 'profile';
+    if (/call|pns|vani/.test(s)) return 'calls';
+    if (/categor/.test(s)) return 'category';
+    return '';
+  };
 
   return (
     <div className="h-full overflow-y-auto bg-white text-[12.5px] text-gray-700">
@@ -99,15 +111,43 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
           );
         })}
 
-        {/* NODE DATA + HEALTH — expand → the raw each source returned */}
-        <Section title="node data · what each source returned" count={`${healthyN}/${Object.keys(nodeHealth).length} healthy`} />
-        {Object.entries(nodeHealth).map(([name, h]) => (
+        {/* NODE DATA + HEALTH — RAW first, then what the RFQ actually CONSUMED from it (owner, 2026-07-28).
+            "Raw" alone can't answer the real question: of everything this source returned, what did we USE?
+            The USED half is derived from the evidence dictionary (engine v7+) by matching atom.source to the
+            node, so it is the engine's own accounting, not a re-guess here. */}
+        <Section title="node data · raw returned, and what the RFQ used" count={`${healthyN}/${Object.keys(nodeHealth).length} healthy`} />
+        {Object.entries(nodeHealth).map(([name, h]) => {
+          const used = evAtoms.filter((a) => nodeOf(a) === name);
+          const usedInDecision = used.filter((a) => evUsed.has(a.id));
+          return (
           <Row key={name} tone={h.status}
             head={<span className="font-medium capitalize text-gray-700">{name === 'profile' ? 'profile enrichment' : name}</span>}
-            sub={<span className="shrink-0 text-[11px] text-gray-400">{h.count}</span>}>
+            sub={<span className="shrink-0 text-[11px] text-gray-400">
+              {h.count}{evAtoms.length ? <span className={usedInDecision.length ? 'text-teal-600' : 'text-amber-600'}> · {usedInDecision.length} used</span> : null}
+            </span>}>
+            <div className="mt-1 text-[10px] font-semibold text-gray-500">USED BY THIS RFQ{evAtoms.length ? ` · ${usedInDecision.length} of ${used.length} atoms reached a decision` : ''}</div>
+            {!evAtoms.length ? (
+              <p className="px-2 py-1 text-[10px] text-amber-600">engine predates v7 — no evidence dictionary, so "what we used" can't be computed.</p>
+            ) : !used.length ? (
+              <p className="px-2 py-1 text-[10px] text-gray-400">nothing from this source became a truth atom
+                {h.count ? ' — it returned data but no consumer read it.' : '.'}</p>
+            ) : (
+              <div className="space-y-0.5 px-2 py-1">
+                {used.map((a) => (
+                  <p key={a.id} className={`text-[9.5px] leading-snug ${evUsed.has(a.id) ? 'text-gray-600' : 'text-gray-400'}`}>
+                    {evUsed.has(a.id) ? <span className="text-teal-600">●</span> : <span className="text-gray-300">○</span>}{' '}
+                    <span className={`rounded px-1 text-[8.5px] font-semibold ${TIER_COLOR[String(a.tier)] ?? 'bg-gray-100 text-gray-500'}`}>{a.tier}</span>{' '}
+                    <span className="font-medium">{a.field}</span>{a.value != null && a.value !== '' ? <> = {String(a.value)}</> : null}
+                    {!evUsed.has(a.id) && <span className="text-amber-600"> · {a.ignored_because || 'built but never reached a decision'}</span>}
+                  </p>
+                ))}
+              </div>
+            )}
+            <div className="mt-2 text-[10px] font-semibold text-gray-500">RAW</div>
             <Pre v={nodeRaw[name] ?? '(no raw — re-import the engine for node_raw)'} />
           </Row>
-        ))}
+          );
+        })}
 
         {/* ROUTING */}
         <Section title="routing" />
@@ -177,10 +217,25 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
           </div>
         </>)}
 
-        {/* SUPPRESSED — the firewall audit trail */}
-        <Section title="suppressed — never shown, always logged" count={suppressed.length + (o.suppressed?.length ?? 0)} />
-        {suppressed.map((d, i) => <p key={`d${i}`} className="text-[10.5px] text-gray-500"><span className="text-gray-400 line-through">{d.field}</span> — {d.reason}</p>)}
-        {(o.suppressed ?? []).map((s, i) => <p key={`s${i}`} className="text-[10.5px] text-gray-500"><span className="text-gray-400 line-through">{s.product ?? `req#${s.i}`}</span> — {s.why}</p>)}
+        {/* SUPPRESSED — split, because the old single "never shown" header was FALSE (owner caught it).
+            Two different layers suppress for two different reasons and only one of them is truly never shown:
+             · a SUPPRESS decision (noise spec) really is dropped entirely — firewall.
+             · a "browsing-only" requirement is only excluded from the DECISION layer. It is still offered as a
+               Source card in the chooser AND still sent to the planner LLM in `basket`/also_sourcing. Labelling
+               that "never shown" made a live, buyer-visible product look like it had been discarded. */}
+        <Section title="suppressed — dropped by the firewall, never shown" count={suppressed.length} />
+        {suppressed.length
+          ? suppressed.map((d, i) => <p key={`d${i}`} className="text-[10.5px] text-gray-500"><span className="text-gray-400 line-through">{d.field}</span> — {d.reason}</p>)
+          : <p className="text-[10.5px] text-gray-400">none</p>}
+
+        <Section title="not decision-worthy — still shown as a Source card + sent to the planner" count={o.suppressed?.length ?? 0} />
+        {(o.suppressed ?? []).map((s, i) => (
+          <p key={`s${i}`} className="text-[10.5px] text-gray-500">
+            <span className="text-gray-600">{s.product ?? `req#${s.i}`}</span>
+            <span className="ml-1 rounded bg-gray-100 px-1 text-[9px] text-gray-500">card + LLM input</span> — {s.why}
+          </p>
+        ))}
+        {!(o.suppressed?.length) && <p className="text-[10.5px] text-gray-400">none</p>}
 
         <p className="mt-3 text-[10px] text-gray-400">brain {m.versions?.brain} · planner {m.versions?.planner} · adapter {m.versions?.adapter}</p>
       </div>
