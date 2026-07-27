@@ -45,6 +45,16 @@ export interface DecisionSummary {
   questions_avoided: number; questions_generated: number; conflicts_resolved: number;
   suggestions_offered: number; suppressed: number;
 }
+/** One truth atom — what a decision's `evidence: ["ev_7"]` actually POINTS AT. Emitted by engine v7+;
+ *  before that the ids were dangling (the debug trail showed "ev_7" and could never resolve it). */
+export interface EvidenceAtom {
+  id: string; req?: number; field?: string; value?: unknown;
+  tier?: 'stated' | 'observed' | 'inferred' | 'noise' | string;
+  source?: string;                 // e.g. "posted+discussed_wa" — WHICH source(s) produced this atom
+  age_days?: number | null; freshness?: string; confidence?: number;
+  used_because?: string;           // why it was admitted
+  ignored_because?: string;        // why it was dropped (the firewall's audit trail)
+}
 export interface RequirementBrainPayload {
   decisions: Decision[];
   metadata: {
@@ -67,6 +77,7 @@ export interface RequirementBrainPayload {
     decision_summary: DecisionSummary;
     node_health: Record<string, NodeHealth>;
     node_raw?: Record<string, unknown>;   // per-source raw payload for debug drill-down
+    evidence?: EvidenceAtom[];            // engine v7+: resolves every decision's ev_N (absent on older engines)
     suppressed?: { i: number; product?: string; why: string }[];
     planner_gate: string;
     evidence_count: number;
@@ -105,6 +116,7 @@ export function normalize(raw: unknown): RequirementBrainPayload {
         conflicts_resolved: by.RESOLVE_CONFLICT ?? 0, suggestions_offered: by.SUGGEST ?? 0, suppressed: by.SUPPRESS ?? 0,
       },
       node_health: {},
+      evidence: (r?.evidence as EvidenceAtom[]) ?? undefined,   // v1 never carried it; v7+ does
       suppressed: (r?.suppressed as RequirementBrainPayload['observability']['suppressed']) ?? [],
       planner_gate: tr.planner_gate ?? 'unknown',
       evidence_count: tr.evidence_count ?? 0,

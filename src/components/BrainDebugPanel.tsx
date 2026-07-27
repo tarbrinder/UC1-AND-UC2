@@ -9,6 +9,11 @@ import { getLLMHealth, getLLMRaw, onLLMActivity, type LLMCallRecord } from '../l
 import type { RequirementBrainPayload, Decision } from '../lib/brains/requirementBrain';
 
 const DOT: Record<string, string> = { green: 'bg-teal-500', amber: 'bg-amber-400', red: 'bg-red-500' };
+// Fabrication-firewall tiers, colour-coded so a fabricated/inferred atom can never be mistaken for a stated one.
+const TIER_COLOR: Record<string, string> = {
+  stated: 'bg-teal-100 text-teal-700', observed: 'bg-amber-100 text-amber-700',
+  inferred: 'bg-indigo-100 text-indigo-700', noise: 'bg-red-100 text-red-600',
+};
 const ACTION_COLOR: Record<string, string> = {
   PREFILL: 'bg-teal-100 text-teal-800', CONFIRM: 'bg-amber-100 text-amber-800', ASK: 'bg-blue-100 text-blue-800',
   SUGGEST: 'bg-gray-100 text-gray-600', RESOLVE_CONFLICT: 'bg-red-100 text-red-800', OFFER: 'bg-indigo-100 text-indigo-800', SUPPRESS: 'bg-gray-100 text-gray-400 line-through',
@@ -47,6 +52,11 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
   const healthyN = Object.values(nodeHealth).filter((h) => h.status === 'green').length;
   const shown = p.decisions.filter((d) => d.action !== 'SUPPRESS');
   const suppressed = p.decisions.filter((d) => d.action === 'SUPPRESS');
+  // Evidence dictionary (engine v7+). `evIndex` null ⇒ older engine emitted only a count, so ev_N can't resolve —
+  // we say so in the UI rather than rendering a dead id that looks like a working audit trail.
+  const evAtoms = o.evidence ?? [];
+  const evIndex = evAtoms.length ? new Map(evAtoms.map((a) => [a.id, a])) : null;
+  const evUsed = new Set(p.decisions.flatMap((d) => d.evidence ?? []));   // atoms that actually reached a decision
 
   return (
     <div className="h-full overflow-y-auto bg-white text-[12.5px] text-gray-700">
@@ -122,10 +132,50 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
                 {d.kind && <span className="rounded bg-gray-100 px-1 text-[9px] text-gray-500">{d.kind}</span>}
               </div>
               {(d.reason || d.why) && <p className="mt-0.5 text-[10px] text-gray-500">{d.reason || d.why}</p>}
-              {d.evidence?.length ? <p className="text-[9px] text-gray-400">evidence: {d.evidence.join(', ')}</p> : null}
+              {/* WHY THIS DECISION — resolve every ev_N into the actual truth atom it points at (engine v7+).
+                  Before v7 the engine emitted only a COUNT, so these ids were dangling and the trail was cosmetic. */}
+              {d.evidence?.length ? (
+                evIndex
+                  ? <div className="mt-1 space-y-0.5">
+                      {d.evidence.map((id) => {
+                        const a = evIndex.get(id);
+                        if (!a) return <p key={id} className="text-[9px] text-red-400">{id} — not in evidence dictionary</p>;
+                        return (
+                          <p key={id} className="text-[9.5px] leading-snug text-gray-500">
+                            <span className="rounded bg-white px-1 font-mono text-[8.5px] text-gray-400 ring-1 ring-gray-200">{id}</span>{' '}
+                            <span className={`rounded px-1 text-[8.5px] font-semibold ${TIER_COLOR[String(a.tier)] ?? 'bg-gray-100 text-gray-500'}`}>{a.tier}</span>{' '}
+                            <span className="font-medium text-gray-700">{a.field}</span>
+                            {a.value != null && a.value !== '' ? <> = {String(a.value)}</> : null}
+                            {a.source ? <> · <span className="text-gray-400">via {a.source}</span></> : null}
+                            {a.freshness ? <> · {a.freshness}{a.age_days != null ? ` ${a.age_days}d` : ''}</> : null}
+                            {a.used_because ? <><br /><span className="text-gray-400">↳ {a.used_because}</span></> : null}
+                            {a.ignored_because ? <><br /><span className="text-amber-600">↳ dropped: {a.ignored_because}</span></> : null}
+                          </p>
+                        );
+                      })}
+                    </div>
+                  : <p className="text-[9px] text-gray-400">evidence: {d.evidence.join(', ')} <span className="text-amber-500">· unresolvable — engine predates v7 (no evidence dictionary)</span></p>
+              ) : null}
             </div>
           ))}
         </div>
+
+        {/* EVIDENCE LEDGER — every atom the engine built, used or not. The Know/Use/Ignore view. */}
+        {evAtoms.length > 0 && (<>
+          <Section title="evidence ledger — every truth atom" count={`${evAtoms.length} · ${evUsed.size} used / ${evAtoms.length - evUsed.size} unused`} />
+          <div className="space-y-0.5">
+            {evAtoms.map((a) => (
+              <p key={a.id} className={`text-[9.5px] leading-snug ${evUsed.has(a.id) ? 'text-gray-600' : 'text-gray-400'}`}>
+                <span className="rounded bg-gray-50 px-1 font-mono text-[8.5px] ring-1 ring-gray-200">{a.id}</span>{' '}
+                <span className={`rounded px-1 text-[8.5px] font-semibold ${TIER_COLOR[String(a.tier)] ?? 'bg-gray-100 text-gray-500'}`}>{a.tier}</span>{' '}
+                {evUsed.has(a.id) ? <span className="text-teal-600">●</span> : <span className="text-gray-300">○</span>}{' '}
+                <span className="font-medium">{a.field}</span>{a.value != null && a.value !== '' ? <> = {String(a.value)}</> : null}
+                {a.source ? <span className="text-gray-400"> · via {a.source}</span> : null}
+                {!evUsed.has(a.id) && a.ignored_because ? <span className="text-amber-600"> · {a.ignored_because}</span> : null}
+              </p>
+            ))}
+          </div>
+        </>)}
 
         {/* SUPPRESSED — the firewall audit trail */}
         <Section title="suppressed — never shown, always logged" count={suppressed.length + (o.suppressed?.length ?? 0)} />
