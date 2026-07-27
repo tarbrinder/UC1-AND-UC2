@@ -32,7 +32,7 @@ import { resolveRfqTheme, rfqThemeClass } from '../lib/theme';
 
 type Surface = 'mobile' | 'desktop';
 // 'more' = the LAST page = "Your Profile & Delivery" (About You + Logistics&Payment + Contact, combined).
-type Stage = 'product' | 'specs' | 'aispecs' | 'more' | 'results';
+type Stage = 'product' | 'specs' | 'more' | 'results'; // 'aispecs' merged into 'specs' 2026-07-27 — ONE continuous spec page, no tap between prefilled specs and the ranked gap questions (owner-locked)
 type CategoryMode = 'simple' | 'category';
 
 // The captured requirement handed back to the host (fixes P1-113). ⚑ DEV-TODO: the real BuyLead-generation API
@@ -57,17 +57,15 @@ interface Props {
   onSubmit?: (req: RFQSubmission) => void; // host receives the requirement (BL generation); demo falls back to the results screen
 }
 
-// Top clickable stepper nodes (owner). Product is the landing (stepper hidden there); the 3 numbered
-// steps are Specifications · More Details · Delivery & Payment. specs+aispecs both map to Specifications.
-// Owner: "More Details" points at the AI-spec page; the LAST page is "Your Profile & Delivery" (About You +
-// payment + delivery). 4 nodes, now 1:1 with stages (product·specs·aispecs·more).
+// Top clickable stepper nodes (owner). Product is the landing (stepper hidden there); the 2 numbered
+// steps are Specifications · Your Profile & Delivery. 2026-07-27: prefilled specs + ranked "smart" gap
+// questions now render on ONE continuous Specifications page (formerly a separate aispecs stage/stepper node).
 const STEPPER: Array<{ label: string; stage: Stage; Icon: LucideIcon }> = [
   { label: 'Product', stage: 'product', Icon: Package },
   { label: 'Specifications', stage: 'specs', Icon: SlidersHorizontal },
-  { label: 'More Details', stage: 'aispecs', Icon: ListPlus },
   { label: 'Your Profile & Delivery', stage: 'more', Icon: Truck },
 ];
-const stageNodeIdx = (s: Stage): number => (s === 'product' ? 0 : s === 'specs' ? 1 : s === 'aispecs' ? 2 : 3);
+const stageNodeIdx = (s: Stage): number => (s === 'product' ? 0 : s === 'specs' ? 1 : 2);
 
 // ─── RadioChip (cloned verbatim from RFQModalV3) ───
 function RadioChip({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
@@ -262,8 +260,8 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const [openEnquiry, setOpenEnquiry] = useState<string | null>(null);
   const [sentTo, setSentTo] = useState<Set<string>>(new Set());
   // ── Real seller retrieval (windmill curated_seller_search) ──
-  // Fired the moment the buyer leaves the first spec page (owner) so the ~30s call overlaps the rest of the flow
-  // (aispecs → profile → OTP). Results stream onto the results page; idle/loading shows the progress experience.
+  // Fired the moment the buyer leaves the (now-merged) spec page (owner) so the ~30s call overlaps the rest of the
+  // flow (more → OTP). Results stream onto the results page; idle/loading shows the progress experience.
   const [sellerResults, setSellerResults] = useState<SellerResult[]>([]);
   const [sellerStatus, setSellerStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const sellerFiredFor = useRef('');   // mcatId the search already fired for (re-fires only on a NEW product)
@@ -336,6 +334,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const voiceTargetRef = useRef<'form' | 'assist'>('form');  // where a voice result goes: 'form' = extract specs (product page), 'assist' = dictate the use-case
   const commitGen = useRef(0);              // generation token — a superseded commit's late API responses become no-ops
   const autoAdvancedFor = useRef('');       // mcatId we already auto-advanced past (unit-less) — so Back doesn't re-bounce
+  const qtyRedirectedFor = useRef('');      // mcatId we already redirected 'specs'→'product' for a missing qty — so Back doesn't re-loop
   const productNameRef = useRef('');        // live product name for the photo/voice "don't overwrite a typed name" guard
   const sellerSpecsRef = useRef<string[]>([]); // getISQs SELLER-flagged spec names → page-2 AI input (never rendered on page-1)
   const bodyScrollRef = useRef<HTMLDivElement | null>(null); // the flow-body scroller — reset to top on every stage change (P2-216)
@@ -406,7 +405,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     const onPop = () => {
       const s = stageRef.current;
       if (s === 'product' || s === 'results') { onClose(); return; }
-      const prev: Stage = s === 'specs' ? 'product' : s === 'aispecs' ? 'specs' : 'aispecs'; // more → aispecs
+      const prev: Stage = s === 'specs' ? 'product' : 'specs'; // more → specs
       setStage(prev);
       window.history.pushState({ rfq: true }, ''); // re-arm for the next Back
     };
@@ -503,13 +502,13 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // for page-2 gap questions): ONE understanding→ranking call now prefills page-1 (+ extras + field hints) AND
   // ranks page-2's gaps, fed by the SAME buyer/seller/category context both former calls used.
 
-  // ── Real seller retrieval — fire when the buyer LEAVES the first spec page (owner) ───────────────────────
-  // The windmill call takes ~30s, so we start it the instant the buyer reaches page 2 and let it run while they
-  // finish (aispecs → profile → OTP). Robust to a skipped aispecs page: fires at the FIRST of aispecs/more/results,
-  // once per product (mcatId). A product change re-fires; a stale in-flight response (product changed) is dropped.
+  // ── Real seller retrieval — fire when the buyer LEAVES the (merged) spec page (owner) ────────────────────
+  // The windmill call takes ~30s, so we start it the instant the buyer reaches the last page and let it run
+  // while they finish (more → OTP). Fires at the FIRST of more/results, once per product (mcatId). A product
+  // change re-fires; a stale in-flight response (product changed) is dropped.
   useEffect(() => {
     if (!mcatId) return;
-    const pastFirstSpecPage = stage === 'aispecs' || stage === 'more' || stage === 'results';
+    const pastFirstSpecPage = stage === 'more' || stage === 'results';
     if (!pastFirstSpecPage || sellerFiredFor.current === mcatId) return;
     sellerFiredFor.current = mcatId;
     const run = ++sellerRunRef.current;
@@ -613,7 +612,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     setMcatId(id); categoryNameRef.current = ''; sellerSpecsRef.current = []; pushRecent(name);
     emit(EV.PRODUCT_COMMITTED, { mcatId: id, productName: name, surface: surfaceName });
     // Re-arm the unified planner's fire-guard so a re-commit (same or new mcat) re-fires it and clears
-    // aiSpecsLoading — without this a same-product re-commit hangs the aispecs page forever.
+    // aiSpecsLoading — without this a same-product re-commit hangs the spec page forever.
     plannerFiredFor.current = '';
     // LOSSLESS across a product change: mic/photo evidence (photoSpecsRef) is JOURNEY-level, never wiped —
     // the typed name anchors the NEW category while voice/photo facts survive as autofill candidates
@@ -754,7 +753,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       setBaq(null);
       emitApiError('runCuratedPlanner', e, { mcatId, aiEpoch });
       emit(EV.AISPECS_FAILED, { mcatId, aiEpoch, surface: surfaceName });
-      // P2-258: on a RE-PLAN (aiEpoch>0, e.g. a photo added on the aispecs page) KEEP the last-good questions so
+      // P2-258: on a RE-PLAN (aiEpoch>0, e.g. a photo added on the spec page) KEEP the last-good questions so
       // the buyer isn't force-navigated off the page; only a genuine first-load failure clears them.
       if (plannerFiredFor.current === fireKey && gen === commitGen.current) { setAiSpecsError(true); if (aiEpoch === 0) setAiSpecs([]); }
     }).finally(() => {
@@ -1023,7 +1022,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // while they're on the Details page). So we only surface an unfilled item AT or AHEAD of the current stage; if
   // nothing ahead is unfilled, the nudge simply hides (no stale back-pointer). (V3/V4 behave the same way.)
   const checkStageIdx = (c: ScoreCheck): number =>
-    stageNodeIdx(c.group === 'Product' ? 'product' : c.group === 'Specs' ? (/smart/i.test(c.label) ? 'aispecs' : 'specs') : 'more');
+    stageNodeIdx(c.group === 'Product' ? 'product' : c.group === 'Specs' ? 'specs' : 'more'); // buyer + "smart" specs now share ONE stage
   const nextCheck = scoreDetails.checks.find((c) => c.applicable && !c.done && checkStageIdx(c) >= stageNodeIdx(stage));
 
   // R3 steal — score "+N" delta flash: when the total rises, float the gained points near the score for ~1s.
@@ -1093,6 +1092,17 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     }
   }, [committed, unitsResolved, hasUnits, quantity, stage, mcatId]);
 
+  // Owner-locked 2026-07-27: the qty-first gate applies to EVERY entry mode, not just brand-new. Enrich/Repost/
+  // Source seeds land directly on 'specs' (formAdapter.startStage), skipping the product-page qty ask entirely —
+  // if this mcat DOES define quantity as a real concept and it isn't already filled (seeded), redirect back to
+  // 'product' so the buyer is asked for it FIRST, same requirement the brand-new flow already has.
+  useEffect(() => {
+    if (stage === 'specs' && committed && unitsResolved && hasUnits && !quantity.trim() && qtyRedirectedFor.current !== mcatId) {
+      qtyRedirectedFor.current = mcatId; // once per product — tapping Back here won't re-loop
+      setStage('product');
+    }
+  }, [stage, committed, unitsResolved, hasUnits, quantity, mcatId]);
+
   // Owner (2026-07-23, reversed the earlier auto-skip): on an AI-specs FAILURE we no longer auto-advance past
   // the page. The buyer stays and sees a RETRY (re-fires the unified planner) plus a quiet "continue anyway" —
   // a transient gateway hiccup shouldn't silently rob the buyer of the smart questions. Loader shows while in flight.
@@ -1142,7 +1152,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     onSubmit?.(req);
   };
 
-  const goBack = () => { if (stage === 'product') return onClose(); if (stage === 'specs') return setStage('product'); if (stage === 'aispecs') return setStage('specs'); if (stage === 'more') return setStage('aispecs'); setStage('more'); };
+  const goBack = () => { if (stage === 'product') return onClose(); if (stage === 'specs') return setStage('product'); if (stage === 'more') return setStage('specs'); setStage('more'); };
   const submit = () => {
     // P1-101: never submit an empty RFQ (also closes the score-jump-to-'more'-with-no-product hole).
     if (!blEligible) { showFeedback('Add a quantity or pick at least one spec to get quotes.', 'warning'); return; }
@@ -1152,9 +1162,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // Clickable top stepper: jump only to a VISITED node (index ≤ current) — never skip ahead.
   const goToNode = (target: Stage) => { if (stageNodeIdx(target) <= stageNodeIdx(stage)) setStage(target); };
   // Score-panel deep-link: map a score check to the stage that owns it, so tapping a missing item jumps
-  // straight there (forward OR back — it's a shortcut). Product name/image/qty→product; Specifications→specs;
-  // Smart questions→aispecs; everything in Details (location/timeline/payment/buyer/profile/GST)→more.
-  const checkStage = (c: ScoreCheck): Stage => (c.group === 'Product' ? 'product' : c.group === 'Specs' ? (/smart/i.test(c.label) ? 'aispecs' : 'specs') : 'more');
+  // straight there (forward OR back — it's a shortcut). Product name/image/qty→product; Specifications (buyer
+  // specs AND smart questions now share one page)→specs; everything in Details (location/timeline/payment/
+  // buyer/profile/GST)→more.
+  const checkStage = (c: ScoreCheck): Stage => (c.group === 'Product' ? 'product' : c.group === 'Specs' ? 'specs' : 'more');
   // Stable slug for a check (drops the dynamic "(n/m)" suffix) → matches a field's data-flash attribute.
   const slugCheck = (c: ScoreCheck) => c.label.split('(')[0].trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   // Flash ring applied to the target field while flashKey matches (cleared after 1.6s).
@@ -1189,7 +1200,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   handleExitRef.current = handleExit; // keep the ref pointing at the latest closure (for the Escape handler)
   const scrollCard = (d: 1 | -1) => { const el = cardScrollRef.current; if (!el) return; el.scrollBy({ left: d * el.clientWidth * 0.86, behavior: 'smooth' }); setCardIdx((i) => Math.max(0, Math.min(sellerResults.length - 1, i + d))); };
 
-  const progressPercent = stage === 'specs' ? 33 : stage === 'aispecs' ? 55 : stage === 'more' ? 85 : stage === 'results' ? 100 : 0;
+  const progressPercent = stage === 'specs' ? 50 : stage === 'more' ? 85 : stage === 'results' ? 100 : 0;
 
   // Persistent trust reassurance (owner/audit: proof lived only on the results screen). Shown at the entry so a
   // wary buyer sees WHY it's safe before typing / handing over details.
@@ -1663,9 +1674,9 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
         {/* Keyboard-safe mobile CTA (owner): the footer Next/Get-Quotes sits behind the on-screen keyboard on
             text-input stages, so mirror it into the always-visible header. Footer stays for the non-keyboard case. */}
         {isMobile && stage !== 'results' && (() => {
-          const holding = stage === 'aispecs' && aiSpecsLoading; // P2-203: hold on mobile while smart questions load (was a silent skip)
+          const holding = stage === 'specs' && aiSpecsLoading; // P2-203: hold on mobile while smart questions load (was a silent skip)
           return (
-            <button type="button" disabled={holding} onClick={() => { if (stage === 'specs') setStage('aispecs'); else if (stage === 'aispecs') setStage('more'); else submit(); }} className={`flex items-center gap-1 shrink-0 text-white text-sm font-semibold min-h-[40px] px-4 py-2 rounded-lg ${holding ? 'bg-gray-300 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700'}`}>
+            <button type="button" disabled={holding} onClick={() => { if (stage === 'specs') setStage('more'); else submit(); }} className={`flex items-center gap-1 shrink-0 text-white text-sm font-semibold min-h-[40px] px-4 py-2 rounded-lg ${holding ? 'bg-gray-300 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700'}`}>
               {holding ? 'Preparing…' : stage === 'more' ? 'Get Quotes' : 'Next'} {!holding && <ArrowRight size={13} />}
             </button>
           );
@@ -1682,7 +1693,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           const cur = stageNodeIdx(stage);
           const done = i < cur, active = i === cur, clickable = i <= cur;
           const Icon = node.Icon;
-          const running = node.stage === 'aispecs' && aiSpecsLoading;
+          const running = node.stage === 'specs' && aiSpecsLoading;
           return (
             <div key={node.stage} className="flex items-center gap-1 shrink-0">
               <button type="button" disabled={!clickable} onClick={() => goToNode(node.stage)} aria-label={node.label} aria-current={active ? 'step' : undefined}
@@ -1706,7 +1717,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       <div className="relative flex-1 min-h-0 flex flex-col">
         <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">
           {/* STEP-1 TRANSPARENCY — what the Engine filled / corrected from the buyer's own truth, each with its source. */}
-          {(stage === 'specs' || stage === 'aispecs') && planCorrections.length > 0 && (
+          {stage === 'specs' && planCorrections.length > 0 && (
             <div className="mb-3 rounded-xl border border-gray-200 bg-white px-3.5 py-2.5">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Filled from your history</p>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -1721,7 +1732,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
             </div>
           )}
           {/* THE BUYER-AWARE FIRST QUESTION — shown above the specs on the landing stage. */}
-          {(stage === 'specs' || stage === 'aispecs') && (baqLoading || baq?.opening) && (
+          {stage === 'specs' && (baqLoading || baq?.opening) && (
             <div className="mb-4 rounded-2xl border border-teal-200 bg-teal-50/70 p-4">
               {baqLoading && !baq ? (
                 <div className="flex items-center gap-2 text-[13px] text-teal-700"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Reading what you're after…</div>
@@ -1764,7 +1775,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
               ) : null}
             </div>
           )}
-          {stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}{consentNote}</div> : resultsBody}</div>
+          {stage === 'specs' ? <>{specBody}{aiSpecsBody}</> : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}{consentNote}</div> : resultsBody}</div>
         {/* Subtle "more below" hint — appears only when the body overflows + not at the end; tap to scroll on. */}
         {showScrollHint && (
           <button type="button" aria-label="Scroll down for more" onClick={() => bodyScrollRef.current?.scrollBy({ top: bodyScrollRef.current.clientHeight * 0.8, behavior: 'smooth' })} className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center justify-center w-7 h-7 rounded-full bg-amber-100/90 text-amber-500 ring-1 ring-amber-200 shadow-[0_2px_8px_-1px_rgba(0,0,0,0.15)] backdrop-blur-sm animate-bounce">
@@ -1778,12 +1789,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
         <div className="px-5 py-4 border-t border-gray-100 flex items-center justify-between gap-2 bg-white shrink-0">
           <button onClick={goBack} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 font-medium shrink-0">← Back</button>
           <span className="text-teal-600 font-medium text-center min-w-0 px-1 leading-tight">
-            <span className="sm:hidden text-xs">Step {stageNodeIdx(stage)}/3{stage === 'more' ? ' · Last!' : ''}</span>
-            <span className="hidden sm:inline text-sm truncate">Step {stageNodeIdx(stage)} of 3{stage === 'more' ? ' · Last step!' : ''}</span>
+            <span className="sm:hidden text-xs">Step {stageNodeIdx(stage)}/2{stage === 'more' ? ' · Last!' : ''}</span>
+            <span className="hidden sm:inline text-sm truncate">Step {stageNodeIdx(stage)} of 2{stage === 'more' ? ' · Last step!' : ''}</span>
           </span>
           {stage === 'specs'
-            ? <button onClick={() => setStage('aispecs')} className="flex items-center gap-1.5 bg-teal-600 text-white text-sm font-semibold px-5 py-2.5 rounded-lg hover:bg-teal-700 shrink-0">Next <ArrowRight size={15} /></button>
-            : stage === 'aispecs'
             ? (aiSpecsLoading
               // HOLD while the AI-specs call is in flight (owner-locked): Next is held; the escape
               // ("Skip for now") takes the buyer straight to the last page. Late answers still merge.

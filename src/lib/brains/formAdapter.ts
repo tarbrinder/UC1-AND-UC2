@@ -5,7 +5,7 @@
 // results) then runs on top — the brain only pre-fills; it never replaces the form.
 import type { RequirementBrainPayload, Decision } from './requirementBrain';
 
-export type BrainStage = 'product' | 'specs' | 'aispecs' | 'more' | 'results';
+export type BrainStage = 'product' | 'specs' | 'more' | 'results';
 
 export interface BrainSeed {
   productName: string;
@@ -17,7 +17,7 @@ export interface BrainSeed {
   deliveryLocation: string;
   startStage: BrainStage;
   entryMode: string;
-  gaps: { q: string; kind?: string; options?: string[] }[];   // ASK decisions → shown on the aispecs page
+  gaps: { q: string; kind?: string; options?: string[] }[];   // ASK decisions → shown on the spec page's "smart questions"
   conflicts: Decision[];                    // RESOLVE_CONFLICT decisions → the A/B widget
   gstAsk: boolean;                          // kyb_unlock === 'offer'
   // context for the buyer-aware first question (the intelligence layer)
@@ -85,7 +85,7 @@ export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
   const startStage: BrainStage =
     m.entry_mode === 'blank_multimodal' || !m.primary ? 'product'
     : m.entry_mode === 'confirm_draft' ? 'more'          // complete → straight to the last page to send
-    : 'specs';                                           // gap/repost/chooser → specs, then aispecs gaps
+    : 'specs';                                           // gap/repost/chooser → specs (prefills + ranked gaps, one page)
   return {
     productName: m.primary?.product ?? '',
     mcatId: m.primary?.mcat ?? '',
