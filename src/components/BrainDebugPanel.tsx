@@ -111,6 +111,60 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
           );
         })}
 
+        {/* UNDERSTAND + the question-competition ledger (planner v2). Parsed from the curated-planner raw
+            output rather than prop-threaded, so the panel stays self-contained. This is the answer to
+            "why was this question asked, what competed with it, and which source drove it". */}
+        {(() => {
+          const out = raw['curated-planner']?.output;
+          if (!out) return null;
+          let plan: { understanding?: Record<string, unknown>; considered?: Record<string, unknown>[] } | null = null;
+          try { plan = JSON.parse(out); } catch { return <p className="mt-2 text-[10px] text-amber-600">curated-planner output did not parse as JSON.</p>; }
+          const u = plan?.understanding, considered = plan?.considered;
+          if (!u && !considered) return null;
+          // empty array = the planner explicitly said "none"; undefined = it never answered. Different things.
+          const list = (v: unknown) => (Array.isArray(v) ? v : []);
+          const Line = ({ k, v }: { k: string; v: unknown }) => {
+            if (v === undefined) return <p className="text-[10px] text-gray-300">{k}: <span className="italic">not answered</span></p>;
+            const arr = Array.isArray(v) ? v : null;
+            if (arr && !arr.length) return <p className="text-[10px] text-gray-400">{k}: none</p>;
+            return <p className="text-[10.5px] leading-snug text-gray-600"><span className="text-gray-400">{k}:</span> {arr ? arr.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' · ') : String(v)}</p>;
+          };
+          return (<>
+            {u && (<>
+              <Section title="understand — the planner's read of this buyer" />
+              <div className="space-y-1 rounded-lg bg-gray-50 px-2.5 py-2">
+                <Line k="wants" v={u.what_they_want} />
+                <Line k="situation" v={u.buyer_situation} />
+                <Line k="already known" v={u.already_known} />
+                <Line k="contradictions" v={u.contradictions} />
+                <Line k="stale" v={u.stale} />
+                <Line k="worth confirming" v={u.worth_confirming} />
+                <Line k="useless here" v={u.useless} />
+              </div>
+            </>)}
+            {list(considered).length > 0 && (<>
+              <Section title="questions that competed — why each won or lost" count={`${list(considered).filter((c) => c.outcome === 'asked').length} asked / ${list(considered).length}`} />
+              <div className="space-y-1">
+                {list(considered).sort((a, b) => Number(a.rank ?? 99) - Number(b.rank ?? 99)).map((c, i) => {
+                  const asked = c.outcome === 'asked';
+                  return (
+                    <div key={i} className={`rounded-lg border px-2.5 py-1.5 ${asked ? 'border-teal-200 bg-teal-50/50' : 'border-gray-100 bg-gray-50/60'}`}>
+                      <div className="flex items-start gap-1.5">
+                        <span className={`shrink-0 rounded px-1 text-[9px] font-bold ${asked ? 'bg-teal-600 text-white' : 'bg-gray-200 text-gray-500'}`}>{asked ? 'ASKED' : 'DROPPED'}</span>
+                        <span className="min-w-0 flex-1 text-[11px] font-medium text-gray-800">{String(c.q ?? '')}</span>
+                        <span className="shrink-0 text-[9px] text-gray-400">#{String(c.rank ?? '?')} · {String(c.score ?? '?')}</span>
+                      </div>
+                      {c.why_ranked ? <p className="mt-0.5 text-[10px] text-gray-500">↳ {String(c.why_ranked)}</p> : null}
+                      {!asked && c.dropped_because ? <p className="text-[10px] text-amber-600">↳ dropped: {String(c.dropped_because)}</p> : null}
+                      {c.from_source ? <p className="text-[9.5px] text-gray-400">source: {String(c.from_source)}</p> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </>)}
+          </>);
+        })()}
+
         {/* NODE DATA + HEALTH — RAW first, then what the RFQ actually CONSUMED from it (owner, 2026-07-28).
             "Raw" alone can't answer the real question: of everything this source returned, what did we USE?
             The USED half is derived from the evidence dictionary (engine v7+) by matching atom.source to the
