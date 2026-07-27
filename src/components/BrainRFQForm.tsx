@@ -760,7 +760,12 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       // codebase's "dedup cannot be an LLM promise" discipline: never honor a promoted ask for a fact we hold.
       const identityGap = gstOnFile ? undefined : (r.gaps || []).find((g) => g.kind === 'identity');
       setIdentityAsk(identityGap ? { q: identityGap.q, options: identityGap.options, why: identityGap.why } : null);
-      const rankedGaps = (r.gaps || []).filter((g) => g.kind !== 'identity');
+      // Drop any gap that IS the opening question. The v2 planner ranks the opening out of the same candidate
+      // pool as the gaps, so its top gap is often verbatim the opening — which rendered the identical question
+      // twice inside the banner. Match on a punctuation/case-insensitive key, not string equality.
+      const qKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const openKey = r.opening?.q ? qKey(r.opening.q) : '';
+      const rankedGaps = (r.gaps || []).filter((g) => g.kind !== 'identity' && (!openKey || qKey(g.q) !== openKey));
       // Split the ONE ranked gap list so the SAME question never appears twice: exactly 2 questions ride the
       // very top (the opening/intent question + the single top-ranked gap); everything else becomes page-2
       // "smart questions". Without this split, banner and page-2 would both render off the identical r.gaps array.
