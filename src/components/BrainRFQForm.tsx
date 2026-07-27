@@ -15,7 +15,7 @@ import VoiceRecorder from './VoiceRecorder';
 import IndiaMartHeader from './IndiaMartHeader';
 import SellerSearchProgress from './SellerSearchProgress';
 import { searchSellers, type SellerResult } from '../lib/sellerSearch';
-import { analyzeImage, voiceToSpecs, hasGeminiKey, getSpecHints, getMissingSpecs, inferSpecsFromApplication, RFQ_LLM_ENABLED, type AiSpecQuestion } from '../lib/gemini';
+import { analyzeImage, voiceToSpecs, hasGeminiKey, getSpecHints, getMissingSpecs, inferSpecsFromApplication, generateBuyerAwareQuestions, RFQ_LLM_ENABLED, type AiSpecQuestion, type BuyerAwareQuestions } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchProductImages, upsizeImimg } from '../lib/enrichment';
 import { matchUnit } from '../lib/quantity';
 import { emit, EV, emitApiError } from '../lib/emit';
@@ -188,29 +188,30 @@ async function normalizeImage(file: File): Promise<{ base64: string; mime: strin
   return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mime: 'image/jpeg' };
 }
 
-export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple', loggedIn = false, standalone = false, onSubmit }: Props) {
+export default function BrainRFQForm({ onClose, surface, categoryMode = 'category', loggedIn = false, standalone = false, onSubmit, brainSeed }: Props & { brainSeed?: import('../lib/brains/formAdapter').BrainSeed }) {
+  const _seed = brainSeed;
   // Freeze the surface ONCE at mount — otherwise a mid-flow viewport crossing 640px (rotate/resize)
   // would silently swap the whole mobile↔desktop chrome on the next state change.
   const [surf] = useState<Surface>(() => surface ?? (typeof window !== 'undefined' && window.matchMedia('(min-width: 640px)').matches ? 'desktop' : 'mobile'));
   const isMobile = surf === 'mobile';
 
-  const [stage, setStage] = useState<Stage>('product');
+  const [stage, setStage] = useState<Stage>(_seed?.startStage ?? 'product');
 
-  const [productName, setProductName] = useState('');
+  const [productName, setProductName] = useState(_seed?.productName ?? '');
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [showDropdown, setShowDropdown] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const [committed, setCommitted] = useState(false);
-  const [productImageUrl, setProductImageUrl] = useState('');
+  const [productImageUrl, setProductImageUrl] = useState(_seed?.productImage ?? '');
   const [productImages, setProductImages] = useState<string[]>([]); // front-page gallery (IMSearchAPI: hero + up to 3 thumbnails)
   const [imageBase64, setImageBase64] = useState('');
 
-  const [quantity, setQuantity] = useState('');
-  const [unit, setUnit] = useState('');
+  const [quantity, setQuantity] = useState(_seed?.quantity ?? '');
+  const [unit, setUnit] = useState(_seed?.unit ?? '');
   const [unitOptions, setUnitOptions] = useState<string[]>([]);
   const [isqSpecs, setIsqSpecs] = useState<ISQSpec[]>([]);
-  const [specValues, setSpecValues] = useState<Record<string, string>>({});
+  const [specValues, setSpecValues] = useState<Record<string, string>>(_seed?.specValues ?? {});
   // "Also detected" — buyer-truth facts (from name/photo/mic) that don't fit a buyer ISQ field. Never lost:
   // shown as editable key-value rows below the specs and shipped in the requirement. Buyer edits are preserved.
   const [extraSpecs, setExtraSpecs] = useState<Record<string, string>>({});
@@ -235,7 +236,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   const categoryCorpusRef = useRef<unknown>(null); // raw category corpus (or legacy intelligence obj); passed as-is to the planner
   useEffect(() => () => { catFetchTok.current++; }, []); // cancel any in-flight corpus fetch on unmount
 
-  const [deliveryLocation, setDeliveryLocation] = useState('');
+  const [deliveryLocation, setDeliveryLocation] = useState(_seed?.deliveryLocation ?? '');
   const [userLocation, setUserLocation] = useState('');    // the buyer's OWN city (mockup "YOUR LOCATION")
   const [sameAsLoc, setSameAsLoc] = useState(true);         // "same as my location" — delivery mirrors user (default on)
   const [geoLoading, setGeoLoading] = useState(false);      // "Use my current location" in flight
@@ -759,6 +760,78 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       setSpecsLoading(false);
     } catch (e) { emitApiError('GetIsq', e, { mcatId: id }); /* fall through — the getISQs .finally still settles specsLoading */ }
   }, []);
+
+  // ── BRAIN SEED (Approach A): drive the REAL commit flow from the seed, then re-apply pre-filled specs. ──
+  // Seeding committed/mcat directly skipped GetIsq → no spec fields. Instead let commitProduct run the true
+  // resolve + GetIsq (loading the ISQ schema), then merge the brain's stated specs onto those fields.
+  const seedCommitFired = useRef(false);
+  const seedSpecsApplied = useRef(false);
+  useEffect(() => {
+    if (_seed?.productName && !seedCommitFired.current) {
+      seedCommitFired.current = true;
+      commitProduct(_seed.productName);
+    }
+  }, [_seed, commitProduct]);
+
+  // ── The INTELLIGENCE LAYER: the buyer-aware first question. On mount, generate the ONE contextual
+  //    intent question ("why do you need this?") + ≤2 non-spec gaps from WHO the buyer is × the category's
+  //    real seller questions. Shown prominently above the specs. Debug-captured via LLM_RAW('buyer-aware-questions').
+  const [baq, setBaq] = useState<BuyerAwareQuestions | null>(null);
+  const [baqLoading, setBaqLoading] = useState(false);
+  const [baqAnswers, setBaqAnswers] = useState<Record<string, string>>({});
+  const baqFired = useRef(false);
+  useEffect(() => {
+    if (!_seed?.productName || baqFired.current || !hasFormLLM()) return;
+    baqFired.current = true;
+    setBaqLoading(true);
+    generateBuyerAwareQuestions({
+      requirement: _seed.productName,
+      buyerFacts: _seed.buyerFacts,
+      basket: _seed.basket,
+      knownSpecs: _seed.specValues,
+      categoryTopSpecs: _seed.categoryTopSpecs,
+      categoryKeywords: _seed.categoryKeywords,
+      entryMode: _seed.entryMode,
+    }).then((r) => setBaq(r)).catch(() => setBaq(null)).finally(() => setBaqLoading(false));
+  }, [_seed]);
+
+  // ── LLM-on-image: a seeded product image → analyzeImage → MORE specs, via the same merge path as an
+  //    upload. Best-effort: cross-origin image fetch may be CORS-blocked (imimg.com) → skip silently. ──
+  const seedImgFired = useRef(false);
+  useEffect(() => {
+    const url = _seed?.productImage;
+    if (!url || seedImgFired.current || !hasFormLLM() || !committed || !isqSpecs.length) return;
+    seedImgFired.current = true;
+    (async () => {
+      try {
+        const res = await fetch(url, { mode: 'cors' });
+        if (!res.ok) return;
+        const { base64, mime } = await fileToBase64(await res.blob());
+        const fieldNames = isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC);
+        const fieldOpts: Record<string, string[]> = {};
+        for (const s of isqSpecs) fieldOpts[s.IM_SPEC_MASTER_DESC] = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
+        const r = await analyzeImage(base64, mime, productName, fieldNames, fieldOpts, '', 'form', RFQ_MODEL_IMAGE);
+        const extracted = { ...(r.specifications || {}), ...(r.additionalSpecifications || {}) };
+        if (Object.keys(extracted).length) applyExtractedSpecs(extracted);
+      } catch { /* CORS / network — best-effort, the specs from the requirement still stand */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [_seed, committed, isqSpecs]);
+  useEffect(() => {
+    const sv = _seed?.specValues;
+    if (!sv || !Object.keys(sv).length || seedSpecsApplied.current) return;
+    if (specsLoading || !isqSpecs.length) return;  // wait for the ISQ schema
+    seedSpecsApplied.current = true;
+    setSpecValues((prev) => {
+      const next = { ...prev };
+      for (const [k, v] of Object.entries(sv)) {
+        const hit = isqSpecs.find((s) => s.IM_SPEC_MASTER_DESC.toLowerCase() === k.toLowerCase());
+        const key = hit ? hit.IM_SPEC_MASTER_DESC : k;
+        if (v && !next[key]) next[key] = v;   // never overwrite a value already there
+      }
+      return next;
+    });
+  }, [_seed, specsLoading, isqSpecs]);
 
   // Feed photo/voice-extracted specs into BOTH pipelines: page-1 fill (pendingAiSpecs → ISQ fields) AND
   // the page-2 AI-specs prompt (photoSpecsRef → getMissingSpecs input). Bumping aiEpoch re-runs page 2
@@ -1645,7 +1718,52 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
       </>}
       {aiBusy && <div role="status" aria-live="polite" className="shrink-0 mx-5 mt-2 px-3 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
       <div className="relative flex-1 min-h-0 flex flex-col">
-        <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">{stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}{consentNote}</div> : resultsBody}</div>
+        <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">
+          {/* THE BUYER-AWARE FIRST QUESTION — shown above the specs on the landing stage. */}
+          {(stage === 'specs' || stage === 'aispecs') && (baqLoading || baq?.opening) && (
+            <div className="mb-4 rounded-2xl border border-teal-200 bg-teal-50/70 p-4">
+              {baqLoading && !baq ? (
+                <div className="flex items-center gap-2 text-[13px] text-teal-700"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Reading what you're after…</div>
+              ) : baq?.opening ? (
+                <>
+                  <p className="text-[15px] font-semibold text-gray-900">{baq.opening.q}</p>
+                  {baq.opening.why && <p className="mt-0.5 text-[11.5px] text-teal-700/80">{baq.opening.why}</p>}
+                  {baq.opening.options?.length ? (
+                    <div className="mt-2.5 flex flex-wrap gap-1.5">
+                      {baq.opening.options.map((o) => (
+                        <button key={o} type="button" onClick={() => setBaqAnswers((a) => ({ ...a, opening: o }))}
+                          className={`rounded-full border px-3 py-1.5 text-[13px] ${baqAnswers.opening === o ? 'border-teal-600 bg-teal-600 text-white' : 'border-teal-300 bg-white text-teal-800'}`}>{o}</button>
+                      ))}
+                    </div>
+                  ) : (
+                    <input value={baqAnswers.opening ?? ''} onChange={(e) => setBaqAnswers((a) => ({ ...a, opening: e.target.value }))}
+                      placeholder="Type your answer" className="mt-2 w-full rounded-lg border border-teal-300 bg-white px-3 py-2 text-sm" />
+                  )}
+                  {baq.gaps?.length ? (
+                    <div className="mt-3 space-y-2.5 border-t border-teal-200/70 pt-3">
+                      {baq.gaps.map((g, i) => (
+                        <div key={i}>
+                          <p className="text-[13.5px] font-medium text-gray-800">{g.q}</p>
+                          {g.options?.length ? (
+                            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                              {g.options.map((o) => (
+                                <button key={o} type="button" onClick={() => setBaqAnswers((a) => ({ ...a, [`gap${i}`]: o }))}
+                                  className={`rounded-full border px-2.5 py-1 text-[12.5px] ${baqAnswers[`gap${i}`] === o ? 'border-teal-600 bg-teal-50 text-teal-800' : 'border-gray-300 text-gray-700'}`}>{o}</button>
+                              ))}
+                            </div>
+                          ) : (
+                            <input value={baqAnswers[`gap${i}`] ?? ''} onChange={(e) => setBaqAnswers((a) => ({ ...a, [`gap${i}`]: e.target.value }))}
+                              placeholder="Type your answer" className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          )}
+          {stage === 'specs' ? specBody : stage === 'aispecs' ? aiSpecsBody : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}{consentNote}</div> : resultsBody}</div>
         {/* Subtle "more below" hint — appears only when the body overflows + not at the end; tap to scroll on. */}
         {showScrollHint && (
           <button type="button" aria-label="Scroll down for more" onClick={() => bodyScrollRef.current?.scrollBy({ top: bodyScrollRef.current.clientHeight * 0.8, behavior: 'smooth' })} className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center justify-center w-7 h-7 rounded-full bg-amber-100/90 text-amber-500 ring-1 ring-amber-200 shadow-[0_2px_8px_-1px_rgba(0,0,0,0.15)] backdrop-blur-sm animate-bounce">
@@ -1813,7 +1931,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
   return (
     <>
       {isMobile ? (
-        <div role="dialog" aria-modal="true" aria-label="Post a Requirement" className={`${themeClass} fixed inset-0 z-50 bg-white flex flex-col animate-modal-in`} style={{ height: '100dvh' }}>
+        <div role="dialog" aria-modal="true" aria-label="Post a Requirement" className={`${themeClass} absolute inset-0 z-50 bg-white flex flex-col animate-modal-in`} style={{ height: '100%' }}>
           {stage === 'product' ? productStep : singlePanel}
         </div>
       ) : standalone ? (

@@ -13,10 +13,12 @@ export function sanitizeQty(raw: string): string {
   return s.slice(0, 12);
 }
 
-/** A quantity is MEANINGFUL (counts toward the score / ships to sellers) only if it parses to a finite > 0. */
+/** A quantity is MEANINGFUL (counts toward the score / ships to sellers) only if it parses to a finite number in
+ *  (0, 1e9]. The upper bound (audit #19) stops an absurd "999999999999" from scoring, driving order-scale to
+ *  "wholesale", and shipping verbatim to sellers — it's treated as no-quantity instead. */
 export function qtyIsMeaningful(raw: string | undefined | null): boolean {
   const n = parseFloat((raw || '').trim());
-  return Number.isFinite(n) && n > 0;
+  return Number.isFinite(n) && n > 0 && n <= 1e9;
 }
 
 /** Valid Indian mobile: exactly 10 digits, starts 6-9, and NOT all-identical (blocks 0000000000 / 9999999999

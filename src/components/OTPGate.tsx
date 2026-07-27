@@ -177,7 +177,7 @@ export default function OTPGate({ onVerified, onClose, initialName, initialMobil
         <button
           type="button"
           onClick={onClose}
-          className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 transition-colors"
+          className="absolute top-4 right-4 text-gray-500 hover:text-gray-600 transition-colors"
           aria-label="Close"
         >
           <X className="w-5 h-5" />
@@ -290,7 +290,7 @@ export default function OTPGate({ onVerified, onClose, initialName, initialMobil
                   Resend OTP
                 </button>
               ) : (
-                <p className="text-gray-400 text-xs">
+                <p className="text-gray-500 text-xs">
                   Resend in <span className="font-semibold text-gray-600">{countdown}s</span>
                 </p>
               )}
@@ -299,7 +299,7 @@ export default function OTPGate({ onVerified, onClose, initialName, initialMobil
             <button
               type="button"
               onClick={() => setStep(1)}
-              className="mt-4 w-full text-center text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              className="mt-4 w-full text-center text-xs text-gray-500 hover:text-gray-600 transition-colors"
             >
               Change number
             </button>

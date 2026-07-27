@@ -9,8 +9,16 @@ import type { OfferLLMOut } from './offerEnrich';
 import type { UC2LLMOut } from './uc2Enrichment';
 import { SIGNAL_PRIORITY } from './provenance';
 
-const LLM_KEY = import.meta.env.VITE_LLM_KEY as string;
-const ENDPOINT = api('/api/llm/chat/completions');
+// The legacy default gateway key is NO LONGER read into the bundle. It used to be `import.meta.env.VITE_LLM_KEY`,
+// a REAL key that Vite inlined into dist (audit P0). All LLM calls now route through the proxy, which injects the
+// key server-side; hasGeminiKey() reflects availability via the public VITE_LLM_ENABLED flag (see RFQ_LLM_ENABLED).
+// AUTH MODEL (2026-07-23): the RFQ LLM keys are NEVER in the browser bundle. The dev proxy (vite.config) injects
+// `Authorization: Bearer <key>` per path — /api/llm (form key) · /api/cardllm (buyer-card key) — exactly like it
+// already does for Befisc/Sign3/Firecrawl. Prod must replicate that same injection. VITE_LLM_ENABLED is a PUBLIC
+// feature flag (NOT a secret) that only gates whether AI UI is offered; the real key lives server-side only.
+const RFQ_LLM_ENABLED = ((import.meta.env.VITE_LLM_ENABLED as string) || '').trim() === '1';
+const ENDPOINT = api('/api/llm/chat/completions');            // form key injected by the proxy
+const ENDPOINT_CARD = api('/api/cardllm/chat/completions');   // buyer-card key injected by the proxy (distinct prefix, no /api/llm collision)
 
 // Two-tier model strategy. Most calls are short, structured, low-reasoning text
 // tasks (hints, "Not sure?", requirement summary, question generation) → the
@@ -20,11 +28,11 @@ const ENDPOINT = api('/api/llm/chat/completions');
 const MODEL_FAST = 'google/gemini-2.5-flash-lite';
 const MODEL_RICH = 'google/gemini-2.5-flash';
 
-// Buyer-profile-card extractor (extractBuyerProfileLLM) key — ISOLATED from the SimpleRFQForm's key so the
-// Simple form's new flash-capable key stays "simple form only" (owner). Reads VITE_RFQ_BUYERCARD_KEY, and
-// falls back to VITE_RFQ_LLM_KEY if that var isn't set (so nothing breaks). Runs on flash-lite either way.
-// Absent → callers fall back to the default VITE_LLM_KEY. Everything ELSE (V3/V4, n8n) stays on the default key.
-export const RFQ_FORM_LLM_KEY = ((import.meta.env.VITE_RFQ_BUYERCARD_KEY as string) || (import.meta.env.VITE_RFQ_LLM_KEY as string) || '').trim() || undefined;
+// Buyer-profile-card LLM gate. Kept as an exported name (BuyerLedgerView / mergedTwinStore import it as a
+// truthiness gate) but it is now a BOOLEAN — the actual buyer-card key is proxy-injected on /api/llm-card and
+// never bundled. Runs on flash-lite (the buyer-card key 401s on flash), isolated from the form's /api/llm path.
+export const RFQ_FORM_LLM_KEY: boolean = RFQ_LLM_ENABLED;
+export { RFQ_LLM_ENABLED };
 export const RFQ_FORM_LLM_MODEL = MODEL_FAST;
 
 // ── India B2B context (injected into EVERY prompt) ────────────────────
@@ -35,7 +43,7 @@ export const RFQ_FORM_LLM_MODEL = MODEL_FAST;
 const INDIA_CTX =
   'CONTEXT — INDIA B2B ONLY. This is IndiaMART, an India business-to-business marketplace. EVERYTHING you output must be in Indian context. MONEY/BUDGET/PRICE: ALWAYS Indian Rupees with the ₹ symbol and Indian numbering — use bands like "Under ₹50,000", "₹50,000–₹2 lakh", "₹2–10 lakh", "₹10 lakh+", "₹1 crore+". Use lakh/crore, NEVER million/billion, NEVER $/USD/"dollar". Places = Indian cities/states; standards = BIS/ISI/IS; norms = GST, Indian trade terms. Never use foreign currencies, units, places, or examples.';
 
-export const hasGeminiKey = () => Boolean(LLM_KEY?.trim());
+export const hasGeminiKey = () => RFQ_LLM_ENABLED;
 
 // Belt-and-suspenders: if a model still emits a "$"/USD token in any buyer-facing
 // string, swap the symbol to ₹ (amounts are nominal bands, not FX conversions).
@@ -52,7 +60,7 @@ interface LLMOpts {
   temperature?: number; // F1/F2: low temp on CLASSIFICATION calls (archetype, twin) → consistent labels across runs
   label?: string; // A4: which logical call this is (e.g. 'deriveIntent') — for the LLM Call Health ring
   timeoutMs?: number; // audit 2026-07-13: per-call deadline (AbortController) so a hung gateway can't spin the loader forever
-  apiKey?: string; // per-call key override (e.g. the RFQ-form-only key) — falls back to the module VITE_LLM_KEY
+  route?: 'form' | 'card'; // which proxy path (and therefore which server-injected key) this call uses; default 'form'
 }
 
 // ── A4 (G12): per-call LLM health ring — answers "did each LLM call fire, succeed, how long". ──
@@ -125,11 +133,11 @@ export function onLLMActivity(cb: LLMActivityCb): () => void {
 export const llmActive = (): number => llmInFlight;
 
 async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } }): Promise<string> {
-  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm', timeoutMs = 240000, apiKey } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
-  const key = (apiKey && apiKey.trim()) || LLM_KEY; // per-call override (RFQ-form-only key) → default
+  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm', timeoutMs = 240000, route = 'form' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
+  const endpoint = route === 'card' ? ENDPOINT_CARD : ENDPOINT; // proxy injects the Bearer key per path — never bundled
   // audit 2026-07-13 (P1): no timeout meant a hung gateway never resolved — llmInFlight stuck, global 'working…' loader
   // spun forever with no health record. 240s default comfortably clears the ~100s extract; a truly hung socket now aborts.
-  if (!key || !key.trim()) { recordLLM({ label, ok: false, ms: 0, status: 0, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) }); throw new Error('no LLM key'); }
+  if (!RFQ_LLM_ENABLED) { recordLLM({ label, ok: false, ms: 0, status: 0, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) }); throw new Error('LLM disabled'); }
   const t0 = Date.now();
   let status = 0;
   const ac = new AbortController();
@@ -148,7 +156,7 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
     // all bounded by the shared abort timer.
     let res!: Response;
     for (let attempt = 0; ; attempt++) {
-      res = await fetch(ENDPOINT, { method: 'POST', headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }, body: payload, signal: ac.signal });
+      res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, signal: ac.signal }); // Authorization injected by the proxy per path — key never leaves the server
       status = res.status;
       if (res.ok || (status !== 429 && status < 500) || attempt >= 2 || ac.signal.aborted) break;
       await new Promise((r) => setTimeout(r, (2 ** attempt) * 900 + 400)); // ~1.3s, then ~2.2s
@@ -228,7 +236,7 @@ export async function extractBuyerProfileLLM(system: string, user: string): Prom
     // maxTokens stays 32000 (NOT reduced): the v33 contract is ~2x heavier (policy + confidence breakdown +
     // source-consumption arrays per attribute) — 16k truncated the JSON → parse-fail → blank card. flash-lite's
     // output ceiling (~64k, same family as flash) covers it, so lite runs at the same headroom.
-    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 32000, model: RFQ_FORM_LLM_KEY ? RFQ_FORM_LLM_MODEL : MODEL_RICH, apiKey: RFQ_FORM_LLM_KEY, label: 'extractBuyerProfile' }, meta);
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 32000, model: RFQ_LLM_ENABLED ? RFQ_FORM_LLM_MODEL : MODEL_RICH, route: 'card', label: 'extractBuyerProfile' }, meta);
     applyMeta();
     const parsed = JSON.parse(out) as Record<string, unknown>;
     const attrs = Array.isArray((parsed as { attributes?: unknown }).attributes) ? (parsed as { attributes: unknown[] }).attributes
@@ -303,7 +311,7 @@ export async function voiceToSpecs(
   mimeType: string,
   productName: string,
   isqSpecNames: string[],
-  apiKey?: string,
+  route: 'form' | 'card' = 'form',
   model?: string
 ): Promise<{
   rawTranscript: string;
@@ -355,8 +363,10 @@ GROUNDING (critical): extract ONLY what the buyer ACTUALLY SAID. If a detail was
         },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 2000, temperature: 0, label: 'voiceToSpecs', apiKey, timeoutMs: 10000 });   // temp 0 = deterministic extraction (audit); 10s cap; 2000 tokens is ample for this JSON (was 16000)
-  return JSON.parse(text);
+  ], { model: model || MODEL_RICH, maxTokens: 4000, temperature: 0, label: 'voiceToSpecs', route, timeoutMs: 15000 });   // temp 0 = deterministic extraction (audit); TIMEOUT 15s (was 10s) — audio transcription + a 429 backoff can push a long note past 10s; 4000 tokens (audit #6: echoes the full rawTranscript, so a long Hindi/Hinglish note can overrun a 2000 cap → truncated JSON)
+  // audit #6: a truncated/invalid body must NOT throw — that would kill the whole mic feature. Fall back to empty.
+  try { return JSON.parse(text); }
+  catch { return { rawTranscript: '', productName: null, quantity: null, quantityUnit: null, deliveryLocation: null, deliveryTimeline: null, paymentTerms: null, creditPeriod: null, mappedSpecs: {}, customSpecs: [] }; }
 }
 
 // ── Image analysis ────────────────────────────────────────────────────
@@ -367,7 +377,7 @@ export async function analyzeImage(
   isqFieldNames: string[],
   isqFieldOptions: Record<string, string[]>,
   application = '',
-  apiKey?: string,
+  route: 'form' | 'card' = 'form',
   model?: string
 ): Promise<{
   productName: string;
@@ -420,8 +430,10 @@ Identify this B2B product and its key specs.${useCase} Return JSON:
         { type: 'text', text: prompt + GROUND },
       ],
     },
-  ], { model: model || MODEL_RICH, maxTokens: 2000, temperature: 0, label: 'analyzeImage', apiKey, timeoutMs: 10000 });   // temp 0 = deterministic extraction (audit); 10s cap; 2000 tokens ample (was 16000)
-  return JSON.parse(text);
+  ], { model: model || MODEL_RICH, maxTokens: 2000, temperature: 0, label: 'analyzeImage', route, timeoutMs: 20000 });   // temp 0 = deterministic extraction (audit); TIMEOUT 20s (was 10s) — image analysis on the heavier 3.6-flash tier can exceed 10s; the "Reading your photo…" indicator covers the wait; 2000 tokens ample
+  // audit #6: guard against truncated/invalid JSON so a bad body can't throw and break the photo feature.
+  try { return JSON.parse(text); }
+  catch { return { productName: '', specifications: {}, additionalSpecifications: {}, quantity: null, additionalDetails: '' }; }
 }
 
 // ── Cold-mode: generate the non-spec questions to ask, by segment ─────
@@ -1417,7 +1429,9 @@ export async function inferSpecsFromApplication(
   productName: string,
   application: string,
   isqSpecNames: string[],
-  isqSpecsWithOptions: Record<string, string[]>
+  isqSpecsWithOptions: Record<string, string[]>,
+  route: 'form' | 'card' = 'form',
+  model?: string
 ): Promise<{
   specs: Record<string, { value: string; confidence: number }>;
   rationale: string;
@@ -1449,8 +1463,9 @@ Return ONLY JSON:
   "rationale": "ONE short sentence framed as typical/common domain inference (e.g. 'Typical for car-wash tyre polish: usually silicon-based, high-gloss, spray form'), NOT as the buyer's stated requirement"
 }`,
     },
-  ], { label: 'inferSpecsFromApplication' });
-  const p = JSON.parse(text);
+  ], { label: 'inferSpecsFromApplication', temperature: 0, model: model || MODEL_FAST, route, timeoutMs: 20000 }); // TIMEOUT 20s (was 10s): use-case reasoning on 3.6-flash ~7s+; the "Analysing your requirement…" loader covers the wait
+  let p: { specs?: Record<string, unknown>; rationale?: unknown };
+  try { p = JSON.parse(text); } catch { p = {}; } // truncated/invalid body must not throw (kills the assist)
   // Normalize: accept both the new {value,confidence} shape and a bare string (backward-compatible).
   const specs: Record<string, { value: string; confidence: number }> = {};
   for (const [k, sv] of Object.entries(p?.specs || {})) {
@@ -1570,7 +1585,8 @@ export async function getSpecHints(
   twinContext = '',
   evidenceFacts?: Record<string, string>, // EXPLICIT buyer facts from mic/photo — mapped onto ISQ fields (the "light spec mapper", folded in)
   sellerSpecNames: string[] = [],          // seller-flagged fields — REFERENCE only, to name an extra with a real field name when one fits
-  apiKey?: string
+  route: 'form' | 'card' = 'form',
+  model?: string                           // caller-chosen model (else the default fast/lite tier)
 ): Promise<{
   knownFromProductName: Record<string, string>;
   redundantISQSpecs: string[];
@@ -1592,7 +1608,7 @@ ${sellerSpecNames.length ? `Seller-relevant fields (REFERENCE only — if an ext
 RECONCILE every fact the buyer TRULY provided (from the product name + the stated facts above) into exactly ONE bucket — never both, no duplicates:
 1. "knownFromProductName" — a fact that maps to a BUYER ISQ field. Use the ISQ field's EXACT name as the key; map the value to the closest option string when one fits (e.g. "single phase" → "1-Phase", "5 kVA" → "5 kVA"). Only include a fact that is UNAMBIGUOUSLY entailed by the product name OR explicitly stated above.
 2. "extras" — a real buyer-provided fact that does NOT fit any buyer ISQ field (it may match a seller-relevant field, or be a brand-new attribute). Keep it as a clean key: value so it is never lost. NEVER put an ISQ-field fact here.
-GROUNDING: only include what the buyer ACTUALLY provided. NEVER guess, infer a typical/default value, or invent a fact. NEVER infer Brand / Make / Manufacturer / OEM / Model from the product name (that narrows the seller pool) — a brand goes in extras ONLY if the buyer explicitly stated it. A rating/dimension number ("5 kVA", "6 mm") is a spec, never a quantity.
+GROUNDING (STRICT — this is the #1 rule): a value belongs in "knownFromProductName" ONLY if its words/numbers LITERALLY appear in the product name or the stated facts above. NEVER guess, NEVER infer a typical/default/most-common value, NEVER invent a fact. If the product name is just a generic category with NO stated size/type/grade/material/condition (e.g. "paper cutting machine" alone, "diesel generator" alone), then "knownFromProductName" MUST be empty {} — do NOT fill Size/Operation Type/Condition/Voltage/etc. with a likely value. Only "paper cutting machine 20 inch" lets you fill Size="20 inch"; "single phase motor" lets you fill Phase="1-Phase". NEVER infer Brand / Make / Manufacturer / OEM / Model from the product name (that narrows the seller pool) — a brand goes in extras ONLY if the buyer explicitly stated it. A rating/dimension number ("5 kVA", "6 mm") is a spec, never a quantity.
 
 Return ONLY JSON:
 {
@@ -1602,7 +1618,7 @@ Return ONLY JSON:
   "isqHints": { "ISQFieldName": "short helpful hint, max 8 words" }
 }`,
     },
-  ], { label: 'getSpecHints', temperature: 0, apiKey, timeoutMs: 10000 }); // temp 0 = deterministic reconciliation; 10s cap
+  ], { label: 'getSpecHints', temperature: 0, maxTokens: 1500, model: model || MODEL_FAST, route, timeoutMs: 12000 }); // temp 0 = deterministic reconciliation; TIMEOUT 12s — 3.5-flash-lite is ~2.5s but it fires CONCURRENTLY with getMissingSpecs (shared-key 429 → ~3.5s backoff), so 10s could clip it; 1500 out bounds a runaway
   let parsed: { knownFromProductName?: Record<string, string>; redundantISQSpecs?: string[]; isqHints?: Record<string, string>; extras?: Record<string, string> };
   // Harden against a valid-but-non-object body ('null'/'true'/123): JSON.parse doesn't throw on those, but then
   // parsed.knownFromProductName would. Coerce anything that isn't a plain object to {}.
@@ -1610,15 +1626,35 @@ Return ONLY JSON:
   // Bias guard at the source: a name-detect must NEVER be a brand/make field. Only keep fills that name a REAL
   // ISQ field (key-validation — the LLM must not invent a buyer field). Everything else the LLM returned as a
   // buyer fill but that isn't a real ISQ field is demoted to an extra (never dropped).
+  // Normalize for synonym matching (audit #11): drop parenthetical unit suffixes + punctuation so a fill/extra
+  // keyed "Power" reconciles to the real ISQ field "Power (kVA)" instead of surviving as a duplicate.
+  const norm = (s: string) => s.toLowerCase().replace(/\([^)]*\)/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
   const isqSet = new Set(isqSpecNames.map((n) => n.toLowerCase()));
+  const isqByNorm = new Map(isqSpecNames.map((n) => [norm(n), n] as const)); // normalized → canonical ISQ name
   const known: Record<string, string> = {};
   const extras: Record<string, string> = { ...(parsed.extras && typeof parsed.extras === 'object' ? parsed.extras : {}) };
   for (const [k, v] of Object.entries(parsed.knownFromProductName || {})) {
     if (!v || PREFERENCE_KEYWORDS.test(k)) continue;
-    if (isqSet.has(k.toLowerCase())) known[k] = v; else extras[k] = v; // key-validate; demote unknown keys to extras
+    const canonical = isqSet.has(k.toLowerCase()) ? k : isqByNorm.get(norm(k)); // exact, else normalized synonym
+    if (canonical) known[canonical] = v; else extras[k] = v; // key-validate; demote unknown keys to extras
   }
-  // Never let an extra shadow a buyer ISQ field (dedup).
-  for (const k of Object.keys(extras)) if (isqSet.has(k.toLowerCase())) delete extras[k];
+  // Never let an extra shadow a buyer ISQ field — exact OR normalized/synonym/parenthetical-unit variant (dedup).
+  for (const k of Object.keys(extras)) if (isqSet.has(k.toLowerCase()) || isqByNorm.has(norm(k))) delete extras[k];
+  // GROUNDING BACKSTOP (deterministic — the model STILL fabricates typical/default fills despite the prompt, e.g.
+  // "paper cutting machine" → Machine Size "36 inch" / Operation "Automatic" / Condition "New", none stated by the
+  // buyer). Drop any knownFromProductName value that shares NO meaningful token with the ACTUAL buyer input (the
+  // product name + explicit photo/voice facts). Synonym/option-snap survives on its alpha token ("single phase" →
+  // "1-Phase" via "phase"); pure fabrications (zero token overlap) are removed so they never pre-select a chip.
+  const groundToks = new Set((`${productName} ${Object.values(evidenceFacts || {}).join(' ')}`.toLowerCase().match(/[a-z0-9]+/g)) || []);
+  const valueGrounded = (v: string) => {
+    const all = v.toLowerCase().match(/[a-z0-9]+/g) || [];
+    if (!all.length) return true; // punctuation-only value (nothing to fabricate)
+    const meaningful = all.filter((t) => t.length >= 3 || /\d/.test(t));
+    // require ≥1 token overlap. If EVERY token is short (e.g. a bare "No"/"Yes"), still test those short tokens so a
+    // fabricated boolean/short default can't pass unchecked. Synonym/option-snap survives on its alpha token.
+    return (meaningful.length ? meaningful : all).some((t) => groundToks.has(t));
+  };
+  for (const k of Object.keys(known)) if (!valueGrounded(known[k])) delete known[k]; // fabricated fill → not shown/selected
   return { knownFromProductName: known, redundantISQSpecs: parsed.redundantISQSpecs || [], isqHints: parsed.isqHints || {}, extras };
 }
 
@@ -1635,6 +1671,39 @@ export interface AiSpecQuestion {
 // that can be wrong or too specific (e.g. product "BOPP film roll red tape" → category "Red Tape"), so
 // it never overrides the product name. Grounded in the live n8n category node: sellerSpecs (critical_specs
 // by seller-frequency), commonFollowups, dealBlockers, intentPatterns. Options-only, deduped vs page-1.
+// ─── Buyer-aware first question (the intelligence layer) ─────────────────────
+// Given WHO the buyer is (facts + everything they're sourcing) and what sellers ACTUALLY ask in
+// this category, generate the ONE contextual opening question ("why do you need this generator?")
+// + ≤2 non-spec-first follow-ups. Runs through callLLM → auto-captured in LLM_RAW + telemetry (debug/eval).
+export interface BuyerAwareQuestions {
+  opening?: { q: string; why: string; options?: string[] };
+  gaps: { q: string; kind: 'non_spec' | 'spec'; why: string; options?: string[] }[];
+  __raw?: { system: string; user: string; output: string };
+}
+export async function generateBuyerAwareQuestions(input: {
+  requirement: string;
+  buyerFacts?: Record<string, unknown>;
+  basket?: string[];
+  knownSpecs?: Record<string, string>;
+  categoryTopSpecs?: { q: string; pct?: number; vals?: string[] }[];
+  categoryKeywords?: string[];
+  entryMode?: string;
+  model?: string;
+}): Promise<BuyerAwareQuestions> {
+  const sys = `You draft the FIRST questions a buyer sees on IndiaMART's "Post a Requirement" form. You KNOW who this buyer is (their facts + everything they are sourcing) and what sellers ACTUALLY ask in this category.
+Return ONLY JSON:
+{"opening":{"q":"...","why":"...","options":["...","..."]},"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}]}
+- opening = ONE short intent/application question PERSONALISED to THIS buyer — the "what is it for / what scale / new-or-expand" that changes the whole quote. INFER their situation from their basket + facts (e.g. buying a machine + raw material + transport => setting up a unit => ask about the unit; a hospital buyer => ask about backup load). Add 2-4 tap options when natural.
+- gaps = up to 2 follow-ups drawn from the seller's real top questions, NON-SPEC first.
+Rules: NEVER ask anything already in already_known. Plain buyer words, no jargon, no internal terms (never say CSL/mcat/category). Keep every question under ~12 words. Ground each "why" in the seller questions or the buyer's own context.`;
+  const usr = JSON.stringify({ requirement: input.requirement, buyer_facts: input.buyerFacts, also_sourcing: input.basket, already_known: input.knownSpecs, seller_top_questions: input.categoryTopSpecs, category_keywords: input.categoryKeywords, flow: input.entryMode });
+  try {
+    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'buyer-aware-questions', model: input.model || MODEL_FAST, maxTokens: 1400, temperature: 0.3 });
+    const j = JSON.parse(raw) as BuyerAwareQuestions;
+    return { opening: j.opening, gaps: Array.isArray(j.gaps) ? j.gaps.slice(0, 2) : [], __raw: { system: sys, user: usr, output: raw } };
+  } catch { return { gaps: [] }; }
+}
+
 export async function getMissingSpecs(args: {
   productName: string;
   categoryName?: string;
@@ -1644,7 +1713,7 @@ export async function getMissingSpecs(args: {
   evidenceFacts?: Record<string, string>; // EXPLICIT buyer facts from mic/photo/typed input — LOSSLESS: any not covered by page 1 MUST surface here pre-answered
   sellerSpecs?: string[];                // getISQs seller-flagged spec names (supplementary hint)
   categoryCorpus?: unknown;              // 2026-07-21: the RAW category corpus (n8n parse_rows: per-call {buyer_intent, buyer_queries, seller_queries, products…}) OR the legacy category_intelligence object — passed WHOLE; the planner distills + orders from it. Absent → product-name + seller-spec fallback.
-  apiKey?: string;
+  route?: 'form' | 'card'; // proxy path (server-injected key); default 'form'
   model?: string; // caller-chosen model (RFQ key is flash-lite-only; flash 401s on it → default lite)
 }): Promise<AiSpecQuestion[]> {
   // Buyer specs WITH their option chips, so the model sees the CONCEPT each page-1 field already covers
@@ -1692,7 +1761,7 @@ OUTPUT RULES:
 - Plain simple English, ≤10 words per question.
 Return ONLY JSON:
 { "questions": [ { "fieldName": "question or spec name", "kind": "intent|spec|context", "options": ["opt1","opt2","opt3"], "helperText": "≤5-word why it matters", "prefill": "exact option the buyer's evidence supports — OMIT when no evidence" } ] }` },
-  ], { label: 'getMissingSpecs', temperature: 0.3, maxTokens: 4000, timeoutMs: 10000, model: args.model || MODEL_FAST, apiKey: args.apiKey }); // page-2 planner; default flash-lite (RFQ key is lite-only); 4000 output tokens; owner: 10s buyer-facing deadline
+  ], { label: 'getMissingSpecs', temperature: 0, maxTokens: 4000, timeoutMs: 22000, model: args.model || MODEL_FAST, route: args.route ?? 'form' }); // TIMEOUT 22s (was 10s): this is the HEAVIEST form call — full category corpus in + 5 reasoned questions out, now on 3.6-flash (~7-12s) and fired CONCURRENTLY with getSpecHints (a shared-key 429 adds a ~3.5s backoff), so 10s aborted intermittently → "couldn't load smart questions". It's PRE-FETCHED on commit (buyer reaches page-2 seconds later), so a longer cap is invisible; still bounded so a hung gateway can't spin forever. temp 0 (audit #12) — deterministic across aiEpoch re-fires.
   let parsed: { questions?: Array<{ fieldName?: string; kind?: string; options?: unknown; helperText?: string; prefill?: string }> };
   // never throw — a truncated/malformed OR non-object ('null'/123) body must not blank the whole page silently
   try { const p = JSON.parse(text); parsed = (p && typeof p === 'object') ? p : { questions: [] }; } catch { parsed = { questions: [] }; }
@@ -1700,11 +1769,13 @@ Return ONLY JSON:
   const norm = (s: string) => s.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   // Evidence corpus for the fabrication guard — a prefill is trusted only if a real evidence value backs it.
   const evidenceCorpus = Object.values(args.evidenceFacts || {}).map((v) => String(v).toLowerCase().trim()).filter(Boolean);
-  // A prefill is evidence-backed only on a WHOLE-TOKEN overlap of length >= 3 — not a bare substring. Stops a
-  // short token ("5") from validating a fabricated "5 kVA" prefill (the recurring containment-false-positive).
+  // A prefill is evidence-backed only on a WHOLE-TOKEN overlap — not a bare substring. KEEP digit-bearing tokens
+  // regardless of length (audit #5): otherwise "10 kVA"/"60 days" drop the number and validate against evidence
+  // "5 kVA"/"45 days" on the UNIT alone — the very fabrication this guard exists to stop. Every numeric run in
+  // the prefill must appear verbatim as a whole token in some evidence value.
   const toks = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) || [];
   const evidenceBacks = (v: string) => {
-    const vt = toks(v).filter((t) => t.length >= 3);
+    const vt = toks(v).filter((t) => t.length >= 3 || /\d/.test(t));
     if (!vt.length) { const lv = v.toLowerCase().trim(); return evidenceCorpus.some((e) => e === lv); } // all-short value → require an exact evidence match
     return vt.every((t) => evidenceCorpus.some((e) => toks(e).includes(t))); // every meaningful token must appear as a whole token in some evidence fact
   };

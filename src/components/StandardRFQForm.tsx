@@ -2,12 +2,14 @@ import { useState, useRef, useEffect } from 'react';
 import {
   ExternalLink, Plus, Trash2, CheckCircle2, MessageCircle, Package, Truck,
   Check, ArrowLeft, ChevronRight, ChevronUp, ChevronDown, Lock, LogIn, LocateFixed, MapPin, Pencil,
+  BadgeCheck, ShieldCheck,
 } from 'lucide-react';
 import IndiaMartHeader from './IndiaMartHeader';
 import { upsizeImimg } from '../lib/enrichment';
 import { getJSON } from '../lib/api';
 import { emit, emitApiError, EV } from '../lib/emit';
 import { resolveRfqTheme, rfqThemeClass } from '../lib/theme';
+import { useFocusTrap } from '../lib/useFocusTrap';
 import { sanitizeQty, qtyIsMeaningful, isValidIndianMobile, isValidGSTIN } from '../utils/formValidation';
 import type { StandardProduct, StandardRequirement } from '../lib/standardProducts';
 
@@ -39,6 +41,8 @@ function Chip({ label, selected, onClick }: { label: string; selected: boolean; 
   return (
     <button
       type="button"
+      role="radio"
+      aria-checked={selected}
       onClick={onClick}
       className={`flex items-center gap-2 px-3.5 py-2.5 min-h-[44px] border rounded-full text-sm transition-all ${
         selected ? 'border-teal-500 bg-teal-50 text-teal-700 font-medium' : 'border-gray-200 text-gray-600 hover:border-gray-300'
@@ -99,8 +103,15 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   //   (a) Buyer-Profile fetch when mounted logged-in (GET the authenticated buyer's name/mobile/email), or
   //   (b) the actual IndiaMART login/OTP flow behind the Login button below. The hardcoded values are DEMO ONLY.
   const applyLoggedInDefaults = () => {
+    // Consistency: prefill the SAME field set + persona as SimpleRFQForm's applyLoggedInDefaults, so the demo
+    // "logged-in buyer" looks identical on both forms and the real Buyer-Profile fetch can't drift between them.
     setContactName((n) => n || 'Demo Buyer');
     setContactMobile((m) => m || '9876543210');
+    setContactEmail((e) => e || 'tarbrinder.singh@indiamart.com');
+    setBusinessType((b) => b || 'Manufacturer');
+    setIndustry((i) => i || 'Construction Equipment');
+    setGstRegistered((g) => (g === null ? true : g));
+    setGstNumber((n) => n || '27AABCU9603R1ZM');
   };
   useEffect(() => { if (isLoggedIn) applyLoggedInDefaults(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [isLoggedIn]);
 
@@ -109,11 +120,18 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   const themeClass = rfqThemeClass(rfqTheme);
   const hero = heroBroken ? '' : product.image;
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(!isMobile && !standalone, popupRef); // consistency: trap Tab within the desktop popup, matching Simple
+  const stageRef = useRef(stage); stageRef.current = stage; // live mirrors for the popstate/back handler (parity w/ Simple)
+  const sentRef = useRef(false); sentRef.current = sent;
   const [showScrollHint, setShowScrollHint] = useState(false); // subtle "more below" amber chevron (in sync with Simple)
   // Funnel telemetry (in sync with the Simple form so Standard opens/steps/conversions are measurable once the
   // analytics sink is wired) — form open once on mount, then a page_transition per step.
-  useEffect(() => { emit(EV.FORM_OPEN, { form: 'standard', surface: standalone ? 'standalone' : (isMobile ? 'mobile' : 'popup'), sid: product.sid, loggedIn }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
-  useEffect(() => { emit(EV.PAGE_TRANSITION, { form: 'standard', to: stage }); }, [stage]);
+  useEffect(() => { emit(EV.FORM_OPEN, { form: 'standard', surface: standalone ? 'standalone' : 'popup', device: surf, sid: product.sid, loggedIn }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  // audit #22: guard the transition emit so it does NOT fire on mount (that inflated Standard's funnel vs Simple,
+  // which guards the same way) — only on a REAL stage change.
+  const prevStageRef = useRef<typeof stage | null>(null);
+  useEffect(() => { if (prevStageRef.current !== null && prevStageRef.current !== stage) emit(EV.PAGE_TRANSITION, { form: 'standard', from: prevStageRef.current, to: stage, surface: standalone ? 'standalone' : 'popup', device: surf }); prevStageRef.current = stage; }, [stage]);
   // Reset the scroll to the top on every step change (P3-314 — the new step used to open mid-scroll).
   useEffect(() => { bodyRef.current?.scrollTo?.({ top: 0 }); }, [stage]);
   // "More below" hint — appears only when the body overflows + not scrolled to the end.
@@ -147,18 +165,37 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isMobile, standalone, onClose, locationEditing]);
+  // P1-127 parity w/ Simple: on full-page shells (mobile/standalone), hardware Back steps details→product instead
+  // of leaving the page on the first press. Sentinel pushed on mount + re-armed after each intercepted Back; at the
+  // product step (or once sent) Back performs the normal close. The desktop popup must NOT hijack the host's Back.
+  useEffect(() => {
+    if (!isMobile && !standalone) return;
+    window.history.pushState({ rfq: true }, '');
+    const onPop = () => {
+      if (stageRef.current === 'details' && !sentRef.current) { setStage('product'); window.history.pushState({ rfq: true }, ''); return; }
+      onClose();
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Location model IN SYNC with the Simple form: buyer's own location + delivery location + "same as" toggle.
   const applyUserCity = (city: string) => { setUserLocation(city); setSameAsLoc((same) => { if (same) setDeliveryLocation(city); return same; }); };
   const toggleSameAs = () => setSameAsLoc((prev) => { const next = !prev; if (next) setDeliveryLocation(userLocation); return next; });
-  // Prefill from a coarse IP lookup on mount (only if empty). ⚑ DEV-TODO: ipapi.co / bigdatacloud are demo geo providers.
+  // PRIVACY consistency w/ Simple (audit): the coarse IP lookup (ipapi.co, a US processor) no longer fires on
+  // mount — it's deferred to the FIRST interaction (reaching the Details step, where the delivery city is used),
+  // so a bounced visitor's IP is never sent. Fires once. ⚑ DEV-TODO: ipapi.co / bigdatacloud are demo geo providers.
+  const ipGeoDoneRef = useRef(false);
   useEffect(() => {
+    if (stage !== 'details' || ipGeoDoneRef.current) return;
+    ipGeoDoneRef.current = true;
     let alive = true;
     getJSON<{ city?: string }>('https://ipapi.co/json/')
       .then((d) => { if (alive && d?.city) { setUserLocation((v) => v || d.city!); setDeliveryLocation((v) => v || d.city!); } })
       .catch((e) => emitApiError('ipapi', e));
     return () => { alive = false; };
-  }, []);
+  }, [stage]);
   const detectLocation = () => {
     setDetectingLoc(true);
     const fallback = () => getJSON<{ city?: string }>('https://ipapi.co/json/')
@@ -240,7 +277,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       contact: { name: contactName.trim(), mobile: contactMobile.trim(), email: contactEmail.trim() },
       text: buildText(),
     };
-    emit(EV.REQUIREMENT_SUBMITTED, { surface: standalone ? 'standalone' : (isMobile ? 'mobile' : 'popup'), sid: product.sid, hasQty: qtyIsMeaningful(quantity), specCount: chosenSpecs().length, loggedIn: isLoggedIn, form: 'standard' });
+    emit(EV.REQUIREMENT_SUBMITTED, { form: 'standard', surface: standalone ? 'standalone' : 'popup', device: surf, sid: product.sid, hasQty: qtyIsMeaningful(quantity), specCount: chosenSpecs().length, loggedIn: isLoggedIn });
     if (onSubmit) onSubmit(req);
     else setSent(true); // demo fallback — no host handler
   };
@@ -281,7 +318,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
                 {done ? <Check size={14} /> : <s.Icon size={14} />}
               </span>
               {(active || !isMobile) && (
-                <span className={`text-xs font-medium ${active ? 'text-teal-700' : done ? 'text-teal-600' : 'text-gray-400'}`}>{s.label}</span>
+                <span className={`text-xs font-medium ${active ? 'text-teal-700' : done ? 'text-teal-600' : 'text-gray-500'}`}>{s.label}</span>
               )}
             </button>
             {i < STEPS.length - 1 && <span className={`w-5 sm:w-8 h-px ${done ? 'bg-teal-300' : 'bg-gray-200'}`} />}
@@ -302,7 +339,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
         <div className="min-w-0 flex-1">
           <p className="font-bold text-gray-900 text-base sm:text-lg leading-snug">{product.title}</p>
           {product.priceOnwards && (
-            <p className="text-sm text-gray-500 mt-0.5">{product.priceOnwards} <span className="text-gray-400">onwards</span></p>
+            <p className="text-sm text-gray-500 mt-0.5">{product.priceOnwards} <span className="text-gray-500">onwards</span></p>
           )}
           <a
             href={product.url}
@@ -313,6 +350,14 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
             Requesting exactly this <ExternalLink size={12} />
           </a>
         </div>
+      </div>
+
+      {/* Trust reassurance — SAME strip as SimpleRFQForm (consistency): shown at the entry so a wary buyer sees WHY it's safe. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500">
+        <span className="flex items-center gap-1"><BadgeCheck size={13} className="text-green-600 shrink-0" /> Verified suppliers</span>
+        <span className="flex items-center gap-1"><ShieldCheck size={13} className="text-teal-600 shrink-0" /> Payment protected</span>
+        <span className="text-gray-300">·</span><span>100% free</span>
+        <span className="text-gray-300">·</span><span>No spam calls</span>
       </div>
 
       {/* Quantity + Unit — moved to the TOP (owner), above the specifications */}
@@ -330,7 +375,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       {/* 6 fixed catalog specs — pre-selected toggles (no options; a configured SKU has one value each) */}
       <div>
         <p className="text-xs uppercase font-semibold text-gray-500 tracking-wide">Product specifications</p>
-        <p className="text-xs text-gray-400 mt-0.5 mb-3">All included by default — untick any you don&apos;t need quoted.</p>
+        <p className="text-xs text-gray-500 mt-0.5 mb-3">All included by default — untick any you don&apos;t need quoted.</p>
         <div className="space-y-2">
           {product.specs.map((s) => {
             const on = selectedSpecs.has(s.name);
@@ -354,7 +399,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
           {/* product URL — a locked custom spec, always carried */}
           <div className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border border-teal-200 bg-teal-50/40">
             <span className="w-5 h-5 rounded-md bg-teal-600 flex items-center justify-center shrink-0 text-white"><Lock size={12} /></span>
-            <span className="text-sm text-gray-600 flex-1 min-w-0">Product page <span className="text-gray-400">(custom spec)</span></span>
+            <span className="text-sm text-gray-600 flex-1 min-w-0">Product page <span className="text-gray-500">(custom spec)</span></span>
             <a href={product.url} target="_blank" rel="noreferrer" className="text-xs font-medium text-teal-700 hover:underline inline-flex items-center gap-1 truncate">
               Always included <ExternalLink size={11} />
             </a>
@@ -372,7 +417,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
               <div className="flex items-center gap-2">
                 <input aria-label={`Custom spec ${i + 1} name`} value={c.name} onChange={(e) => setCustom(i, 'name', e.target.value)} placeholder="Spec name" className={`flex-1 min-w-0 border rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 ${halfFilled ? 'border-amber-300' : 'border-gray-200'}`} />
                 <input aria-label={`Custom spec ${i + 1} value`} value={c.value} onChange={(e) => setCustom(i, 'value', e.target.value)} placeholder="Value" className={`flex-1 min-w-0 border rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 ${halfFilled ? 'border-amber-300' : 'border-gray-200'}`} />
-                <button type="button" onClick={() => removeCustom(i)} aria-label="Remove spec" className="w-9 h-9 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 flex items-center justify-center shrink-0"><Trash2 size={15} /></button>
+                <button type="button" onClick={() => removeCustom(i)} aria-label="Remove spec" className="w-9 h-9 rounded-lg text-gray-500 hover:text-red-500 hover:bg-red-50 flex items-center justify-center shrink-0"><Trash2 size={15} /></button>
               </div>
               {halfFilled && <p role="alert" className="text-[11px] text-amber-600 mt-1 ml-1">Add both a name and a value — this row won&apos;t be sent otherwise.</p>}
             </div>
@@ -398,12 +443,12 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
         {detectingLoc ? <span className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" /> : <LocateFixed size={15} />} Use my current location
       </button>
       <div>
-        <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Your location</p>
+        <p className="text-[11px] uppercase font-semibold text-gray-500 tracking-wide mb-1">Your location</p>
         <div className="relative"><MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
           <input aria-label="Your location" value={userLocation} onChange={(e) => applyUserCity(e.target.value)} placeholder="Search city…" className="w-full border border-gray-200 rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" /></div>
       </div>
       <div>
-        <p className="text-[11px] uppercase font-semibold text-gray-400 tracking-wide mb-1">Delivery location</p>
+        <p className="text-[11px] uppercase font-semibold text-gray-500 tracking-wide mb-1">Delivery location</p>
         <div className="relative"><MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none" />
           <input aria-label="Delivery location" value={deliveryLocation} disabled={sameAsLoc} onChange={(e) => setDeliveryLocation(e.target.value)} placeholder="Search city…" className={`w-full border rounded-lg pl-8 pr-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400 ${sameAsLoc ? 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed' : 'border-gray-200'}`} /></div>
       </div>
@@ -427,7 +472,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   const detailsStep = (
     <div className="space-y-5">
       <div className="rounded-xl border border-gray-200 p-4 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
-        <p className="text-xs uppercase font-semibold text-gray-400 tracking-wide mb-3">Delivery & Payment</p>
+        <p className="text-xs uppercase font-semibold text-gray-500 tracking-wide mb-3">Delivery & Payment</p>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">When do you need it?</label>
@@ -447,7 +492,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
             <label className="block text-sm font-medium text-gray-700 mb-1.5">Delivery location</label>
             <button type="button" onClick={() => setLocationEditing((v) => !v)} className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2.5 text-sm text-gray-700 hover:border-teal-300">
               <span className="truncate flex items-center gap-1.5"><MapPin size={13} className="text-gray-300 shrink-0" />{deliveryLocation || 'Select delivery city'}</span>
-              <Pencil size={13} className="text-gray-400 shrink-0" />
+              <Pencil size={13} className="text-gray-500 shrink-0" />
             </button>
             {locationEditing && renderLocationDrawer()}
           </div>
@@ -455,14 +500,14 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
       </div>
 
       <div className="rounded-xl border border-gray-200 p-4 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
-        <p className="text-xs uppercase font-semibold text-gray-400 tracking-wide mb-3">About you</p>
+        <p className="text-xs uppercase font-semibold text-gray-500 tracking-wide mb-3">About you <span className="text-gray-500 normal-case font-normal">(optional)</span></p>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">You are a</label>
             <div className="flex flex-wrap gap-2">{BUSINESS_TYPES.map((b) => <Chip key={b} label={b} selected={businessType === b} onClick={() => setBusinessType(businessType === b ? '' : b)} />)}</div>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">Company / industry <span className="text-gray-400 font-normal">(optional)</span></label>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">Company / industry <span className="text-gray-500 font-normal">(optional)</span></label>
             <input aria-label="Company or industry (optional)" value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g., electrical contracting" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
           </div>
           {/* GST — asked only for a BUSINESS role (every type except Individual), in sync with the Simple form.
@@ -488,8 +533,8 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
             verified-name badge (logged-in) sits alongside. ⚑ DEV-TODO: wire the real IndiaMART login/OTP behind Login. */}
         <div className="flex items-center justify-between gap-2">
           <button type="button" onClick={() => setContactOpen((v) => !v)} className="flex items-center gap-2 min-w-0">
-            <span className="text-xs uppercase font-semibold text-gray-400 tracking-wide">Contact details</span>
-            {contactOpen ? <ChevronUp size={16} className="text-gray-400 shrink-0" /> : <ChevronDown size={16} className="text-gray-400 shrink-0" />}
+            <span className="text-xs uppercase font-semibold text-gray-500 tracking-wide">Contact details</span>
+            {contactOpen ? <ChevronUp size={16} className="text-gray-500 shrink-0" /> : <ChevronDown size={16} className="text-gray-500 shrink-0" />}
           </button>
           {isLoggedIn
             ? <span className="flex items-center gap-1.5 text-xs font-medium text-green-600 truncate"><Check size={13} className="shrink-0" /> {contactName || 'Logged in'}</span>
@@ -509,6 +554,13 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
           </div>
         )}
       </div>
+      {/* Consent (DPDP/TRAI) — reasonable default at the point of submission; LEGAL to review the wording.
+          Links point at IndiaMART's own public legal pages. */}
+      <p className="text-[11px] leading-relaxed text-gray-500 px-1">
+        By continuing, you agree to share this requirement with relevant verified suppliers, who may contact you about it, per IndiaMART's{' '}
+        <a href="https://www.indiamart.com/terms-of-use.html" target="_blank" rel="noopener noreferrer" className="text-teal-600 underline underline-offset-2 hover:text-teal-700">Terms</a>{' '}and{' '}
+        <a href="https://www.indiamart.com/privacy-policy.html" target="_blank" rel="noopener noreferrer" className="text-teal-600 underline underline-offset-2 hover:text-teal-700">Privacy Policy</a>.
+      </p>
     </div>
   );
 
@@ -521,13 +573,13 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
         : <span className="font-bold text-teal-600 text-[15px]">Get Best Price</span>}
       {stage === 'product'
         ? <button type="button" onClick={() => setStage('details')} className="flex items-center gap-1.5 bg-teal-600 text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-teal-700">Next <ChevronRight size={15} /></button>
-        : <button type="button" onClick={handleGetQuotes} aria-disabled={!canSubmit} className={`flex items-center gap-1.5 min-h-[40px] text-white text-sm font-semibold px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 ${canSubmit ? '' : 'opacity-90'}`}><MessageCircle size={15} /> Get Best Price</button>}
+        : <button type="button" onClick={handleGetQuotes} className={`flex items-center gap-1.5 min-h-[40px] text-white text-sm font-semibold px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 ${canSubmit ? '' : 'opacity-90'}`}><MessageCircle size={15} /> Get Best Price</button>}
     </div>
   );
 
   // ── Exit at the BOTTOM (owner: "exit on bottom", NOT in the header) — sticky footer, all shells ──
   const exitRow = (
-    <div className="shrink-0 border-t border-gray-100 py-3 text-center bg-white"><button type="button" onClick={onClose} className="text-sm text-gray-400 underline underline-offset-2 hover:text-gray-600">Exit</button></div>
+    <div className="shrink-0 border-t border-gray-100 py-3 text-center bg-white"><button type="button" onClick={onClose} className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-600">Exit</button></div>
   );
 
   // ── Scrollable step content (stepper + the current step) ──
@@ -586,7 +638,7 @@ export default function StandardRFQForm({ product, onClose, onSubmit, standalone
   }
   return (
     <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6">
-      <div role="dialog" aria-modal="true" aria-label="Get Best Price" className={`${themeClass} relative bg-white rounded-xl w-full max-w-2xl max-h-[calc(100dvh-3rem)] flex flex-col overflow-hidden animate-modal-in shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]`}>
+      <div ref={popupRef} role="dialog" aria-modal="true" aria-label="Get Best Price" className={`${themeClass} relative bg-white rounded-xl w-full max-w-2xl max-h-[calc(100dvh-3rem)] flex flex-col overflow-hidden animate-modal-in shadow-[0_12px_32px_-4px_rgba(30,42,58,0.12)]`}>
         {!sent && topBar}
         {scrollBody}
         {!sent && exitRow}

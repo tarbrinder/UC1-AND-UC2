@@ -1,14 +1,15 @@
 // ─── SELLER / ENTITY WEB-VERIFY (crawler / OSINT) — FRONTEND-ONLY async job ───────────────────────────────
 // On-demand web-scrape enrichment for a GLID. Fire → poll. Lives in the FRONTEND (NOT n8n) by design: it's a
 // slow async job (seconds–minutes) and must never stall the synchronous bi-user-insights pull (the V10 lock).
-// Uses the existing IndiaMART LLM key (sent as X-Gemini-Key, browser-side — debug mode). Calls go through the
-// /api/sellerverify Vite proxy (CORS-safe). The `result` shape is captured on first live call; we return it raw
-// so the UI can render whatever the scraper provides. Surfaced in a dedicated block BELOW UC2 (owner decision).
+// Uses the IndiaMART LLM/Gemini key as X-Gemini-Key — but injected SERVER-SIDE by the /api/sellerverify proxy
+// (vite.config, from env.LLM_GATEWAY_KEY), NEVER in the browser bundle. The `result` shape is captured on first
+// live call; we return it raw so the UI can render whatever the scraper provides. Surfaced BELOW UC2 (owner).
 
 import { api } from './api';
 
-const KEY = (import.meta.env.VITE_LLM_KEY as string) || '';
-export const hasCrawlerKey = (): boolean => Boolean(KEY.trim());
+// Public flag (not a secret) — gates whether the OSINT UI is offered; the real key is proxy-injected.
+const CRAWLER_ENABLED = ((import.meta.env.VITE_LLM_ENABLED as string) || '').trim() === '1';
+export const hasCrawlerKey = (): boolean => CRAWLER_ENABLED;
 
 export interface SellerVerifyState {
   status: 'idle' | 'running' | 'done' | 'failed' | 'no-key';
@@ -21,13 +22,13 @@ export interface SellerVerifyState {
 
 // Fire the scrape job → returns the job id (or null on a shapeless response).
 export async function startSellerVerify(glid: string): Promise<string | null> {
-  if (!KEY.trim()) return null;
+  if (!CRAWLER_ENABLED) return null;
   let res: Response;
   try {
     // Fail fast (25s) instead of hanging ~75s on a 502. The verify call should return a job_id quickly.
     res = await fetch(api('/api/sellerverify/api/v2/seller/verify'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Gemini-Key': KEY },
+      headers: { 'Content-Type': 'application/json' }, // X-Gemini-Key injected server-side by the /api/sellerverify proxy
       body: JSON.stringify({ glid }),
       signal: AbortSignal.timeout(25000),
     });
@@ -62,7 +63,7 @@ export async function runSellerVerify(
   glid: string,
   opts?: { maxMs?: number; pollMs?: number; onTick?: (poll: number, progress?: unknown) => void },
 ): Promise<SellerVerifyState> {
-  if (!KEY.trim()) return { status: 'no-key' };
+  if (!CRAWLER_ENABLED) return { status: 'no-key' };
   const t0 = Date.now();
   const maxMs = opts?.maxMs ?? 120000;
   const pollMs = opts?.pollMs ?? 2500;
