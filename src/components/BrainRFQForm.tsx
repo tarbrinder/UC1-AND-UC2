@@ -696,6 +696,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const [planCorrections, setPlanCorrections] = useState<CuratedPlan['prefills']>([]);
   const [baqLoading, setBaqLoading] = useState(false);
   const [baqAnswers, setBaqAnswers] = useState<Record<string, string>>({});
+  // Identity absorbed into the planner (owner-locked 2026-07-27): when the planner ranks a GST-style identity
+  // question among its top gaps, it rides the SAME gaps list (kind:'identity') — this just pulls it out so its
+  // answer writes to the REAL gstRegistered state (not a throwaway aiSpecValues entry) and P3 knows to hide it.
+  const [identityAsk, setIdentityAsk] = useState<{ q: string; options?: string[]; why?: string } | null>(null);
   useEffect(() => {
     if (!committed || !mcatId || !hasFormLLM()) return;
     if (specsLoading) return; // wait for page-1 specs to settle (fires for zero-ISQ categories too, once settled)
@@ -720,11 +724,18 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       entryMode: _seed?.entryMode, model: RFQ_MODEL_SPECS,
     }).then((r) => {
       if (plannerFiredFor.current !== fireKey || gen !== commitGen.current) return;
+      // Identity-in-planner (owner-locked 2026-07-27): pull any promoted identity gap OUT of the ranked list
+      // first — its answer needs to land on the real gstRegistered state, not a throwaway aiSpecValues entry —
+      // then split the REST exactly as before. Code-gated (not just prompt-trusted) on gstOnFile, matching the
+      // codebase's "dedup cannot be an LLM promise" discipline: never honor a promoted ask for a fact we hold.
+      const identityGap = gstOnFile ? undefined : (r.gaps || []).find((g) => g.kind === 'identity');
+      setIdentityAsk(identityGap ? { q: identityGap.q, options: identityGap.options, why: identityGap.why } : null);
+      const rankedGaps = (r.gaps || []).filter((g) => g.kind !== 'identity');
       // Split the ONE ranked gap list so the SAME question never appears twice: exactly 2 questions ride the
       // very top (the opening/intent question + the single top-ranked gap); everything else becomes page-2
       // "smart questions". Without this split, banner and page-2 would both render off the identical r.gaps array.
-      const bannerGaps = (r.gaps || []).slice(0, 1);
-      const pageGaps = (r.gaps || []).slice(1);
+      const bannerGaps = rankedGaps.slice(0, 1);
+      const pageGaps = rankedGaps.slice(1);
       setBaq({ ...r, gaps: bannerGaps }); setAiSpecsError(false);
       // PROGRESSIVE TRUTH ENRICHMENT: apply prefills/corrections onto the spec fields (never fabricated — the
       // planner already grounding-guards them) and surface them in the step-1 "filled from your history" strip.
@@ -811,6 +822,11 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     if (_seed.quantity) setQuantity((q) => q || _seed.quantity);
     if (_seed.unit) pendingUnitRef.current = _seed.unit;
     if (_seed.deliveryLocation) { setDeliveryLocation((d) => d || _seed.deliveryLocation); setSameAsLoc(false); }
+    // Identity fields default to P3, "prefilled from bp/od/d if already on file" (owner-locked 2026-07-27) —
+    // Business Type + GST-verified are the two identity facts already carried on buyer_facts.
+    const bf = _seed.buyerFacts as { business_type?: string; gst_verified?: boolean; has_gst?: boolean } | undefined;
+    if (bf?.business_type) { const hit = BUSINESS_TYPES.find((t) => t.toLowerCase() === bf.business_type!.toLowerCase()); if (hit) setBuyerType((v) => v || hit); }
+    if (bf?.gst_verified || bf?.has_gst) setGstRegistered((v) => v ?? true);
   }, [_seed, committed]);
 
   // Feed photo/voice-extracted specs into BOTH pipelines: page-1 fill (pendingAiSpecs → ISQ fields) AND
@@ -999,6 +1015,14 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // V3 rule (RFQModalV3.tsx:1162): anything that isn't an individual/personal/end-user is a BUSINESS role —
   // and a business buyer is asked for GST (an individual/consumer is not). "Individual Buyer" → false.
   const isBusinessRole = !!buyerType && !/individual|personal|end[\s-]?user|consumer|home/i.test(buyerType);
+  // Identity-in-planner (owner-locked 2026-07-27): GST is "handled elsewhere" — so P3 doesn't re-ask it — when
+  // either (a) it's already on file (bp/od/d, via buyerFacts) or (b) the planner promoted it onto P2 this round.
+  const gstOnFile = !!(_seed?.buyerFacts as { gst_verified?: boolean; has_gst?: boolean } | undefined)?.gst_verified
+    || !!(_seed?.buyerFacts as { gst_verified?: boolean; has_gst?: boolean } | undefined)?.has_gst;
+  const gstHandledElsewhere = gstOnFile || !!identityAsk;
+  // "About You" disappears entirely (owner: "handle for UI when one or more all section are hidden") only once
+  // EVERY field in it is handled upstream — Business Type known, and GST either not applicable or handled above.
+  const aboutYouHandled = !!buyerType && (!isBusinessRole || gstHandledElsewhere);
 
   const scoreDetails = useMemo(() => {
     // P1-109: score the SAME arrays the pages render (visible), not the raw arrays — else the dial can stick
@@ -1448,13 +1472,13 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     <div data-flash="smart-questions" className={`space-y-5 ${flashCls('smart-questions')}`}>
       {/* (Category-corpus status chip removed — it was a dev/debug line, not for buyers. The corpus still loads
           in the background for Category mode; it's just no longer surfaced.) */}
-      {aiSpecsLoading && visibleAiSpecs.length === 0 && (
+      {aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && (
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-gray-500 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Preparing smart questions…</p>
           <button type="button" onClick={() => setStage('more')} className="text-xs text-gray-500 underline underline-offset-2 hover:text-gray-600 shrink-0">Skip for now</button>
         </div>
       )}
-      {!aiSpecsLoading && visibleAiSpecs.length === 0 && (
+      {!aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && (
         aiSpecsError ? (
           // FAILURE → retry (re-fires the planner) + a quiet continue. We DON'T auto-skip (owner) — a transient
           // gateway blip shouldn't silently drop the smart questions.
@@ -1469,6 +1493,21 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           <p className="text-sm text-gray-500">{!hasFormLLM() ? 'You can add any extra details on the next step. →' : 'No extra questions needed — your specs already cover it. Continue →'}</p>
         )
       )}
+      {/* Identity-in-planner (owner-locked 2026-07-27): rendered with the SAME chip UI as any other gap question,
+          no special treatment — the planner promoted this only because it ranked among the top gaps for THIS
+          buyer. Answering it here is what removes the GST ask from P3 (see gstHandledElsewhere). */}
+      {identityAsk && (() => {
+        const opts = identityAsk.options?.length ? identityAsk.options : ['Yes, registered', 'Not yet'];
+        return (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-700">
+              {identityAsk.q}
+              {identityAsk.why && <span className="ml-2 font-normal text-gray-500">— {identityAsk.why}</span>}
+            </label>
+            <OptionChips ariaLabel={identityAsk.q} options={opts} value={gstRegistered === true ? opts[0] : gstRegistered === false ? opts[1] : ''} onChange={(v) => setGstRegistered(v === opts[0])} />
+          </div>
+        );
+      })()}
       {visibleAiSpecs.map((q) => (
         <div key={q.fieldName} className="space-y-2">
           <label className="block text-sm font-medium text-gray-700">
@@ -1535,8 +1574,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       </div>
   );
 
-  // ── More Details (stage 'more') = About You. Logged-out shows the Login button + autofetch banner. ──
-  const moreBody = (
+  // ── More Details (stage 'more') = About You. Logged-out shows the Login button + autofetch banner.
+  // Identity-in-planner (owner-locked 2026-07-27): the WHOLE card hides once every field in it has been
+  // handled upstream (aboutYouHandled) — "handle for UI when one or more all section are hidden" (owner). ──
+  const moreBody = aboutYouHandled ? null : (
     <div className="space-y-4">
       <div className="rounded-xl border border-gray-200 p-4 sm:p-5 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
         <div className="flex items-start justify-between gap-3 mb-4">
@@ -1555,9 +1596,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
             <input type="text" aria-label="Industry" value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g., Construction" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
           </div>
         </div>
-        {/* GST — asked only for a BUSINESS role (every Business type except "Individual Buyer"), per the V3 rule.
-            Golden Rule: gstRegistered starts null (UNKNOWN) — we never assume "No". */}
-        {isBusinessRole && (
+        {/* GST — asked only for a BUSINESS role (every Business type except "Individual Buyer"), per the V3 rule,
+            AND only if it isn't already handled elsewhere (already on file, or promoted+asked on P2 — owner-locked
+            2026-07-27). Golden Rule: gstRegistered starts null (UNKNOWN) — we never assume "No". */}
+        {isBusinessRole && !gstHandledElsewhere && (
           <div data-flash="gst" className={`mt-4 pt-4 border-t border-gray-100 animate-field-in ${flashCls('gst')}`}>
             <p className="text-xs uppercase font-semibold text-gray-500 mb-1 tracking-wide">GST Registered?</p>
             <p className="text-[11px] text-gray-500 mb-2">Only shared with suppliers you contact.</p>

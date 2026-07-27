@@ -1716,8 +1716,7 @@ export interface CuratedPlan {
   prefills: { field: string; value: string; source: string; corrected_from?: string }[];   // Progressive Truth Enrichment
   extras?: Record<string, string>;                  // buyer-stated facts that don't map to any ISQ field name (was getSpecHints' "extras")
   field_hints?: Record<string, string>;             // short "why it matters" captions for page-1 ISQ fields (was getSpecHints' isqHints)
-  gaps: { q: string; kind: 'non_spec' | 'spec'; why: string; options?: string[]; helperText?: string }[];
-  kyb_ask?: { doc: string; why: string } | null;
+  gaps: { q: string; kind: 'non_spec' | 'spec' | 'identity'; why: string; options?: string[]; helperText?: string }[];
   __raw?: { system: string; user: string; output: string };
 }
 export async function runCuratedPlanner(input: {
@@ -1745,7 +1744,7 @@ export async function runCuratedPlanner(input: {
   }
   const sys = `You are the Curated-RFQ Engine for IndiaMART — the ONE understanding→ranking call for this requirement (it replaces separate hint/prefill/gap-question passes). You KNOW this buyer (their facts, basket, WhatsApp/call signals) and what sellers ACTUALLY ask in this category. Objective: maximise understanding of THIS requirement with the LEAST buyer effort.
 Return ONLY JSON:
-{"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you typed|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"extras":{"fact not matching any page-1 field name":"value"},"field_hints":{"a page-1 field name":"≤6-word why it matters"},"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}],"kyb_ask":{"doc":"GST|Udyam|PAN|Company name","why":"buyer-benefit reason"}}
+{"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you typed|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"extras":{"fact not matching any page-1 field name":"value"},"field_hints":{"a page-1 field name":"≤6-word why it matters"},"gaps":[{"q":"...","kind":"non_spec"|"spec"|"identity","why":"...","options":["..."]}]}
 
 BUYER'S REAL INTENT — HIGHEST AUTHORITY:
 1. INTENT IS SUPREME. From the requirement text + buyer_facts + buyer_signals, decide what the buyer TRULY wants.
@@ -1770,8 +1769,11 @@ GAPS (the fewest decisive questions):
 - Aim for up to 5 total gaps when the product genuinely has that many meaningful ones beyond what's known — do not under-ask with just 1-2 unless the requirement truly needs no more.
 - Plain buyer words, ≤12 words per question, no jargon (never say CSL/mcat/ISQ/category ID).
 
-kyb_ask = include ONLY if the category is clearly B2B/bulk AND the buyer has no GST on file; pick the single best-value doc; phrase the why as a buyer benefit. Omit otherwise.
-buyer_signals.business_intent (reselling/wholesale/distribution) is explicit B2B evidence — when present, set kyb_ask even if the category signal is weak.`;
+IDENTITY gap (kind:"identity") — there is no separate identity ask; it competes for a slot in the SAME ranked gaps list as any spec or non-spec gap, same chip UI, no special treatment:
+- Include AT MOST ONE, and only if the category is clearly B2B/bulk AND buyer_facts shows no GST on file (no gst_verified/has_gst) AND it would genuinely rank among your top gaps for this buyer.
+- q:"Are you GST registered?", options exactly ["Yes, registered","Not yet"], why = a buyer-benefit phrase (e.g. "faster verified quotes").
+- buyer_signals.business_intent (reselling/wholesale/distribution) is explicit B2B evidence — weigh it in even when the category signal alone is weak.
+- NEVER include this if buyer_facts already shows gst_verified or has_gst — that is already-known truth, not a gap.`;
   const usr = JSON.stringify({
     requirement: input.requirement, category_name: input.categoryName || 'unknown', already_known: known && known !== 'None' ? known : undefined,
     page1_buyer_specs: specsDetail !== 'None' ? specsDetail : undefined,
@@ -1791,7 +1793,7 @@ buyer_signals.business_intent (reselling/wholesale/distribution) is explicit B2B
     const extras = j.extras && typeof j.extras === 'object' ? Object.fromEntries(Object.entries(j.extras).filter(([, v]) => v && backed(String(v)))) : undefined;
     const field_hints = j.field_hints && typeof j.field_hints === 'object' ? j.field_hints : undefined;
     const gaps = Array.isArray(j.gaps) ? j.gaps.slice(0, 6) : [];
-    return { opening: j.opening, prefills, extras, field_hints, gaps, kyb_ask: j.kyb_ask ?? null, __raw: { system: sys, user: usr, output: raw } };
+    return { opening: j.opening, prefills, extras, field_hints, gaps, __raw: { system: sys, user: usr, output: raw } };
   } catch { return { prefills: [], gaps: [] }; }
 }
 
