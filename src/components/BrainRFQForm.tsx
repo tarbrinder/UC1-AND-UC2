@@ -1426,9 +1426,17 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const renderSpecField = (s: ISQSpec) => {
     const opts = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
     const hint = isqHints[s.IM_SPEC_MASTER_DESC];
+    // FABRICATION FIREWALL: an OBSERVED-tier seed (engine action CONFIRM) came from something the buyer
+    // BROWSED — often a seller's catalogue row — not from anything he said. It is still pre-filled so he
+    // doesn't retype it, but it must carry its real source and read as "confirm this", never as his own word.
+    // Only badge it while it still holds the seeded value; the moment he edits it, it's his.
+    const observedWhy = _seed?.observedFields?.[s.IM_SPEC_MASTER_DESC];
+    const stillSeeded = observedWhy && specValues[s.IM_SPEC_MASTER_DESC] === _seed?.specValues?.[s.IM_SPEC_MASTER_DESC];
     return (
       <div key={s.IM_SPEC_MASTER_DESC} className="space-y-2">
-        <label className="block text-sm font-medium text-gray-700">{s.IM_SPEC_MASTER_DESC}{hint && <span className="ml-2 font-normal text-gray-500">— {hint}</span>}</label>
+        <label className="block text-sm font-medium text-gray-700">{s.IM_SPEC_MASTER_DESC}{hint && <span className="ml-2 font-normal text-gray-500">— {hint}</span>}
+          {stillSeeded && <span className="ml-2 font-normal text-amber-700">· {observedWhy} — confirm</span>}
+        </label>
         {opts.length > 0 ? <OptionChips ariaLabel={s.IM_SPEC_MASTER_DESC} options={opts} value={specValues[s.IM_SPEC_MASTER_DESC] || ''} onChange={(v) => setSpecValue(s.IM_SPEC_MASTER_DESC, v)} />
           : <input type="text" value={specValues[s.IM_SPEC_MASTER_DESC] || ''} onChange={(e) => setSpecValue(s.IM_SPEC_MASTER_DESC, e.target.value)} placeholder={hint || `Enter ${s.IM_SPEC_MASTER_DESC.toLowerCase()}`} className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-400" />}
       </div>

@@ -14,6 +14,11 @@ export interface BrainSeed {
   quantity: string;
   unit: string;
   specValues: Record<string, string>;      // stated/confirmed specs → pre-filled spec fields
+  /** Fields seeded from an OBSERVED-tier decision (engine action CONFIRM) — i.e. lifted from something the
+   *  buyer BROWSED, not something he stated. Per the fabrication firewall these must be shown back with their
+   *  source and confirmed, never presented as his own words. Engine v8+ tiers these per-spec; before v8 a
+   *  seller's catalogue row could ride in as PREFILL/"from your posted requirement". */
+  observedFields?: Record<string, string>; // field → buyer-facing provenance ("from a product you viewed")
   deliveryLocation: string;
   startStage: BrainStage;
   entryMode: string;
@@ -72,9 +77,15 @@ const QTY = /^(quantity|qty)$/i, QTY_UNIT = /quantity ?unit|unit of/i, DELIV = /
 export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
   const m = p.metadata;
   const specValues: Record<string, string> = {};
+  const observedFields: Record<string, string> = {};
   let quantity = '', unit = '', deliveryLocation = '';
   for (const d of p.decisions) {
     if (!isFilled(d) || !d.value) continue;
+    // CONFIRM = OBSERVED tier (browsed, not stated). Still seeded so the buyer doesn't retype it, but tracked
+    // so the spec page can badge it with its real source instead of passing it off as his own answer.
+    if (d.action === 'CONFIRM' && !QTY.test(d.field) && !QTY_UNIT.test(d.field) && !DELIV.test(d.field)) {
+      observedFields[d.field] = d.reason || 'from a product you viewed';
+    }
     if (QTY.test(d.field)) { quantity = val(d); continue; }
     if (QTY_UNIT.test(d.field)) { unit = val(d); continue; }
     if (DELIV.test(d.field)) { deliveryLocation = val(d); continue; }
@@ -93,6 +104,7 @@ export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
     quantity, unit, deliveryLocation, startStage,
     entryMode: m.entry_mode,
     specValues,
+    observedFields: Object.keys(observedFields).length ? observedFields : undefined,
     gaps: p.decisions.filter((d) => d.action === 'ASK').map((d) => ({ q: d.field, kind: d.kind, options: (d.options ?? []).map((o) => (typeof o === 'string' ? o : o.value)) })),
     conflicts: p.decisions.filter((d) => d.action === 'RESOLVE_CONFLICT'),
     gstAsk: m.kyb_unlock.state === 'offer',
