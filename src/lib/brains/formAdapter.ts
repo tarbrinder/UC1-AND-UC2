@@ -27,7 +27,12 @@ export interface BrainSeed {
   categoryKeywords?: string[];
   productImage?: string;                    // viewed/posted product image → seeded for display + image pipeline
   // the buyer's OWN truth signals for THIS requirement (WhatsApp / calls) — the planner enriches/corrects from these
-  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[] };
+  buyerSignals?: {
+    whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[];
+    whatsapp_specs?: { name: string; value: string }[];   // buyer-typed specs on WhatsApp (e.g. gsm) → PREFILL
+    objections?: string[];                                 // "too far" / "high price" → planner reframes a gap
+    business_intent?: string[];                            // reselling / wholesale → flips the KYB/GST ask
+  };
 }
 
 const asArr = (x: unknown): unknown[] => (Array.isArray(x) ? x : []);
@@ -42,14 +47,20 @@ function extractBuyerSignals(p: RequirementBrainPayload): BrainSeed['buyerSignal
     .flatMap((pr) => asArr((pr as Record<string, unknown>).specs))
     .map((s) => ({ name: String((s as Record<string, unknown>).name ?? ''), value: String((s as Record<string, unknown>).value ?? '') }))
     .filter((s) => s.name && s.value).slice(0, 12);
+  // buyer-typed WhatsApp specs (e.g. {product, gsm}) → {name,value} pairs for PREFILL
+  const whatsapp_specs = asArr(wa.buyer_typed_enquiries)
+    .flatMap((e) => { const o = e as Record<string, unknown>; return Object.entries(o).filter(([k, v]) => k !== 'product' && v != null && String(v).trim()).map(([k, v]) => ({ name: k, value: String(v) })); })
+    .slice(0, 8);
   const sig = {
     whatsapp_products: asStrs(wa.products_enquired).slice(0, 8),
     call_queries: asStrs(cr.buyer_queries).slice(0, 8),
     call_application: typeof cr.intended_application === 'string' ? (cr.intended_application as string) : undefined,
-    call_specs,
+    call_specs, whatsapp_specs,
+    objections: asStrs(wa.objections).slice(0, 6),
+    business_intent: asStrs(wa.explicit_business_intent).slice(0, 6),
   };
   // only return if there's at least one real signal
-  return (sig.whatsapp_products.length || sig.call_queries.length || sig.call_application || sig.call_specs.length) ? sig : undefined;
+  return (sig.whatsapp_products.length || sig.call_queries.length || sig.call_application || sig.call_specs.length || sig.whatsapp_specs.length || sig.objections.length || sig.business_intent.length) ? sig : undefined;
 }
 
 const val = (d: Decision) => (typeof d.value === 'string' ? d.value : '');
@@ -87,7 +98,9 @@ export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
     gstAsk: m.kyb_unlock.state === 'offer',
     buyerFacts: m.buyer_facts as Record<string, unknown> | undefined,
     basket: (m.recommendations ?? []).map((r) => r.product),
-    categoryTopSpecs: m.category?.top_specs,
+    // clamp the corpus asked_pct bug (39% of categories exceed 100% — counts spec occurrences across products);
+    // clamp to <=100 so the gate + any "asked in X%" copy is never nonsensical (true corpus dedupe is a separate fix).
+    categoryTopSpecs: (m.category?.top_specs ?? []).map((s) => ({ ...s, pct: typeof s.pct === 'number' ? Math.min(100, Math.round(s.pct)) : s.pct })),
     categoryKeywords: m.category?.keywords,
     buyerSignals: extractBuyerSignals(p),
   };

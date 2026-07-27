@@ -1092,8 +1092,12 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     const merged: Record<string, string> = { ...specValues };
     for (const [k, v] of Object.entries(aiSpecValues)) if (visibleAiNames.has(k)) merged[k] = v;
     for (const [k, v] of Object.entries(extraSpecs)) if (!(k in merged)) merged[k] = v; // "Also detected" facts ship too (lossless)
+    // B1 — answer→seller: the unified planner's OPENING + GAP answers are STATED buyer facts, so they MUST reach the
+    // submitted lead (not just the screen). Keyed by the question; deduped against specs already carrying the concept.
+    if (baq?.opening?.q && baqAnswers.opening?.trim()) { const k = baq.opening.q.replace(/\?+\s*$/, '').trim(); if (k && !(k in merged)) merged[k] = baqAnswers.opening.trim(); }
+    (baq?.gaps || []).forEach((g, i) => { const a = baqAnswers[`gap${i}`]; const k = (g.q || '').replace(/\?+\s*$/, '').trim(); if (k && a && a.trim() && !(k in merged)) merged[k] = a.trim(); });
     return Object.entries(merged).filter(([, v]) => v && v.trim());
-  }, [specValues, aiSpecValues, aiSpecs, isqSpecs, extraSpecs]);
+  }, [specValues, aiSpecValues, aiSpecs, isqSpecs, extraSpecs, baq, baqAnswers]);
 
   // Compact one-liner for the on-screen "Your requirement" banner.
   const requirementSummary = useMemo(() => {

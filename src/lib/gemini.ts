@@ -1729,7 +1729,7 @@ export async function runCuratedPlanner(input: {
   categoryB2b?: unknown;
   buyerFacts?: Record<string, unknown>;
   basket?: string[];
-  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[] };
+  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[]; whatsapp_specs?: { name: string; value: string }[]; objections?: string[]; business_intent?: string[] };
   entryMode?: string;
   model?: string;
 }): Promise<CuratedPlan> {
@@ -1739,7 +1739,9 @@ export async function runCuratedPlanner(input: {
 Return ONLY JSON:
 {"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"gaps":[{"q":"...","kind":"non_spec"|"spec","why":"...","options":["..."]}],"kyb_ask":{"doc":"GST|Udyam|PAN|Company name","why":"buyer-benefit reason"}}
 RULES:
-- prefills = fill or CORRECT a field ONLY from the buyer's OWN signals below (buyer_signals / also_sourcing) — e.g. a spec the buyer typed on WhatsApp, an application they said on a call. NEVER prefill from a category norm (that is a gap/suggestion). Set corrected_from ONLY when a fresher buyer signal disagrees with an already_known value (prefer the LATEST signal). If no real buyer signal supports a value, DO NOT emit it.
+- prefills = fill or CORRECT a field ONLY from the buyer's OWN signals below (buyer_signals / also_sourcing) — e.g. buyer_signals.whatsapp_specs / call_specs are values the buyer typed/said (gsm, capacity) → PREFILL them; call_application is a use-case they stated. NEVER prefill from a category norm (that is a gap/suggestion). Set corrected_from ONLY when a fresher buyer signal disagrees with an already_known value (prefer the LATEST signal). If no real buyer signal supports a value, DO NOT emit it.
+- buyer_signals.objections (e.g. "too far","high price","no response") are the buyer's past pain — reframe ONE gap around the most relevant (e.g. "Last time sellers were too far — local suppliers only?"), never as a prefill.
+- buyer_signals.business_intent (reselling / wholesale / distribution) is explicit B2B evidence — when present, set kyb_ask even if the category signal is weak.
 - opening = ONE short intent/use-case question personalised to THIS buyer (what is it FOR / what scale / new-or-expand), inferred from basket + facts + signals. 2-4 tap options.
 - gaps = the fewest decisive questions NOT already in already_known and NOT covered by a page-1 buyer spec (judge by MEANING + overlapping options, not exact name). NON-SPEC first, then top category specs. Max 3 non-spec. Options-only (3-8 concrete chips), never open Brand/Make/Model.
 - QUANTITY lives on the landing page (a first-class field, kept from the buyer's specs). If already_known contains a quantity, NEVER ask it. If quantity is NOT known, you MAY include ONE quantity question — but ONLY when a quantity is meaningful for THIS product (a consumable / packaging / raw-material / component: yes; a one-off capital good, a machine, or a whole plant / setup: NO — never ask "how many" for a plant). Use judgement; omit it when it doesn't fit.
