@@ -16,7 +16,7 @@ import IndiaMartHeader from './IndiaMartHeader';
 import SellerSearchProgress from './SellerSearchProgress';
 import { searchSellers, type SellerResult } from '../lib/sellerSearch';
 import { analyzeImage, voiceToSpecs, hasGeminiKey, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan } from '../lib/gemini';
-import { fetchCategoryCorpus, fetchProductImages, upsizeImimg } from '../lib/enrichment';
+import { fetchCategoryCorpus, fetchCategoryTopSpecs, fetchProductImages, upsizeImimg } from '../lib/enrichment';
 import { matchUnit } from '../lib/quantity';
 import { emit, EV, emitApiError } from '../lib/emit';
 import { useToast, type ToastType } from './Toast';
@@ -232,6 +232,25 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const catFetchTok = useRef(0);
   const categoryCorpusRef = useRef<unknown>(null); // raw category corpus (or legacy intelligence obj); passed as-is to the planner
   useEffect(() => () => { catFetchTok.current++; }, []); // cancel any in-flight corpus fetch on unmount
+  // CATEGORY TOP-SPECS MUST FOLLOW THE PRODUCT THE BUYER ACTUALLY PICKED (owner, 2026-07-28).
+  // `_seed.categoryTopSpecs` is captured ONCE at mount for the engine's auto-chosen PRIMARY mcat. Pick a
+  // different card (or type a new product) and the planner was still being advised by the old category —
+  // e.g. choose "6 Gm Cup Cake Tray" (25188) and it reasoned with mcat 186822's questions. The corpus fetch
+  // below already re-keys on mcatId; this makes the distilled top_specs do the same.
+  const [catTopSpecs, setCatTopSpecs] = useState(_seed?.categoryTopSpecs);
+  const catBrainTok = useRef(0);
+  useEffect(() => () => { catBrainTok.current++; }, []);
+  useEffect(() => {
+    if (!mcatId) { setCatTopSpecs(undefined); return; }
+    if (_seed?.mcatId && mcatId === _seed.mcatId) { setCatTopSpecs(_seed.categoryTopSpecs); return; } // seed is for THIS mcat
+    setCatTopSpecs(undefined);            // wrong-category advice is worse than none — clear first, then refetch
+    const tok = ++catBrainTok.current;
+    fetchCategoryTopSpecs(mcatId).then((s) => {
+      if (catBrainTok.current !== tok) return;   // stale (mcat changed again / unmounted)
+      if (s?.length) { setCatTopSpecs(s); if (plannerFiredFor.current) { plannerFiredFor.current = ''; setAiEpoch((e) => e + 1); } } // re-plan with the RIGHT category
+    }).catch((e) => emitApiError('fetchCategoryTopSpecs', e, { mcatId }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mcatId]);
 
   const [deliveryLocation, setDeliveryLocation] = useState(_seed?.deliveryLocation ?? '');
   const [userLocation, setUserLocation] = useState('');    // the buyer's OWN city (mockup "YOUR LOCATION")
@@ -719,7 +738,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     if (deliveryLocation) filled['Delivery location'] = deliveryLocation;
     runCuratedPlanner({
       requirement: name, categoryName: categoryNameRef.current, filled, buyerSpecs: specNames, buyerSpecOptions,
-      sellerSpecs: sellerSpecsRef.current, categoryTopSpecs: _seed?.categoryTopSpecs, categoryCorpus: categoryCorpusRef.current,
+      sellerSpecs: sellerSpecsRef.current, categoryTopSpecs: catTopSpecs,   // live, re-keyed on the SELECTED mcat (not the seed's primary) categoryCorpus: categoryCorpusRef.current,
       buyerFacts: _seed?.buyerFacts, basket: _seed?.basket, buyerSignals: _seed?.buyerSignals,
       entryMode: _seed?.entryMode, model: RFQ_MODEL_SPECS,
     }).then((r) => {
