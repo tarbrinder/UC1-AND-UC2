@@ -1015,14 +1015,24 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // V3 rule (RFQModalV3.tsx:1162): anything that isn't an individual/personal/end-user is a BUSINESS role —
   // and a business buyer is asked for GST (an individual/consumer is not). "Individual Buyer" → false.
   const isBusinessRole = !!buyerType && !/individual|personal|end[\s-]?user|consumer|home/i.test(buyerType);
-  // Identity-in-planner (owner-locked 2026-07-27): GST is "handled elsewhere" — so P3 doesn't re-ask it — when
-  // either (a) it's already on file (bp/od/d, via buyerFacts) or (b) the planner promoted it onto P2 this round.
-  const gstOnFile = !!(_seed?.buyerFacts as { gst_verified?: boolean; has_gst?: boolean } | undefined)?.gst_verified
-    || !!(_seed?.buyerFacts as { gst_verified?: boolean; has_gst?: boolean } | undefined)?.has_gst;
-  const gstHandledElsewhere = gstOnFile || !!identityAsk;
-  // "About You" disappears entirely (owner: "handle for UI when one or more all section are hidden") only once
-  // EVERY field in it is handled upstream — Business Type known, and GST either not applicable or handled above.
-  const aboutYouHandled = !!buyerType && (!isBusinessRole || gstHandledElsewhere);
+  // ── P3 identity visibility, derived PER FIELD (owner-locked 2026-07-27; corrected 2026-07-28) ──────────────
+  // The section-level hide MUST be derived from the per-field flags below, never hand-written — the first cut of
+  // this hid the whole "About You" card while Industry was still blank-and-unhandled. Two distinct concepts:
+  //   • ASKED elsewhere  → hide the question (genuine double-ask prevention: the planner promoted it to P2).
+  //   • KNOWN from file  → do NOT hide. Render it back as a confirm/badge WITH provenance. Hiding a prefill means
+  //     the buyer never sees what we assumed, can't correct it, and TUS's CONFIRMED stage can never fire on it.
+  const bfIdent = _seed?.buyerFacts as { gst_verified?: boolean; has_gst?: boolean; business_type?: string } | undefined;
+  const gstOnFile = !!bfIdent?.gst_verified || !!bfIdent?.has_gst;
+  const buyerTypeFromProfile = !!bfIdent?.business_type && buyerType.toLowerCase() === bfIdent.business_type.toLowerCase();
+  const showGstQuestion = isBusinessRole && !gstOnFile && !identityAsk;  // asked on P2, or on file → no question here
+  const showGstBadge = isBusinessRole && gstOnFile;                       // known → shown back as a verified badge
+  const showGstAnswered = isBusinessRole && !gstOnFile && !!identityAsk && gstRegistered !== null; // answered on P2 → echo it
+  // Business type + Industry are per-ORDER facts (a registered Manufacturer may buy as a Wholesaler on this order,
+  // and Industry is on file nowhere) — so they always render, prefilled+provenanced where we know them, never hidden.
+  const showBuyerTypeField = true, showIndustryField = true;
+  // The card renders iff at least ONE child does. Today that's always — the honest outcome for this buyer, not a bug.
+  // The machinery is real: flip a child flag off and the header disappears with it instead of stranding an empty box.
+  const aboutYouHasContent = showBuyerTypeField || showIndustryField || showGstQuestion || showGstBadge || showGstAnswered;
 
   const scoreDetails = useMemo(() => {
     // P1-109: score the SAME arrays the pages render (visible), not the raw arrays — else the dial can stick
@@ -1575,9 +1585,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   );
 
   // ── More Details (stage 'more') = About You. Logged-out shows the Login button + autofetch banner.
-  // Identity-in-planner (owner-locked 2026-07-27): the WHOLE card hides once every field in it has been
-  // handled upstream (aboutYouHandled) — "handle for UI when one or more all section are hidden" (owner). ──
-  const moreBody = aboutYouHandled ? null : (
+  // Identity-in-planner (owner-locked 2026-07-27; CORRECTED 2026-07-28): the card hides only when EVERY child
+  // hides (aboutYouHasContent, derived per-field above). A known-from-profile fact is shown BACK with its source,
+  // never silently hidden — hiding a prefill breaks the trust receipt and the CONFIRMED stage of TUS. ──
+  const moreBody = !aboutYouHasContent ? null : (
     <div className="space-y-4">
       <div className="rounded-xl border border-gray-200 p-4 sm:p-5 shadow-[0_1px_3px_0_rgba(30,42,58,0.06)]">
         <div className="flex items-start justify-between gap-3 mb-4">
@@ -1587,19 +1598,42 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
             : <button type="button" onClick={handleLogin} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-600 text-white text-xs font-semibold hover:bg-teal-700 shrink-0"><LogIn size={13} /> Login</button>}
         </div>
         <div className="flex flex-col sm:grid sm:grid-cols-2 gap-4 sm:gap-6">
+          {showBuyerTypeField && (
           <div data-flash="buyer-type" className={flashCls('buyer-type')}>
-            <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">Business type</p>
+            <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">Business type
+              {/* provenance, not a silent fill — the buyer can see WHY it's pre-selected and change it for THIS order */}
+              {buyerTypeFromProfile && <span className="ml-2 normal-case font-normal text-teal-600">✦ from your profile</span>}
+            </p>
             <div className="flex flex-wrap gap-2">{BUSINESS_TYPES.map((t) => <RadioChip key={t} label={t} selected={buyerType === t} onClick={() => setBuyerType(buyerType === t ? '' : t)} />)}</div>
           </div>
+          )}
+          {showIndustryField && (
           <div data-flash="profile-detail" className={flashCls('profile-detail')}>
             <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">Industry</p>
             <input type="text" aria-label="Industry" value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g., Construction" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
           </div>
+          )}
         </div>
-        {/* GST — asked only for a BUSINESS role (every Business type except "Individual Buyer"), per the V3 rule,
-            AND only if it isn't already handled elsewhere (already on file, or promoted+asked on P2 — owner-locked
-            2026-07-27). Golden Rule: gstRegistered starts null (UNKNOWN) — we never assume "No". */}
-        {isBusinessRole && !gstHandledElsewhere && (
+        {/* GST, three mutually-exclusive states (V3 rule: business roles only — never an Individual Buyer):
+            BADGE     → already verified on file (bp/od/d). Shown back, never re-asked, never silently dropped.
+            ECHO      → the planner promoted the ask onto P2 and the buyer answered it there — confirm it landed.
+            QUESTION  → genuinely unknown and not asked anywhere else. Golden Rule: null = UNKNOWN, never "No". */}
+        {showGstBadge && (
+          <div data-flash="gst" className={`mt-4 pt-4 border-t border-gray-100 ${flashCls('gst')}`}>
+            <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">GST</p>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-3 py-1.5 text-[13px] font-medium text-green-700"><CheckCircle2 size={14} /> GST verified <span className="font-normal text-green-600/80">· from your IndiaMART profile</span></span>
+          </div>
+        )}
+        {showGstAnswered && (
+          <div data-flash="gst" className={`mt-4 pt-4 border-t border-gray-100 ${flashCls('gst')}`}>
+            <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">GST</p>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-teal-200 bg-teal-50 px-3 py-1.5 text-[13px] font-medium text-teal-800"><CheckCircle2 size={14} /> {gstRegistered ? 'Registered' : 'Not registered'} <span className="font-normal text-teal-700/80">· you answered this above</span></span>
+            {gstRegistered === true && (
+              <input type="text" aria-label="GST number" value={gstNumber} onChange={(e) => setGstNumber(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 15))} placeholder="GST number (15 digits)" className="w-full mt-2 border border-gray-200 rounded-lg px-3 py-2.5 text-base sm:text-sm outline-none focus:ring-2 focus:ring-teal-400 focus:border-teal-400" />
+            )}
+          </div>
+        )}
+        {showGstQuestion && (
           <div data-flash="gst" className={`mt-4 pt-4 border-t border-gray-100 animate-field-in ${flashCls('gst')}`}>
             <p className="text-xs uppercase font-semibold text-gray-500 mb-1 tracking-wide">GST Registered?</p>
             <p className="text-[11px] text-gray-500 mb-2">Only shared with suppliers you contact.</p>
