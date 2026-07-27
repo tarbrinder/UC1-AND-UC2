@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
-  ArrowLeft, ArrowRight, Search, Mic, Camera, X, Pencil, MapPin, Star, User, Send, Phone,
+  ArrowLeft, ArrowRight, Search, Mic, Camera, X, Pencil, MapPin, Star, Send, Phone,
   ChevronLeft, ChevronRight, ChevronDown, ChevronUp, BadgeCheck, ShieldCheck, Award, Package, MessageCircle, Clock, CreditCard,
   LogIn, CheckCircle2, SlidersHorizontal, ListPlus, Truck, LocateFixed, RotateCcw, type LucideIcon,
 } from 'lucide-react';
@@ -14,7 +14,7 @@ import OTPGate from './OTPGate';
 import VoiceRecorder from './VoiceRecorder';
 import IndiaMartHeader from './IndiaMartHeader';
 import SellerSearchProgress from './SellerSearchProgress';
-import { searchSellers, type SellerResult } from '../lib/sellerSearch';
+import { searchSellers, curateSellers, type SellerResult, type SellerPick, type RibbonTone } from '../lib/sellerSearch';
 import { analyzeImage, voiceToSpecs, hasGeminiKey, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchCategoryTopSpecs, fetchProductImages, upsizeImimg } from '../lib/enrichment';
 import { matchUnit } from '../lib/quantity';
@@ -541,6 +541,12 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       quantity,
       quantityUnit: unit,
       qtyMeaningful: qtyIsMeaningful(quantity),
+      // REAL buyer city — every dist_km on the results page is measured from this (it used to be a hardcoded
+      // Ghaziabad fixture, so distances were fiction). Delivery city first (that's where the goods must land),
+      // then the buyer's own city, then the IP-detected one; sellerSearch falls back to the fixture only if all
+      // three are still empty. ⚑ Known limit: this is read at FIRE time (entering the last page) while the city
+      // inputs live ON that page — a city edited afterwards does not re-fire the ~30s search.
+      buyerCity: (deliveryLocation || userLocation || detectedCity).trim(),
     }, 60000)
       .then((res) => { if (run === sellerRunRef.current) { setSellerResults(res.sellers); setSellerStatus('done'); } })
       .catch((e) => { if (run === sellerRunRef.current) setSellerStatus('error'); emitApiError('sellerSearch', e, { mcatId }); });
@@ -738,7 +744,12 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     if (deliveryLocation) filled['Delivery location'] = deliveryLocation;
     runCuratedPlanner({
       requirement: name, categoryName: categoryNameRef.current, filled, buyerSpecs: specNames, buyerSpecOptions,
-      sellerSpecs: sellerSpecsRef.current, categoryTopSpecs: catTopSpecs,   // live, re-keyed on the SELECTED mcat (not the seed's primary) categoryCorpus: categoryCorpusRef.current,
+      sellerSpecs: sellerSpecsRef.current,
+      // catTopSpecs is LIVE — re-keyed on the SELECTED mcat, not the seed's primary (see the effect near `catBrainTok`).
+      // NOTE: keep these on their own lines. An inline `//` here previously swallowed `categoryCorpus` to end-of-line,
+      // so the corpus was fetched, stored in the ref, and then silently never passed to the planner.
+      categoryTopSpecs: catTopSpecs,
+      categoryCorpus: categoryCorpusRef.current,
       buyerFacts: _seed?.buyerFacts, basket: _seed?.basket, buyerSignals: _seed?.buyerSignals,
       entryMode: _seed?.entryMode, model: RFQ_MODEL_SPECS,
     }).then((r) => {
@@ -1683,6 +1694,127 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // error/empty→graceful message). ⚑ DEV-TODO: "Send Enquiry" / Call / WhatsApp are still DEMO CTAs — wire the
   //   real per-seller dispatch using s.id (glusrid); the BuyLead is already generated at submit via
   //   dispatchBuyLead, so gate "Enquiry sent" on a real POST when that endpoint is provided.
+  //
+  // SHAPE OF THE PAGE (owner: "top 3 as is order, and top 3 by location"): we no longer dump all 20 rows into one
+  // carousel. `curateSellers` picks the top 3 by final_rank (hero carousel) + the top 3 by distance (compact rows
+  // below), DE-DUPLICATED — a seller that earns both appears once, in the hero, carrying both ribbons. Every ribbon
+  // and chip is derived from a field that actually exists in the response; the payload carries NO price, so there
+  // is no price ribbon and no "Get Best Price" pill (it used to be a hardcoded string on every card — removed, it
+  // was identical on all of them and occupied the slot the earned ribbons now use).
+  const curated = curateSellers(sellerResults, (deliveryLocation || userLocation || detectedCity).trim());
+
+  const RIBBON_CLS: Record<RibbonTone, string> = {
+    match: 'bg-teal-600 text-white',
+    near: 'bg-gray-900/85 text-white',
+    rated: 'bg-amber-500 text-white',
+    tenure: 'bg-white/95 text-gray-700 border border-gray-200',
+  };
+  const RIBBON_ICON: Record<RibbonTone, LucideIcon> = { match: Award, near: LocateFixed, rated: Star, tenure: Clock };
+
+  const sellerRibbons = (s: SellerPick, cls: string) => (s.ribbons.length === 0 ? null : (
+    <div className={`flex flex-wrap items-center gap-1.5 ${cls}`}>
+      {s.ribbons.map((r) => { const Ico = RIBBON_ICON[r.tone]; return (
+        <span key={r.label} className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold leading-none shadow-sm ${RIBBON_CLS[r.tone]}`}>
+          <Ico className="w-3 h-3 shrink-0" /> {r.label}
+        </span>
+      ); })}
+    </div>
+  ));
+
+  // City + distance. Distance renders ONLY for a real positive dist_km; a same-city seller (dist_km comes back
+  // null there) says so in words instead of pretending to be "0 km"; an unknown distance says nothing at all.
+  const sellerPlace = (s: SellerPick) => (
+    <p className="flex items-center gap-1 text-[13px] text-gray-500 min-w-0">
+      <MapPin className="w-3.5 h-3.5 shrink-0" />
+      <span className="truncate">{s.city || '—'}</span>
+      {s.distanceKm != null && s.distanceKm > 0
+        ? <span className="shrink-0 text-gray-400">· {Math.round(s.distanceKm)} km away</span>
+        : s.sameCity ? <span className="shrink-0 font-medium text-teal-700">· in your city</span> : null}
+    </p>
+  );
+
+  const sellerChips = (s: SellerPick) => (
+    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px]">
+      {s.rating != null && <span className="flex items-center gap-1 font-medium text-gray-700"><Star className="w-3.5 h-3.5 text-yellow-400 fill-yellow-400" /> {s.rating}{s.reviews > 0 ? <span className="font-normal text-gray-400"> ({s.reviews})</span> : null}</span>}
+      {s.trustSeal && <span className="flex items-center gap-1 text-amber-600"><Award className="w-3.5 h-3.5" /> TrustSEAL</span>}
+      {s.gst && <span className="flex items-center gap-1 text-green-700"><BadgeCheck className="w-3.5 h-3.5" /> GST</span>}
+      {s.tenureYears != null && s.tenureYears > 0 && <span className="flex items-center gap-1 text-gray-500"><Clock className="w-3.5 h-3.5" /> {s.tenureYears} yrs</span>}
+    </div>
+  );
+
+  // Shared CTA block (unchanged behaviour: expand → prefilled enquiry → Send / WhatsApp; Call is a demo stub).
+  const sellerCta = (s: SellerPick, compact: boolean) => {
+    const key = s.id || s.name;
+    const sent = sentTo.has(key);
+    if (openEnquiry === key) {
+      return (
+        <div className="pt-2 space-y-2 animate-field-in">
+          {/* Cancel lives on the label row, not in the action row — three buttons don't fit an 86%-wide card at 390px. */}
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Your enquiry</p>
+            <button type="button" onClick={() => setOpenEnquiry(null)} className="text-[11px] font-medium text-gray-400 hover:text-gray-600 px-1 py-0.5">Cancel</button>
+          </div>
+          <textarea readOnly rows={compact ? 4 : 5} value={`Hi ${s.name}, I need:\n${buildRequirementText()}`} className="w-full text-xs text-gray-700 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 resize-none" />
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => { setSentTo((p) => new Set(p).add(key)); setOpenEnquiry(null); showFeedback(`Enquiry sent to ${s.name}`, 'success'); }} className="flex-1 py-2.5 min-h-[44px] rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold">Send</button>
+            {isMobile && <a href={waDeeplink()} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] rounded-xl bg-[#25D366] text-white text-sm font-semibold shrink-0"><MessageCircle className="w-4 h-4" /> WhatsApp</a>}
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="flex items-center gap-2 pt-2">
+        <button type="button" onClick={() => setOpenEnquiry(key)} disabled={sent} className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 min-h-[44px] rounded-xl text-sm font-semibold ${sent ? 'bg-green-50 text-green-700' : 'bg-teal-600 hover:bg-teal-700 text-white'}`}>{sent ? '✓ Enquiry sent' : <><Send className="w-3.5 h-3.5" /> Send Enquiry</>}</button>
+        <button type="button" aria-label={`Call ${s.name}`} className="w-11 h-11 shrink-0 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-600"><Phone className="w-4 h-4" /></button>
+      </div>
+    );
+  };
+
+  // Hero card — the top-3 by rank. Big 4:3 photo with the earned ribbons overlaid.
+  const sellerHeroCard = (s: SellerPick, idx: number) => {
+    const own = !!s.image;                                          // the seller's OWN listing photo…
+    const img = s.image || productImages[idx] || productImageUrl;   // …else a category-level stand-in, labelled as such
+    return (
+      <div key={s.id || s.name} className={`snap-center shrink-0 flex flex-col ${isMobile ? 'w-[86%]' : 'w-[290px]'} bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden`}>
+        <div className="relative bg-gray-50 shrink-0" style={{ aspectRatio: '4/3' }}>
+          {sellerRibbons(s, 'absolute top-3 left-3 right-3 z-10')}
+          {img
+            ? <><img src={img} alt="" loading="lazy" className="w-full h-full object-contain p-4" />{!own && <span className="absolute bottom-2 left-2 z-10 text-[10px] text-gray-500 bg-white/85 px-1.5 py-0.5 rounded">Representative image</span>}</>
+            : <div className="w-full h-full flex items-center justify-center"><Package className="w-10 h-10 text-gray-300" /></div>}
+        </div>
+        <div className="p-4 pt-3 flex flex-col flex-1 gap-1.5">
+          <p className="font-bold text-gray-800 leading-snug line-clamp-2">{s.name}</p>
+          {sellerPlace(s)}
+          {sellerChips(s)}
+          <div className="flex-1" />
+          {sellerCta(s, false)}
+        </div>
+      </div>
+    );
+  };
+
+  // Compact row — the nearest-by-distance picks that aren't already in the hero. Thumbnail + facts, no hero photo:
+  // proximity is the reason they're here, so the layout leads with the distance, not the picture.
+  const sellerNearRow = (s: SellerPick, idx: number) => {
+    const img = s.image || productImages[idx] || productImageUrl;
+    return (
+      <div key={s.id || s.name} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-3 sm:p-4">
+        <div className="flex items-start gap-3">
+          <div className="w-14 h-14 sm:w-16 sm:h-16 shrink-0 rounded-xl bg-gray-50 border border-gray-100 overflow-hidden flex items-center justify-center">
+            {img ? <img src={img} alt="" loading="lazy" className="w-full h-full object-contain p-1" /> : <Package className="w-6 h-6 text-gray-300" />}
+          </div>
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <p className="font-bold text-gray-800 text-sm leading-snug line-clamp-2">{s.name}</p>
+            {sellerPlace(s)}
+            {sellerChips(s)}
+            {sellerRibbons(s, 'pt-0.5')}
+          </div>
+        </div>
+        {sellerCta(s, true)}
+      </div>
+    );
+  };
+
   const resultsBody = (
     <div className="space-y-4">
       <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-3 flex items-center justify-between gap-3">
@@ -1704,51 +1836,57 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
         </div>
       )}
       {sellerStatus === 'done' && sellerResults.length > 0 && (<>
-      <div className="flex items-center justify-between">
-        <div><h3 className="text-base font-bold text-gray-800">Curated Sellers For You</h3><p className="text-xs text-gray-500">{sellerResults.length} verified supplier{sellerResults.length > 1 ? 's' : ''} matched to your requirement</p></div>
-        {!isMobile && <div className="flex gap-1.5"><button type="button" onClick={() => scrollCard(-1)} className="w-8 h-8 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50"><ChevronLeft className="w-4 h-4" /></button><button type="button" onClick={() => scrollCard(1)} className="w-8 h-8 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50"><ChevronRight className="w-4 h-4" /></button></div>}
+      {/* Page header — states plainly that this is a shortlist, and out of how many. */}
+      <div>
+        <h3 className="text-base font-bold text-gray-800">Curated sellers for you</h3>
+        <p className="text-xs text-gray-500 mt-0.5">
+          {curated.shown} handpicked from {curated.ranked} verified supplier{curated.ranked > 1 ? 's' : ''} matched to your requirement
+        </p>
       </div>
-      <div ref={cardScrollRef} onScroll={(e) => setCardIdx(Math.round(e.currentTarget.scrollLeft / (e.currentTarget.clientWidth * 0.86)))} className="flex gap-3 overflow-x-auto snap-x snap-mandatory -mx-1 px-1 pb-2 scroll-smooth">
-        {sellerResults.map((s, si) => {
-          const key = s.id || s.name; const sent = sentTo.has(key); const open = openEnquiry === key;
-          const cardImg = s.image || productImages[si] || productImageUrl; // seller's own listing photo, then fallbacks
-          return (
-            <div key={key} className={`snap-center shrink-0 ${isMobile ? 'w-[86%]' : 'w-[300px]'} bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden`}>
-              <div className="relative bg-gray-50" style={{ aspectRatio: '4/3' }}>
-                <span className="absolute top-3 left-3 z-10 bg-black/80 text-white text-xs font-semibold px-2.5 py-1 rounded-full">Get Best Price</span>
-                {cardImg ? <><img src={cardImg} alt="" className="w-full h-full object-contain p-4" /><span className="absolute bottom-2 left-2 z-10 text-[10px] text-gray-500 bg-white/85 px-1.5 py-0.5 rounded">Representative image</span></> : <div className="w-full h-full flex items-center justify-center"><Package className="w-10 h-10 text-gray-300" /></div>}
-              </div>
-              <div className="p-4 space-y-2">
-                <p className="font-bold text-gray-800">{s.name}</p>
-                <p className="flex items-center gap-1 text-sm text-gray-500"><MapPin className="w-3.5 h-3.5" /> {s.city}{s.distanceKm != null && s.distanceKm > 0 ? ` · ${Math.round(s.distanceKm)} km` : ''}</p>
-                <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-xs text-gray-600">
-                  {s.gst && <span className="flex items-center gap-1"><BadgeCheck className="w-3.5 h-3.5 text-green-600" /> GST</span>}
-                  {s.trustSeal && <span className="flex items-center gap-1"><Award className="w-3.5 h-3.5 text-amber-500" /> TrustSEAL</span>}
-                </div>
-                <div className="flex items-center gap-3 text-xs text-gray-500">
-                  {s.tenureYears != null && <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> {s.tenureYears} yrs</span>}
-                  {s.rating != null && <span className="flex items-center gap-1"><Star className="w-3.5 h-3.5 text-yellow-400 fill-yellow-400" /> {s.rating}{s.reviews > 0 ? ` (${s.reviews})` : ''}</span>}
-                </div>
-                {open ? (
-                  <div className="pt-1 space-y-2 animate-field-in">
-                    <textarea readOnly rows={5} value={`Hi ${s.name}, I need:\n${buildRequirementText()}`} className="w-full text-xs text-gray-700 border border-gray-200 rounded-xl px-3 py-2 bg-gray-50 resize-none" />
-                    <div className="flex items-center gap-2">
-                      <button type="button" onClick={() => { setSentTo((p) => new Set(p).add(key)); setOpenEnquiry(null); showFeedback(`Enquiry sent to ${s.name}`, 'success'); }} className="flex-1 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold">Send</button>
-                      {isMobile && <a href={waDeeplink()} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-[#25D366] text-white text-sm font-semibold"><MessageCircle className="w-4 h-4" /> WhatsApp</a>}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 pt-1">
-                    <button type="button" onClick={() => setOpenEnquiry(key)} disabled={sent} className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-semibold ${sent ? 'bg-green-50 text-green-700' : 'bg-teal-600 hover:bg-teal-700 text-white'}`}>{sent ? '✓ Enquiry sent' : <><Send className="w-3.5 h-3.5" /> Send Enquiry</>}</button>
-                    <button type="button" aria-label="Call" className="w-10 h-10 shrink-0 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-600"><Phone className="w-4 h-4" /></button>
-                  </div>
-                )}
-              </div>
+
+      {/* ── ① Best matches — the top 3 by the API's own final_rank, kept in that order. Hero carousel. ── */}
+      <section aria-label="Best matched sellers">
+        <div className="flex items-end justify-between gap-3 mb-2">
+          <div className="min-w-0">
+            <h4 className="flex items-center gap-1.5 text-sm font-bold text-gray-800"><Award className="w-4 h-4 text-teal-600 shrink-0" /> Best matches</h4>
+            <p className="text-[11px] text-gray-500">Closest fit to your specs, quantity &amp; category</p>
+          </div>
+          {!isMobile && curated.best.length > 1 && (
+            <div className="flex gap-1.5 shrink-0">
+              <button type="button" onClick={() => scrollCard(-1)} aria-label="Previous seller" className="w-8 h-8 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50"><ChevronLeft className="w-4 h-4" /></button>
+              <button type="button" onClick={() => scrollCard(1)} aria-label="Next seller" className="w-8 h-8 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50"><ChevronRight className="w-4 h-4" /></button>
             </div>
-          );
-        })}
-      </div>
-      <div className="flex justify-center gap-1.5">{sellerResults.map((_, i) => <span key={i} className={`h-1.5 rounded-full transition-all ${i === cardIdx ? 'w-5 bg-teal-500' : 'w-1.5 bg-gray-200'}`} />)}</div>
+          )}
+        </div>
+        {/* The step is one CARD + gap, not 86% of the viewport — on desktop the cards are a fixed 290px, so the
+            old viewport-based divisor pinned the dots to 0 and they never moved. Clamped to the 3 hero cards. */}
+        <div ref={cardScrollRef} className="flex items-stretch gap-3 overflow-x-auto snap-x snap-mandatory -mx-1 px-1 pb-2 scroll-smooth scroll-auto-hide"
+          onScroll={(e) => { const el = e.currentTarget; const step = (isMobile ? el.clientWidth * 0.86 : 290) + 12; setCardIdx(Math.max(0, Math.min(curated.best.length - 1, Math.round(el.scrollLeft / step)))); }}>
+          {curated.best.map((s, i) => sellerHeroCard(s, i))}
+        </div>
+        {curated.best.length > 1 && (
+          <div className="flex justify-center gap-1.5 mt-1">
+            {curated.best.map((s, i) => <span key={s.id || s.name} className={`h-1.5 rounded-full transition-all ${i === Math.min(cardIdx, curated.best.length - 1) ? 'w-5 bg-teal-500' : 'w-1.5 bg-gray-200'}`} />)}
+          </div>
+        )}
+      </section>
+
+      {/* ── ② Nearest to you — top 3 by distance, MINUS anyone already shown above (no seller appears twice; a
+             seller that earned both places keeps both ribbons on its hero card). Hidden entirely when the search
+             came back with no usable distance at all, rather than faking a proximity list. ── */}
+      {curated.nearest.length > 0 && (
+        <section aria-label="Nearest sellers" className="pt-1">
+          <div className="mb-2">
+            <h4 className="flex items-center gap-1.5 text-sm font-bold text-gray-800"><LocateFixed className="w-4 h-4 text-teal-600 shrink-0" /> Nearest to you</h4>
+            <p className="text-[11px] text-gray-500">Sorted by distance from your location — quicker delivery, easier to visit</p>
+          </div>
+          <div className="space-y-2.5">{curated.nearest.map((s, i) => sellerNearRow(s, curated.best.length + i))}</div>
+        </section>
+      )}
+
+      <p className="text-[11px] text-gray-400 text-center pt-1">
+        Your requirement is submitted — more quotes will reach you on WhatsApp &amp; email.
+      </p>
       </>)}
     </div>
   );

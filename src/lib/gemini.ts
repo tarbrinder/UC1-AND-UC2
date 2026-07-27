@@ -76,7 +76,9 @@ export const PROMPTS_VERSION = '2026.06.14';
 const PROMPT_VER: Record<string, string> = {
   planRequirement: 'plan-v7', deriveIntent: 'intent-v5', refineQuestions: 'refine-v2',
   inferSpecsFromApplication: 'cascade-v3', deriveBuyerTwin: 'twin-v1.2', deriveBuyerProfile: 'profile-v1',
-  getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1', extractBuyerProfile: 'extract-v43', // MUST mirror EXTRACT_PROMPT_VERSION (v43: products_of_interest infers brand/colloquial→category+implication; v42: buyer_maturity three-way no-fabricate + requirement-fields omit-without-signal; v41: field-level namesake flags consumed from n8n v44 websearch-parse — flagged web fields reach the LLM as ⚠ unverified leads, never silent facts; v40: ID-first web anchors + PAN-alone gate + jargon ban; v39: identity phone-holder-vs-GST-owner + email-domain institutional + web key-people reconciliation; v38: +company_reg (IndiaMART verified GST/KYB — constitution·nature·turnover-band·reg-year·PAN·partners·reg-IDs, PRIMARY authority) + buyerprofile (business_type·MCAT interests·products-sold[also-seller]·cleaned social·geo·activity·verification) composers+source-defs; trust badge TrustSEAL(6-9)/Verified-Business(4-5)/Verified(mob+email)/Unverified; v37: sourcing_channel names web-found marketplaces; v36: +deal_readiness + primary_language keys, card 360° reorg; v35: +use_case; v34: PNS-location aggregate lock; v33: source-policy architecture; v32: clean sectioned structure; v31: SUPERSET — frontend extract also outputs the dashboard-card slots (business_type/business_stage/annual_turnover/annual_procurements/sourcing_channel/preferred_suppliers/procurement_approach/target_customers/selling_channel/sales_geography/business_story) so one client call fills UC1 + the card; location P0 keeps a PAN-only buyer's registered city. v30: RECHECK MISSES — removed false "GST number not in this pull" clause when GSTIN present (N2); procurement_model=Bulk requires buyer's own commercial-scale QTY not seller/entity status (N4); communication responsiveness grounded in real two-way behavior + language only from buyer-authored signal (N5). v29: LOCATION-LEAK BLOCK — a city appearing ONLY inside an OUR-outbound fN is never a sourcing signal; emit sourcing city only from a buyer-side signal, else operating-city-alone; fixes the live "Sources from New Delhi" fabrication. v27: live-audit hardening — LOCATION sourcing-vs-operating + conflict-stays-unresolved + no-OUR-outbound-citation; COVERAGE carry concrete specs (GSM/machine dims); INTENT-vs-open-blockers; no internal mechanics (fallback/SIM-circle) in values; discrete confidence ladder {50,60,70,85,95}; name-a-vendor-only-if-cited. v26: fast-mode Gemini 2.5 Flash + Google Search grounding web engine self-reports match_confidence/matched_on/turnover_source; composeWebOsint emits a verdict line FIRST + WITHHOLDS unanchored/namesake web from the bundle; webVerified honors match_confidence!=='none'. v25: call evidence = Go-schema structured extraction (products/specs/price/qty · buyer_intent · call_outcome · B2B/persona/order/repeat · deal_readiness · payment · language) from calls[].extraction — n8n v18 audio nodes do full structured extraction per the Go call-extractor, not just transcription; transcript_en fallback kept; v24: prompt hygiene — glossary hoisted to top (define-before-use) + SYNTHESIZE-don't-ECHO + NAME-THE-VENDOR (Befisc vs Sign3) global rules + web_osint reframed to verify-then-use (per-field anchor check, no cap) + composeWebOsint reads basis[]/proofs[] → citations to LLM; v23: noise-strip + curated csl/external/identity/pns composers + widened SKIP_KEY + TIMELINE/NUMBERS/SELLER-GLID rules; v22: web_osint LOW-confidence + strict corroboration-gate (matches verified GST/Udyam/PAN/name/location or IGNORE; caps ~45; never overrides KYB); v21: Udyam/MSME source-def — enterprise_type=size + NIC industry + org type + address triangulation; v20: Web OSINT Parallel.ai deep web-search — footprint/scale/legitimacy, corroboration + identity_confidence, never overrides KYB; v19: Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union/gst_detail_union 3-vendor consensus + agreement→confidence + pan_type authority; v18: IDfy sources live end-to-end — pan_gst_idfy/gst_cert_idfy/epfo now emitted by backend v15; v17: PNS calls source — sourcing basket/persona + circle→location + offer_id⋈BuyLead + transcript→UC2; v16: IDfy triangulation source-defs; v15: PAN/GSTIN entity-char → b2b_b2c; v14: verified-address lock on operating city; v13: Call-recordings source-def + composeCalls; v12: Befisc GST Advanced source-def → B2B/role/sub_industry/hard-city; v11: clean `sources` catalog, never external/profile; v10: recurring guard · req-scoped purchase_frequency · Preferred sourcing city · strip is_expired · retail_wholesale · b2b_b2c)
+  getSpecHints: 'spechints-v2', classifyFieldTypes: 'biasgate-v1',
+  'curated-planner': 'curated-v2', // v2 (2026-07-28 audit §3): +UNDERSTAND layer + question-competition ledger, XML-fenced data (corpus last), input glossary, worked example, cold-buyer path, INDIA_CTX restored, jargon-suppression line replaced with a positive language rule.
+  extractBuyerProfile: 'extract-v43', // MUST mirror EXTRACT_PROMPT_VERSION (v43: products_of_interest infers brand/colloquial→category+implication; v42: buyer_maturity three-way no-fabricate + requirement-fields omit-without-signal; v41: field-level namesake flags consumed from n8n v44 websearch-parse — flagged web fields reach the LLM as ⚠ unverified leads, never silent facts; v40: ID-first web anchors + PAN-alone gate + jargon ban; v39: identity phone-holder-vs-GST-owner + email-domain institutional + web key-people reconciliation; v38: +company_reg (IndiaMART verified GST/KYB — constitution·nature·turnover-band·reg-year·PAN·partners·reg-IDs, PRIMARY authority) + buyerprofile (business_type·MCAT interests·products-sold[also-seller]·cleaned social·geo·activity·verification) composers+source-defs; trust badge TrustSEAL(6-9)/Verified-Business(4-5)/Verified(mob+email)/Unverified; v37: sourcing_channel names web-found marketplaces; v36: +deal_readiness + primary_language keys, card 360° reorg; v35: +use_case; v34: PNS-location aggregate lock; v33: source-policy architecture; v32: clean sectioned structure; v31: SUPERSET — frontend extract also outputs the dashboard-card slots (business_type/business_stage/annual_turnover/annual_procurements/sourcing_channel/preferred_suppliers/procurement_approach/target_customers/selling_channel/sales_geography/business_story) so one client call fills UC1 + the card; location P0 keeps a PAN-only buyer's registered city. v30: RECHECK MISSES — removed false "GST number not in this pull" clause when GSTIN present (N2); procurement_model=Bulk requires buyer's own commercial-scale QTY not seller/entity status (N4); communication responsiveness grounded in real two-way behavior + language only from buyer-authored signal (N5). v29: LOCATION-LEAK BLOCK — a city appearing ONLY inside an OUR-outbound fN is never a sourcing signal; emit sourcing city only from a buyer-side signal, else operating-city-alone; fixes the live "Sources from New Delhi" fabrication. v27: live-audit hardening — LOCATION sourcing-vs-operating + conflict-stays-unresolved + no-OUR-outbound-citation; COVERAGE carry concrete specs (GSM/machine dims); INTENT-vs-open-blockers; no internal mechanics (fallback/SIM-circle) in values; discrete confidence ladder {50,60,70,85,95}; name-a-vendor-only-if-cited. v26: fast-mode Gemini 2.5 Flash + Google Search grounding web engine self-reports match_confidence/matched_on/turnover_source; composeWebOsint emits a verdict line FIRST + WITHHOLDS unanchored/namesake web from the bundle; webVerified honors match_confidence!=='none'. v25: call evidence = Go-schema structured extraction (products/specs/price/qty · buyer_intent · call_outcome · B2B/persona/order/repeat · deal_readiness · payment · language) from calls[].extraction — n8n v18 audio nodes do full structured extraction per the Go call-extractor, not just transcription; transcript_en fallback kept; v24: prompt hygiene — glossary hoisted to top (define-before-use) + SYNTHESIZE-don't-ECHO + NAME-THE-VENDOR (Befisc vs Sign3) global rules + web_osint reframed to verify-then-use (per-field anchor check, no cap) + composeWebOsint reads basis[]/proofs[] → citations to LLM; v23: noise-strip + curated csl/external/identity/pns composers + widened SKIP_KEY + TIMELINE/NUMBERS/SELLER-GLID rules; v22: web_osint LOW-confidence + strict corroboration-gate (matches verified GST/Udyam/PAN/name/location or IGNORE; caps ~45; never overrides KYB); v21: Udyam/MSME source-def — enterprise_type=size + NIC industry + org type + address triangulation; v20: Web OSINT Parallel.ai deep web-search — footprint/scale/legitimacy, corroboration + identity_confidence, never overrides KYB; v19: Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union/gst_detail_union 3-vendor consensus + agreement→confidence + pan_type authority; v18: IDfy sources live end-to-end — pan_gst_idfy/gst_cert_idfy/epfo now emitted by backend v15; v17: PNS calls source — sourcing basket/persona + circle→location + offer_id⋈BuyLead + transcript→UC2; v16: IDfy triangulation source-defs; v15: PAN/GSTIN entity-char → b2b_b2c; v14: verified-address lock on operating city; v13: Call-recordings source-def + composeCalls; v12: Befisc GST Advanced source-def → B2B/role/sub_industry/hard-city; v11: clean `sources` catalog, never external/profile; v10: recurring guard · req-scoped purchase_frequency · Preferred sourcing city · strip is_expired · retail_wholesale · b2b_b2c)
   offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v10', // audit 2026-07-13: mirror UC2_PROMPT_VERSION (was stale v9; lib is v10 — telemetry logged the wrong version). v10: plain-layman-English; v9: date-matched call transcript; v8: "Preferred sourcing city"
 
 };
@@ -1711,7 +1713,32 @@ Rules: NEVER ask anything already in already_known. Plain buyer words, no jargon
 // already known, (d) decides an optional identity ask. Objective = maximise understanding, minimum effort.
 // Firewall: prefills come ONLY from the buyer's own stated signals (a category norm is a SUGGEST-gap, never
 // a prefill); a grounding guard drops any prefill value not backed by a real signal token.
+// UNDERSTAND layer (north-star pillar 2 · audit §2.3 / §5.1). The planner's READ of the buyer, emitted
+// BEFORE any question is scored, answering the north-star's nine questions. Debug-only surface today —
+// nothing in the form depends on it, which is why every member is optional.
+export interface CuratedUnderstanding {
+  what_they_want?: string;                                    // plain-English read of the requirement
+  buyer_situation?: string;                                   // inferred from buyer_facts + basket + signals
+  already_known?: string[];                                   // facts we hold → must NOT be asked
+  contradictions?: { field: string; values: string[]; picked: string; why: string }[];
+  stale?: { field: string; value: string; why: string }[];
+  worth_confirming?: string[];                                // weak-provenance facts → chips, never questions
+  useless?: string[];                                         // signals present but irrelevant to THIS requirement
+}
+// The question-competition ledger (audit §2.1 · P2-18): every candidate the planner weighed, winners AND
+// losers, so the debug panel can answer "why was this question asked and what competed with it".
+export interface CuratedConsidered {
+  q: string;                                                  // the candidate question, buyer-facing wording
+  rank: number;                                               // 1 = best; list is best-first
+  from_source?: string;                                       // which INPUT drove it (category_top_specs, buyer_signals.call_specs, requirement_text…)
+  why_ranked: string;                                         // REASON-BEFORE-SCORE: written before `score`
+  score: number;                                              // 0-100 understanding-gain net of buyer effort
+  outcome: 'asked' | 'dropped';                               // reconciled in code against the final gaps/opening
+  dropped_because?: string;                                   // required when dropped
+}
 export interface CuratedPlan {
+  understanding?: CuratedUnderstanding;             // UNDERSTAND artifact — optional: a parse miss or an older response still works
+  considered?: CuratedConsidered[];                 // competition ledger — optional for the same reason
   opening?: { q: string; why: string; options?: string[] };
   prefills: { field: string; value: string; source: string; corrected_from?: string }[];   // Progressive Truth Enrichment
   extras?: Record<string, string>;                  // buyer-stated facts that don't map to any ISQ field name (was getSpecHints' "extras")
@@ -1742,24 +1769,66 @@ export async function runCuratedPlanner(input: {
   if (input.categoryCorpus != null) {
     try { const s = JSON.stringify(input.categoryCorpus); if (s && s !== '{}' && s !== '[]') corpusBlock = s.length > 200000 ? s.slice(0, 200000) + '…(truncated safety cap)' : s; } catch { /* unserialisable → skip */ }
   }
-  const sys = `You are the Curated-RFQ Engine for IndiaMART — the ONE understanding→ranking call for this requirement (it replaces separate hint/prefill/gap-question passes). You KNOW this buyer (their facts, basket, WhatsApp/call signals) and what sellers ACTUALLY ask in this category. Objective: maximise understanding of THIS requirement with the LEAST buyer effort.
-Return ONLY JSON:
-{"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you typed|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"extras":{"fact not matching any page-1 field name":"value"},"field_hints":{"a page-1 field name":"≤6-word why it matters"},"gaps":[{"q":"...","kind":"non_spec"|"spec"|"identity","why":"...","options":["..."]}]}
+  const sys = `${INDIA_CTX}
 
-BUYER'S REAL INTENT — HIGHEST AUTHORITY:
+You are the Curated-RFQ Engine for IndiaMART — the ONE understanding→ranking call for this requirement (it replaces separate hint/prefill/gap-question passes). You KNOW this buyer (their facts, basket, WhatsApp/call signals) and what sellers ACTUALLY ask in this category. Objective: maximise understanding of THIS requirement with the LEAST buyer effort. Asking ten questions also reduces uncertainty — that is the failure, not the goal.
+
+# GLOSSARY — every input key you will receive, and what it is
+Your input arrives after these instructions as XML-tagged blocks. A block reading "(none)" means we hold nothing there; treat it as genuinely empty, never as a reason to invent.
+- <requirement> — the product line the buyer typed, spoke or tapped just now. HIS OWN WORDS. Highest authority of all.
+- <category_name> — the label of the catalogue category this requirement was auto-mapped to. The mapping CAN be wrong, too broad or too narrow.
+- <flow> — how the buyer arrived. "repost" = re-posting a requirement of his that expired. "enrich" = adding to a live requirement he already posted. "confirm_draft" = we already hold almost everything and he is only confirming it — ask the least here. "gap_question" = we hold the product and some specs; the missing pieces are the whole point. "multi_chooser" = he picked this requirement out of several of his own. "blank_multimodal" = he started from nothing (fresh typed/spoken/photographed product) — assume no history. "(none)" = assume no history.
+- <already_known> — "field: value" pairs we ALREADY hold for THIS requirement (page-1 answers, quantity, unit, delivery city). Never ask any of these again.
+- <page1_buyer_specs> — names of the spec fields already on screen on page 1, each followed by its tap options in [square brackets]. The buyer answers these on the form itself, so they are never gap questions.
+- <seller_flagged_specs> — spec names that sellers in this category marked as ones they need. A supplementary hint only.
+- <seller_top_questions> — what sellers ACTUALLY ask on real calls in this category. Each entry: "q" = the question or spec name; "pct" = the share of analysed calls in which sellers asked it (0-100 — higher means more decisive, so rank by it); "vals" = real answers real buyers gave, which are your best source of option chips.
+- <category_personas> — the buyer TYPES this category usually serves (shop owner, contractor, factory, institution…). Use it to judge which situation THIS buyer is in and to pitch the wording right. Never state it as a fact about him.
+- <category_b2b_b2c> — how business-vs-consumer this category is. Use it to decide whether a bulk / GST / identity question is even sensible here. Never state it as a fact about him.
+- <category_corpus> — the raw, unedited pile of analysed seller calls for this category. Noisy, possibly large, often empty. Mine it for real phrasing and real option values. Soft context — it never outranks the buyer.
+- <buyer_facts> — profile facts we hold: member_since, has_gst, gst_verified, city, state, business_type, total_requirements, total_calls. These are facts, not guesses.
+- <also_sourcing> — other products this buyer is sourcing right now. Read his SITUATION from the COMBINATION (machine + raw material + transport ⇒ setting up a unit). Items unrelated to this requirement are noise — name them in understanding.useless.
+- <buyer_signals> — this buyer's OWN words from other channels. "whatsapp_products" = products he enquired about on WhatsApp. "whatsapp_specs" = spec values HE TYPED there. "call_queries" = what he asked sellers on a call. "call_application" = the use-case he SAID out loud. "call_specs" = spec values he SAID on a call. "objections" = his past complaints ("too far", "high price", "no response"). "business_intent" = reselling / wholesale / distribution.
+
+# WHAT YOU RETURN — ONLY this JSON, keys in exactly this order
+{"understanding":{"what_they_want":"...","buyer_situation":"...","already_known":["..."],"contradictions":[{"field":"...","values":["...","..."],"picked":"...","why":"..."}],"stale":[{"field":"...","value":"...","why":"..."}],"worth_confirming":["..."],"useless":["..."]},"considered":[{"q":"...","rank":1,"from_source":"...","why_ranked":"...","score":0,"outcome":"asked"|"dropped","dropped_because":"(only when dropped)"}],"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you typed|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"extras":{"fact not matching any page-1 field name":"value"},"field_hints":{"a page-1 field name":"≤6-word why it matters"},"gaps":[{"q":"...","kind":"non_spec"|"spec"|"identity","why":"...","options":["..."]}]}
+
+REASON BEFORE YOU LABEL — the writing order IS part of the task. Emit the keys in exactly the skeleton's order: "understanding" first, "considered" second, and only then opening / prefills / extras / field_hints / gaps. Inside every "considered" entry, write "from_source" and "why_ranked" BEFORE "score". You are working the answer out as you write it, so never put a number down before the sentence that justifies it. A question you cannot justify in one plain sentence is a question you must not ask.
+
+# STEP 1 — understanding (write this FIRST, before you weigh a single question)
+This is your read of the buyer. A human reviewer reads it to check your work, so make it specific, readable and honest. Prefer "we hold nothing on this" over a vague guess, but never write "unknown" where you can write what you actually inferred and what you inferred it from.
+- what_they_want — one or two plain sentences: what is he actually trying to buy, in his terms. Fold in quantity / size / use-case if we hold them.
+- buyer_situation — what is going on in his business that produced this requirement, inferred from buyer_facts + also_sourcing + buyer_signals + flow (e.g. "setting up a small food-packaging unit", "a running sweet shop restocking before the festive season", "a contractor buying for one site"). Say what you inferred it FROM. If there is nothing to infer from, say the product itself is all we have.
+- already_known — every fact we hold for THIS requirement, in plain words. Anything you list here you may NOT ask.
+- contradictions — two sources disagreeing on the same field. "values" = each conflicting value; "picked" = the one you trust; "why" = why it wins. Tie-breakers: the buyer's own words beat something he merely browsed; a more recent signal beats an older one; a stated value beats an observed one. Empty array if none.
+- stale — a value we hold that is too old to reuse for THIS requirement (an order from last year, a spec from a requirement he has since changed). Empty array if none.
+- worth_confirming — facts we hold but with weak provenance (browsed not stated, old, single source). These become chips he can correct in one tap. They are NEVER questions.
+- useless — signals that ARE present in the input but do not bear on THIS requirement (an unrelated product in his basket, a profile attribute nothing here depends on). Naming them is how we prove we read them and chose not to use them. Empty array only if you genuinely used everything.
+
+# STEP 2 — considered (the question-competition ledger)
+List EVERY candidate question you weighed — the winners AND the ones you rejected. A ledger containing only winners is a failed ledger. Aim for 6-12 entries and include AT LEAST 3 you rejected.
+- q — the candidate, written exactly as you would show it to the buyer.
+- rank — 1 is your best candidate; list them best-first.
+- from_source — which INPUT produced this candidate. Use one of: requirement_text · already_known · page1_buyer_specs · seller_flagged_specs · seller_top_questions · category_corpus · category_personas · category_b2b_b2c · buyer_facts · also_sourcing · buyer_signals.whatsapp_products · buyer_signals.whatsapp_specs · buyer_signals.call_queries · buyer_signals.call_application · buyer_signals.call_specs · buyer_signals.objections · buyer_signals.business_intent · own_product_knowledge (only when it came from your own knowledge of the product, not from an input).
+- why_ranked — ONE plain sentence about THIS buyer: what makes the answer worth a slot, or what makes it worthless. Talk about him and his quote, never about rule numbers.
+- score — 0-100: how much this answer would improve the quotes he receives, MINUS the effort of answering it. It must follow from what you just wrote in why_ranked.
+- outcome — "asked" if it ended up as the opening question or in gaps; "dropped" otherwise.
+- dropped_because — REQUIRED whenever outcome is "dropped". Name the real reason: already known · covered by a page-1 field · the mapped category does not fit · a brand/origin ask that narrows the seller pool · not meaningful for this product · lost the slot to a higher-scoring question.
+CONSISTENCY (this is checked): every question in the final gaps array, and the opening question, MUST also appear in considered with the IDENTICAL q text and outcome "asked".
+
+# STEP 3 — the buyer's real intent (highest authority over everything below)
 1. INTENT IS SUPREME. From the requirement text + buyer_facts + buyer_signals, decide what the buyer TRULY wants.
 2. MISMATCH GUARD (critical): the mapped category_name / seller_top_questions / page1_buyer_specs come from an ID that CAN be wrong, too broad, or too narrow (e.g. buyer wants a "generator toy" but the category is "diesel generator"). If they clearly don't fit the real requirement, IGNORE the category evidence, seller_flagged_specs, AND page1_buyer_specs entirely, and plan PURELY from the requirement text + your own B2B knowledge. Never let a wrong category pollute a question.
 3. WHEN THE CATEGORY MATCHES: mine seller_top_questions / category_corpus (if present) for what sellers ask MOST to qualify a buyer; prefer high-frequency specs; build option chips from real observed values when present.
 4. ORDER like real seller calls flow: if intent/use-case is asked first in this category, put the opening/intent gap first, then specs.
 
-PREFILLS (fill or correct WITHOUT asking):
+# STEP 4 — USE the truth before you ask for it · PREFILLS (fill or correct WITHOUT asking):
 - Source ONLY from: buyer_signals (whatsapp_specs/call_specs = values the buyer typed/said; call_application = a stated use-case), OR the requirement text itself stating a spec value (e.g. "18 inch alloy wheel" states Wheel Size=18 inch → source:"what you typed"). NEVER prefill from a category norm — that is a gap/suggestion, never a fact.
 - Set corrected_from ONLY when a fresher buyer signal disagrees with an already_known value (prefer the LATEST signal).
 - If no real buyer signal or requirement-text token supports a value, DO NOT emit it — never fabricate.
 - extras = a buyer-stated fact (from buyer_signals or the requirement text) that does NOT match any page1_buyer_specs name — never invent one.
 - field_hints = for UP TO 6 of the page1_buyer_specs that would genuinely benefit from a short caption explaining why a seller needs it (skip obvious ones like "Color").
 
-GAPS (the fewest decisive questions):
+# STEP 5 — GAPS (the fewest decisive questions; each one must be an "asked" entry in your ledger):
 - NEVER ask anything already in already_known OR covered by a page1_buyer_specs entry — judge by MEANING + overlapping options, NOT exact field name (a buyer spec captures a concept even under a different label: "Power (kVA)" already covers "Rated Power"/"Capacity"; "Brand" covers "Make"/"Manufacturer").
 - buyer_signals.objections (e.g. "too far","high price","no response") are the buyer's past pain — reframe ONE gap around the most relevant one, never as a prefill.
 - NON-SPEC gaps first (intent/use-case, timeline, cadence), then top category specs. Max 3 non-spec. Options-only (3-8 concrete chips) — NEVER open-ended, NEVER Yes/No-only, NEVER "Other".
@@ -1767,23 +1836,62 @@ GAPS (the fewest decisive questions):
 - CADENCE — include a purchase-frequency gap ONLY if genuinely meaningful for this product AND not already known, and only if it earns a slot over other candidates. Skip for a genuine one-off.
 - QUANTITY is a first-class landing-page field, not a gap-question topic here. If already_known contains a quantity, NEVER ask it. If NOT known, you MAY include ONE quantity gap — ONLY when quantity is meaningful for this product (consumable/packaging/raw-material/component: yes; a one-off capital good, machine, or whole plant/setup: NEVER ask "how many").
 - Aim for up to 5 total gaps when the product genuinely has that many meaningful ones beyond what's known — do not under-ask with just 1-2 unless the requirement truly needs no more.
-- Plain buyer words, ≤12 words per question, no jargon (never say CSL/mcat/ISQ/category ID).
+- ≤12 words per question. See the LANGUAGE rule below.
+
+# LANGUAGE — how everything must be worded
+Write every buyer-facing string (opening.q, gaps[].q, every option chip, every "why", every field_hint) the way a shop owner would say it out loud to a supplier: everyday spoken words, the name of the thing itself, no abbreviations or system names the buyer would not use about his own business. If a phrase would make him ask "what does that mean?", rewrite it. "understanding", "considered" and "prefills[].source" are INTERNAL debug fields read by our own team — keep them plain English too, but there you SHOULD name our data sources (that is exactly what from_source is for).
 
 IDENTITY gap (kind:"identity") — there is no separate identity ask; it competes for a slot in the SAME ranked gaps list as any spec or non-spec gap, same chip UI, no special treatment:
 - Include AT MOST ONE, and only if the category is clearly B2B/bulk AND buyer_facts shows no GST on file (no gst_verified/has_gst) AND it would genuinely rank among your top gaps for this buyer.
 - q:"Are you GST registered?", options exactly ["Yes, registered","Not yet"], why = a buyer-benefit phrase (e.g. "faster verified quotes").
 - buyer_signals.business_intent (reselling/wholesale/distribution) is explicit B2B evidence — weigh it in even when the category signal alone is weak.
-- NEVER include this if buyer_facts already shows gst_verified or has_gst — that is already-known truth, not a gap.`;
-  const usr = JSON.stringify({
-    requirement: input.requirement, category_name: input.categoryName || 'unknown', already_known: known && known !== 'None' ? known : undefined,
-    page1_buyer_specs: specsDetail !== 'None' ? specsDetail : undefined,
-    seller_flagged_specs: input.sellerSpecs?.slice(0, 20),
-    seller_top_questions: input.categoryTopSpecs, category_personas: input.categoryPersonas, category_b2b_b2c: input.categoryB2b,
-    category_corpus: corpusBlock || undefined,
-    buyer_facts: input.buyerFacts, also_sourcing: input.basket, buyer_signals: input.buyerSignals, flow: input.entryMode,
-  });
+- NEVER include this if buyer_facts already shows gst_verified or has_gst — that is already-known truth, not a gap.
+
+# COLD BUYER — the most common case, so plan for it deliberately
+When buyer_signals, buyer_facts, also_sourcing, category_corpus and seller_top_questions are ALL "(none)" and already_known holds little or nothing beyond the product itself:
+- understanding is still mandatory — a cold buyer is not an excuse to skip the read. Write what_they_want from the requirement text alone. Write buyer_situation as what the PRODUCT itself implies about who buys it, and say plainly that it is inferred from the product because we hold no history. Set contradictions, stale, worth_confirming and useless to empty arrays — with no signals there is genuinely nothing to contradict, age, confirm or discard, and inventing entries here is a fabrication.
+- Emit NO prefills and NO extras. There is no buyer signal to ground them; making one up is the single worst thing you can do on this call.
+- Build considered and gaps from your own B2B knowledge of this product, and set from_source to "requirement_text" or "own_product_knowledge" so the ledger stays honest about where the questions came from.
+- Ask MORE here, not fewer — go to 4-5 gaps. This is the one situation where a fuller questionnaire is the LOW-effort choice: we know nothing, and a useless quote costs him far more than four taps. Cover the decisive axes for the product (use-case, size/capacity, material/grade, timeline).
+- field_hints are still welcome — they explain page-1 fields and need no buyer history.
+
+# WORKED EXAMPLE — a complete, filled output (imitate this shape and this level of specificity)
+For a buyer who typed "Laddu packaging tray", where we hold Material=Plastic, Capacity=1 kg, Application=Ladoo packaging, Quantity=500 Piece, city=Ghaziabad, a call where he said 6 compartments, a WhatsApp line asking for them bundled 50 to a bundle, an old 200-piece order, a CCTV camera also in his basket, and a past "too far" complaint:
+{"understanding":{"what_they_want":"Plastic trays to pack 1 kg boxes of laddu — 500 pieces, delivered in Ghaziabad.","buyer_situation":"A running sweet shop restocking packaging ahead of the festive season, not a new setup — buyer_facts shows 138 earlier requirements and a repeat of this same product, and nothing in also_sourcing suggests a plant being built.","already_known":["Material — Plastic","Capacity — 1 kg per tray","Application — Ladoo packaging","Quantity — 500 pieces","Delivery city — Ghaziabad"],"contradictions":[{"field":"No of Compartment","values":["4","6"],"picked":"6","why":"He said 6 himself on a seller call this week; the 4 came off a tray page he only browsed, which is neither his own words nor as recent."}],"stale":[{"field":"Quantity","value":"200 Piece","why":"That was an order 11 months ago; everything from this year is 500 or more, so the old figure must not be prefilled over what he typed today."}],"worth_confirming":["No of Compartment = 6 — it came from a phone call, so show it as a chip he can correct rather than treating it as settled."],"useless":["The CCTV camera in his basket — a separate sourcing job with no bearing on trays.","His member-since date — it changes no answer a tray seller needs."]},"considered":[{"q":"Are these for daily shop packing or a festive order?","rank":1,"from_source":"buyer_facts","why_ranked":"Festive orders run several times larger and to a hard date, and nothing we hold tells us which one this is.","score":92,"outcome":"asked"},{"q":"Do you need a lid with the tray?","rank":2,"from_source":"seller_top_questions","why_ranked":"Sellers raise it in most calls in this category and it changes the per-piece price, and we hold no answer for it.","score":85,"outcome":"asked"},{"q":"How soon do you need them?","rank":3,"from_source":"buyer_signals.objections","why_ranked":"His past complaint was that sellers were too far away, and a tight date is exactly what filters those sellers out for him.","score":78,"outcome":"asked"},{"q":"Plain trays or printed with your logo?","rank":4,"from_source":"category_corpus","why_ranked":"Printing keeps coming up in this category's calls and it moves both price and delivery time, and he has never told us either way.","score":66,"outcome":"asked"},{"q":"How often will you order these?","rank":5,"from_source":"buyer_facts","why_ranked":"He buys this repeatedly, so a standing order would get him a better rate than a one-off quote.","score":55,"outcome":"asked"},{"q":"What material do you want?","rank":6,"from_source":"seller_top_questions","why_ranked":"A leading seller question in this category, but he has already typed Plastic himself.","score":20,"outcome":"dropped","dropped_because":"Already known — asking it again is pure re-work for him."},{"q":"What will you pack in these?","rank":7,"from_source":"requirement_text","why_ranked":"Usually the strongest opening question here, except his own requirement line already says laddu.","score":15,"outcome":"dropped","dropped_because":"Already known from the requirement text."},{"q":"Which brand of tray do you prefer?","rank":8,"from_source":"seller_flagged_specs","why_ranked":"Sellers flag it, but a brand ask would cut out most of the sellers who could quote him a good price.","score":10,"outcome":"dropped","dropped_because":"A brand ask narrows the seller pool and is never asked openly."},{"q":"Are you GST registered?","rank":9,"from_source":"buyer_facts","why_ranked":"Would normally compete for a slot on a bulk business order.","score":5,"outcome":"dropped","dropped_because":"buyer_facts already shows gst_verified — we hold it, so it is not a gap."}],"opening":{"q":"Are these for daily shop packing or a festive order?","why":"Festive orders are bigger and date-bound, so it changes who should quote.","options":["Daily shop packing","Festive or bulk order","Both"]},"prefills":[{"field":"Material","value":"Plastic","source":"what you typed"},{"field":"No of Compartment","value":"6","source":"your call with a seller","corrected_from":"4"}],"extras":{"Bundling":"50 trays per bundle"},"field_hints":{"Capacity (Weight)":"Decides tray depth and price","Application":"Food-grade needs vary by sweet"},"gaps":[{"q":"Do you need a lid with the tray?","kind":"spec","why":"Sellers price lid and tray separately.","options":["Yes, with lid","No, tray only","Show me both"]},{"q":"Plain trays or printed with your logo?","kind":"spec","why":"Printing changes price and delivery time.","options":["Plain","Printed with my logo","Either is fine"]},{"q":"How soon do you need them?","kind":"non_spec","why":"Nearby sellers can meet a tight date.","options":["Within a week","2-3 weeks","Within a month","Just checking prices"]},{"q":"How often will you order these?","kind":"non_spec","why":"Regular orders get better rates.","options":["One-time","Every month","Every festive season","Not sure yet"]}]}
+Note what the example does: every gap and the opening also appear in "considered" with outcome "asked" and the same wording; four rejected candidates are recorded with real reasons; the correction from 4 to 6 carries corrected_from; and the two unused signals are named in "useless" instead of being silently ignored.`;
+  // DATA FENCING (audit §3 defect 1 — the highest-leverage fix for flash-lite): every input arrives inside its
+  // own XML tag instead of one anonymous JSON.stringify blob, each tag name matching a GLOSSARY entry above, and
+  // the (up to 200k-char) category_corpus is placed LAST so no instruction is ever buried behind it. Absent inputs
+  // are emitted as an explicit "(none)" rather than omitted, so the model can positively recognise a cold buyer.
+  const blk = (tag: string, body: unknown): string => {
+    let s = '(none)';
+    if (body != null) {
+      if (typeof body === 'string') s = body.trim() || '(none)';
+      else { try { const j = JSON.stringify(body); s = !j || j === '{}' || j === '[]' || j === 'null' ? '(none)' : j; } catch { s = '(none)'; } }
+    }
+    return `<${tag}>\n${s}\n</${tag}>`;
+  };
+  const usr = [
+    blk('requirement', input.requirement),
+    blk('category_name', input.categoryName || 'unknown'),
+    blk('flow', input.entryMode),
+    blk('already_known', known !== 'None' ? known : null),
+    blk('page1_buyer_specs', specsDetail !== 'None' ? specsDetail : null),
+    blk('seller_flagged_specs', input.sellerSpecs?.slice(0, 20)),
+    blk('seller_top_questions', input.categoryTopSpecs),
+    blk('category_personas', input.categoryPersonas),
+    blk('category_b2b_b2c', input.categoryB2b),
+    blk('buyer_facts', input.buyerFacts),
+    blk('also_sourcing', input.basket),
+    blk('buyer_signals', input.buyerSignals),
+    blk('category_corpus', corpusBlock || null),   // LAST, always — see the fencing note above
+  ].join('\n\n');
   try {
-    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 3000, temperature: 0.2 });
+    // maxTokens 3000 → 8000: the v2 contract adds TWO whole deliverables ahead of the old five — the
+    // `understanding` read (~400-700 tok) and a 6-12 entry `considered` ledger with a justifying sentence each
+    // (~700-1000 tok). The old ceiling would have clipped mid-ledger and thrown away the entire plan with it,
+    // since one truncated JSON kills every field. 8000 leaves headroom on a rich buyer and still bounds a runaway.
+    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 8000, temperature: 0.2 });
     const j = JSON.parse(raw) as CuratedPlan;
     // Grounding guard: a prefill/extra VALUE must be backed by a real buyer signal or the requirement text (never a fabricated fill).
     const signalText = [input.requirement, JSON.stringify(input.buyerSignals || {}), (input.basket || []).join(' '), Object.values(input.filled || {}).join(' ')].join(' ').toLowerCase();
@@ -1793,7 +1901,43 @@ IDENTITY gap (kind:"identity") — there is no separate identity ask; it compete
     const extras = j.extras && typeof j.extras === 'object' ? Object.fromEntries(Object.entries(j.extras).filter(([, v]) => v && backed(String(v)))) : undefined;
     const field_hints = j.field_hints && typeof j.field_hints === 'object' ? j.field_hints : undefined;
     const gaps = Array.isArray(j.gaps) ? j.gaps.slice(0, 6) : [];
-    return { opening: j.opening, prefills, extras, field_hints, gaps, __raw: { system: sys, user: usr, output: raw } };
+    // UNDERSTAND artifact — shape-guarded, never invented. A missing/garbled key just stays undefined so the
+    // debug panel can say "the planner returned no read" rather than render a half-typed object.
+    // An EMPTY array is preserved (the planner explicitly said "none here"); `undefined` means it never answered
+    // that question at all. The debug panel must be able to tell those two apart.
+    const strs = (x: unknown): string[] | undefined => (Array.isArray(x) ? x.filter((s): s is string => typeof s === 'string' && !!s.trim()) : undefined);
+    const u = j.understanding && typeof j.understanding === 'object' ? j.understanding : undefined;
+    const und: CuratedUnderstanding | undefined = u ? {
+      what_they_want: typeof u.what_they_want === 'string' && u.what_they_want.trim() ? u.what_they_want.trim() : undefined,
+      buyer_situation: typeof u.buyer_situation === 'string' && u.buyer_situation.trim() ? u.buyer_situation.trim() : undefined,
+      already_known: strs(u.already_known),
+      contradictions: Array.isArray(u.contradictions) ? u.contradictions.filter((c) => c && typeof c === 'object' && !!c.field) : undefined,
+      stale: Array.isArray(u.stale) ? u.stale.filter((s) => s && typeof s === 'object' && !!s.field) : undefined,
+      worth_confirming: strs(u.worth_confirming),
+      useless: strs(u.useless),
+    } : undefined;
+    const understanding = und && Object.values(und).some((v) => v !== undefined) ? und : undefined;
+    // Question-competition ledger. `outcome` is RECONCILED against what actually shipped rather than trusted:
+    // gaps are capped at 6 and the caller splits them further, so a candidate the model labelled "asked" can still
+    // have been cut. Matching is on a punctuation-insensitive key, and nothing here is fabricated — a ledger entry
+    // only ever exists because the model wrote it.
+    const qk = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const shipped = new Set([...gaps.map((g) => g?.q || ''), j.opening?.q || ''].filter(Boolean).map(qk));
+    const consideredRaw = Array.isArray(j.considered) ? j.considered.filter((c) => c && typeof c === 'object' && typeof c.q === 'string' && c.q.trim()) : [];
+    const considered: CuratedConsidered[] | undefined = consideredRaw.length ? consideredRaw.map((c, i) => {
+      const asked = shipped.has(qk(c.q));
+      const n = Number(c.score);
+      return {
+        q: c.q.trim(),
+        rank: Number.isFinite(Number(c.rank)) ? Number(c.rank) : i + 1,
+        from_source: typeof c.from_source === 'string' && c.from_source.trim() ? c.from_source.trim() : undefined,
+        why_ranked: typeof c.why_ranked === 'string' ? c.why_ranked : '',
+        score: Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 0,
+        outcome: asked ? 'asked' : 'dropped',
+        dropped_because: asked ? undefined : (typeof c.dropped_because === 'string' && c.dropped_because.trim() ? c.dropped_because.trim() : 'Not in the final question list.'),
+      };
+    }) : undefined;
+    return { understanding, considered, opening: j.opening, prefills, extras, field_hints, gaps, __raw: { system: sys, user: usr, output: raw } };
   } catch { return { prefills: [], gaps: [] }; }
 }
 
