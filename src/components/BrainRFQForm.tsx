@@ -18,6 +18,8 @@ import SellerSearchProgress from './SellerSearchProgress';
 import { searchSellers, curateSellers, type SellerResult, type SellerPick, type RibbonTone } from '../lib/sellerSearch';
 import { analyzeImage, voiceToSpecs, hasGeminiKey, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchCategoryTopSpecs, fetchProductImages, upsizeImimg } from '../lib/enrichment';
+import { recordDecisionRoutes, decisionKey, type BrainSeed, type DecisionRoute } from '../lib/brains/formAdapter';
+import type { ConflictOption } from '../lib/brains/requirementBrain';
 import { matchUnit } from '../lib/quantity';
 import { emit, EV, emitApiError } from '../lib/emit';
 import { useToast, type ToastType } from './Toast';
@@ -100,6 +102,10 @@ const BUSINESS_TYPES = ['Online Business', 'Exporter', 'Manufacturer', 'Retailer
 const RFQ_MODEL_MIC = 'google/gemini-3.5-flash-lite';   // voiceToSpecs (mic)
 const RFQ_MODEL_IMAGE = 'google/gemini-3.6-flash';      // analyzeImage (photo)
 const RFQ_MODEL_SPECS = 'google/gemini-3.6-flash';      // runCuratedPlanner (the unified page-1 prefill + page-2 gap-question planner)
+// Hard ceiling on AUTOMATIC planner runs per product. Legitimate re-plans are few and countable — a new mcat,
+// a photo, a voice clip, a late ISQ schema. Anything past this is a feedback loop, and each run is a full call
+// carrying up to 200k chars of category corpus. Reset to 0 by an explicit buyer Retry.
+const MAX_PLANNER_RUNS = 6;
 const RFQ_MODEL_USECASE = 'google/gemini-3.6-flash';    // inferSpecsFromApplication (use-case assist) — reasoning-heavy → stronger tier
 const hasFormLLM = () => RFQ_LLM_ENABLED || hasGeminiKey();
 
@@ -186,7 +192,7 @@ async function normalizeImage(file: File): Promise<{ base64: string; mime: strin
   return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mime: 'image/jpeg' };
 }
 
-export default function BrainRFQForm({ onClose, surface, categoryMode = 'category', loggedIn = false, standalone = false, onSubmit, brainSeed }: Props & { brainSeed?: import('../lib/brains/formAdapter').BrainSeed }) {
+export default function BrainRFQForm({ onClose, surface, categoryMode = 'category', loggedIn = false, standalone = false, onSubmit, brainSeed }: Props & { brainSeed?: BrainSeed }) {
   const _seed = brainSeed;
   // Freeze the surface ONCE at mount — otherwise a mid-flow viewport crossing 640px (rotate/resize)
   // would silently swap the whole mobile↔desktop chrome on the next state change.
@@ -210,6 +216,11 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const [unitOptions, setUnitOptions] = useState<string[]>([]);
   const [isqSpecs, setIsqSpecs] = useState<ISQSpec[]>([]);
   const [specValues, setSpecValues] = useState<Record<string, string>>(_seed?.specValues ?? {});
+  // Ref mirror of specValues. Needed because a setState UPDATER runs on the next render, so nothing written
+  // inside it is readable in the same call — and `applyExtractedSpecs` must know, synchronously, whether it
+  // actually changed a field before it re-fires the planner (see the non-terminating-loop note there).
+  const specValuesRef = useRef(specValues);
+  useEffect(() => { specValuesRef.current = specValues; }, [specValues]);
   // "Also detected" — buyer-truth facts (from name/photo/mic) that don't fit a buyer ISQ field. Never lost:
   // shown as editable key-value rows below the specs and shipped in the requirement. Buyer edits are preserved.
   const [extraSpecs, setExtraSpecs] = useState<Record<string, string>>({});
@@ -340,6 +351,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const cardScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingAiSpecs = useRef<Record<string, string> | null>(null);
   const plannerFiredFor = useRef('');       // "mcatId:name:aiEpoch:specSig" the unified Curated-RFQ planner already fired for (re-fires on a material change: new mcat, new photo/voice evidence, or a late-arriving ISQ schema)
+  const plannerRuns = useRef(0);            // AUTOMATIC planner runs since the last buyer-initiated retry — hard-capped, see MAX_PLANNER_RUNS
   const categoryNameRef = useRef('');       // latest category name (McatDtl) for the async AI-spec call
   const photoSpecsRef = useRef<Record<string, string>>({}); // specs a photo/voice extracted → extra INPUT to the AI-specs prompt
   const photoSetKeys = useRef<Set<string>>(new Set()); // ISQ fields whose value came from photo/voice extraction (NOT a buyer edit) → safe to overwrite/clear on a re-extraction (audit #3 photo-reselect)
@@ -640,6 +652,8 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     // Re-arm the unified planner's fire-guard so a re-commit (same or new mcat) re-fires it and clears
     // aiSpecsLoading — without this a same-product re-commit hangs the spec page forever.
     plannerFiredFor.current = '';
+    plannerRuns.current = 0;   // the run ceiling is PER PRODUCT — a new requirement starts with a full budget
+    specValuesRef.current = {}; // specValues was just cleared above; keep the mirror in step for the same tick
     besReset();   // BES is scored per REQUIREMENT — a new product starts a fresh effort budget
     // LOSSLESS across a product change: mic/photo evidence (photoSpecsRef) is JOURNEY-level, never wiped —
     // the typed name anchors the NEW category while voice/photo facts survive as autofill candidates
@@ -727,6 +741,19 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // question among its top gaps, it rides the SAME gaps list (kind:'identity') — this just pulls it out so its
   // answer writes to the REAL gstRegistered state (not a throwaway aiSpecValues entry) and P3 knows to hide it.
   const [identityAsk, setIdentityAsk] = useState<{ q: string; options?: string[]; why?: string } | null>(null);
+  // ─── ONE DECISION SYSTEM — the engine's non-question decisions, and the planner's wording for them ──────
+  // The engine emits RESOLVE_CONFLICT / SUGGEST / OFFER alongside its ASKs. They are NOT gap questions, so
+  // they never ride `aiSpecs`; each has its own surface below. The planner still ranks and PHRASES them, and
+  // hands its wording back via `engine_ref` — `enginePhrasing` is where that wording lands. Nothing here
+  // depends on the planner succeeding: if it fails or omits a ref, the engine's own `field`/`why` is used.
+  const engineDecisions = useMemo(() => _seed?.engineDecisions ?? [], [_seed]);
+  const engineConflicts = useMemo(() => engineDecisions.filter((d) => d.action === 'RESOLVE_CONFLICT'), [engineDecisions]);
+  const engineSuggests = useMemo(() => engineDecisions.filter((d) => d.action === 'SUGGEST'), [engineDecisions]);
+  const engineOffers = useMemo(() => engineDecisions.filter((d) => d.action === 'OFFER'), [engineDecisions]);
+  const [enginePhrasing, setEnginePhrasing] = useState<Record<string, { q?: string; why?: string; options?: string[] }>>({});
+  const [conflictPicks, setConflictPicks] = useState<Record<string, string>>({});   // engine id → the value the BUYER chose (never pre-selected)
+  const [suggestPicks, setSuggestPicks] = useState<Record<string, string>>({});     // engine id → an INFERRED chip the buyer accepted
+  const [dismissedOffers, setDismissedOffers] = useState<Record<string, boolean>>({});
   useEffect(() => {
     if (!committed || !mcatId || !hasFormLLM()) return;
     if (specsLoading) return; // wait for page-1 specs to settle (fires for zero-ISQ categories too, once settled)
@@ -736,6 +763,12 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     const specSig = specNames.slice().sort().join('|');
     const fireKey = `${mcatId}:${name}:${aiEpoch}:${specSig}`;
     if (plannerFiredFor.current === fireKey) return;
+    // BLAST-RADIUS CEILING (belt and braces to the epoch-bump fix in applyExtractedSpecs). aiEpoch is part of
+    // the fire-key, so ANY path that bumps it re-fires a full planner call. The cause is fixed at the source;
+    // this bounds the damage if a future path reintroduces it. Counts AUTOMATIC runs only — an explicit buyer
+    // "Retry" resets the counter, because a buyer asking for it again is never a runaway.
+    if (plannerRuns.current >= MAX_PLANNER_RUNS) { setBaqLoading(false); setAiSpecsLoading(false); return; }
+    plannerRuns.current++;
     plannerFiredFor.current = fireKey;
     setBaqLoading(true); setAiSpecsLoading(true);
     const buyerSpecOptions: Record<string, string[]> = {};
@@ -758,6 +791,11 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       categoryB2b: _seed?.categoryB2b,
       categoryCorpus: categoryCorpusRef.current,
       buyerFacts: _seed?.buyerFacts, basket: _seed?.basket, buyerSignals: _seed?.buyerSignals,
+      // THE FIX (2026-07-28): the engine's OWN Decision Objects now reach the planner. Before this the engine
+      // decided ASK/SUGGEST/RESOLVE_CONFLICT/OFFER, the adapter mapped them into seed.gaps/seed.conflicts, and
+      // NOTHING read either field — the planner invented its own questions and overwrote aiSpecs with them.
+      // Two decision systems. Now: the ENGINE decides what to ask, the PLANNER ranks and phrases.
+      engineDecisions,
       entryMode: _seed?.entryMode, model: RFQ_MODEL_SPECS,
     }).then((r) => {
       if (plannerFiredFor.current !== fireKey || gen !== commitGen.current) return;
@@ -767,12 +805,34 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       // codebase's "dedup cannot be an LLM promise" discipline: never honor a promoted ask for a fact we hold.
       const identityGap = gstOnFile ? undefined : (r.gaps || []).find((g) => g.kind === 'identity');
       setIdentityAsk(identityGap ? { q: identityGap.q, options: identityGap.options, why: identityGap.why } : null);
+      // ── STAGE 2 · HARVEST THE PLANNER'S WORDING FOR THE ENGINE'S NON-QUESTION DECISIONS ────────────────
+      // A RESOLVE_CONFLICT / SUGGEST / OFFER has its OWN surface (A/B widget · ghost chip · dismissable strip),
+      // so if the planner returned it as a `gap` we take only its WORDING and chips, then pull it out of the
+      // question list — otherwise the buyer answers the same conflict twice, once per surface.
+      const byId = new Map(engineDecisions.map((d) => [d.id, d]));
+      const nonQuestion = new Set(engineDecisions.filter((d) => d.action !== 'ASK').map((d) => d.id));
+      const phrasing: Record<string, { q?: string; why?: string; options?: string[] }> = {};
+      for (const g of r.gaps || []) if (g.engine_ref && byId.has(g.engine_ref)) phrasing[g.engine_ref] = { q: g.q, why: g.why, options: g.options };
+      // The ledger also carries wording for the ones it deliberately did NOT put in gaps (a SUGGEST/OFFER it
+      // recorded as dropped-because-it-renders-elsewhere) — that phrasing is still the buyer-facing copy we want.
+      for (const c of r.considered || []) if (c.engine_ref && byId.has(c.engine_ref) && !phrasing[c.engine_ref]) phrasing[c.engine_ref] = { q: c.q };
+      setEnginePhrasing(phrasing);
       // Drop any gap that IS the opening question. The v2 planner ranks the opening out of the same candidate
       // pool as the gaps, so its top gap is often verbatim the opening — which rendered the identical question
       // twice inside the banner. Match on a punctuation/case-insensitive key, not string equality.
       const qKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const openKey = r.opening?.q ? qKey(r.opening.q) : '';
-      const rankedGaps = (r.gaps || []).filter((g) => g.kind !== 'identity' && (!openKey || qKey(g.q) !== openKey));
+      const rankedGaps = (r.gaps || []).filter((g) => g.kind !== 'identity' && (!openKey || qKey(g.q) !== openKey)
+        && !(g.engine_ref && nonQuestion.has(g.engine_ref)));   // conflicts/suggestions/offers render on their own surface
+      // NOTHING MAY BE SILENTLY DROPPED. An engine ASK the planner neither asked NOR recorded in its ledger is a
+      // planner failure, not a ranking call — the engine already decided it was worth the buyer's effort, so it
+      // is appended (capped at 3, in the engine's own priority order) instead of vanishing. A ranked-and-dropped
+      // ASK stays dropped: that IS the planner doing its job, and the reason is in the routing ledger below.
+      const seenRefs = new Set([...(r.gaps || []), ...(r.considered || [])].map((x) => x.engine_ref).filter(Boolean) as string[]);
+      const askedKeys = new Set([...(r.gaps || []).map((g) => g.q), r.opening?.q || ''].filter(Boolean).map(qKey));
+      const unranked = engineDecisions.filter((d) => d.action === 'ASK' && !seenRefs.has(d.id)
+        && !askedKeys.has(qKey(d.field)) && ![...askedKeys].some((k) => k.includes(decisionKey(d.field))))
+        .slice(0, 3);
       // Split the ONE ranked gap list so the SAME question never appears twice: exactly 2 questions ride the
       // very top (the opening/intent question + the single top-ranked gap); everything else becomes page-2
       // "smart questions". Without this split, banner and page-2 would both render off the identical r.gaps array.
@@ -800,20 +860,71 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
         });
       }
       setIsqHints(r.field_hints || {});
-      // gaps → the page-2 "smart questions" chips, same AiSpecQuestion shape the existing render already expects.
-      setAiSpecs(pageGaps.map((g) => ({ fieldName: g.q, options: g.options || [], helperText: g.why, kind: g.kind === 'non_spec' ? 'intent' : 'spec' } as AiSpecQuestion)));
+      // gaps → the spec-page questions, same AiSpecQuestion shape the existing render already expects.
+      // engineRef rides along so the routing ledger can prove which ENGINE decision each rendered question is.
+      setAiSpecs([
+        ...pageGaps.map((g) => ({ fieldName: g.q, options: g.options || [], helperText: g.why, kind: g.kind === 'non_spec' ? 'intent' : 'spec', engineRef: g.engine_ref } as AiSpecQuestion)),
+        ...unranked.map((d) => ({ fieldName: d.field, options: d.options || [], helperText: d.why, kind: d.kind === 'non_spec' ? 'intent' : 'spec', engineRef: d.id } as AiSpecQuestion)),
+      ]);
     }).catch((e) => {
       setBaq(null);
       emitApiError('runCuratedPlanner', e, { mcatId, aiEpoch });
       emit(EV.AISPECS_FAILED, { mcatId, aiEpoch, surface: surfaceName });
       // P2-258: on a RE-PLAN (aiEpoch>0, e.g. a photo added on the spec page) KEEP the last-good questions so
       // the buyer isn't force-navigated off the page; only a genuine first-load failure clears them.
-      if (plannerFiredFor.current === fireKey && gen === commitGen.current) { setAiSpecsError(true); if (aiEpoch === 0) setAiSpecs([]); }
+      // ENGINE FALLBACK: a dead planner must not take the engine's decisions down with it. The engine already
+      // decided WHAT to ask; only the ranking and the plain-English phrasing are lost, so we render its own
+      // field names as the questions rather than showing the buyer nothing.
+      if (plannerFiredFor.current === fireKey && gen === commitGen.current) {
+        setAiSpecsError(true);
+        setEnginePhrasing({});
+        const engineAsks = engineDecisions.filter((d) => d.action === 'ASK');
+        if (aiEpoch === 0) setAiSpecs(engineAsks.map((d) => ({ fieldName: d.field, options: d.options || [], helperText: d.why, kind: d.kind === 'non_spec' ? 'intent' : 'spec', engineRef: d.id } as AiSpecQuestion)));
+      }
     }).finally(() => {
       if (plannerFiredFor.current === fireKey && gen === commitGen.current) { setBaqLoading(false); setAiSpecsLoading(false); }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [committed, mcatId, isqSpecs, productName, aiEpoch, specsLoading]);
+
+  // ── DECISION ROUTING LEDGER — the "nothing may be silently dropped" guarantee ─────────────────────────
+  // Every engine Decision Object is accounted for on every render pass: it either RENDERED (and we say where,
+  // and in whose wording), or it is recorded as suppressed WITH a reason. The reason is the planner's own
+  // `dropped_because` when it ranked the decision away, and an explicit defect line when it never ranked it at
+  // all. Published via `decisionRoutingReport()` (+ window.__decisionRouting) for the debug panel's suppressed
+  // list. SUPPRESS decisions are deliberately absent — the ENGINE already dropped those and the debug panel
+  // reads them straight off `p.decisions`; this ledger is about what the FORM did with what it was handed.
+  useEffect(() => {
+    if (!engineDecisions.length) { recordDecisionRoutes([]); return; }
+    const isqLower = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase()));
+    const renderedAsk = new Map<string, string>();     // engine id → the wording the buyer actually sees
+    for (const q of aiSpecs) if (q.engineRef && !isqLower.has(q.fieldName.toLowerCase())) renderedAsk.set(q.engineRef, q.fieldName);
+    for (const g of baq?.gaps || []) if (g.engine_ref) renderedAsk.set(g.engine_ref, g.q);
+    const ledger = new Map((baq?.considered || []).filter((c) => c.engine_ref).map((c) => [c.engine_ref as string, c]));
+    // Mirrors `renderableSuggests` exactly — the ledger must agree with the screen, or it is worse than useless.
+    const answered = (d: { id: string; field: string }) => suggestPicks[d.id] === undefined && !!(specValues[d.field] || aiSpecValues[d.field] || extraSpecs[d.field]);
+    const routes: DecisionRoute[] = engineDecisions.map((d) => {
+      const phrase = enginePhrasing[d.id]?.q;
+      const led = ledger.get(d.id);
+      const lost = led?.outcome === 'dropped' ? (led.dropped_because || 'the planner ranked it out') : '';
+      if (d.action === 'ASK') {
+        const q = renderedAsk.get(d.id);
+        if (q) return { id: d.id, action: d.action, field: d.field, rendered: true, where: 'spec page · question', reason: '', q };
+        return { id: d.id, action: d.action, field: d.field, rendered: false, where: 'suppressed', reason: lost || 'the planner never ranked it and it was not in the ledger (planner defect)' };
+      }
+      if (d.action === 'RESOLVE_CONFLICT') {
+        if ((d.conflict?.length ?? 0) >= 2) return { id: d.id, action: d.action, field: d.field, rendered: true, where: 'spec page · A/B conflict widget', reason: '', q: phrase };
+        return { id: d.id, action: d.action, field: d.field, rendered: false, where: 'suppressed', reason: 'the engine sent fewer than two values — there is nothing for the buyer to choose between' };
+      }
+      if (d.action === 'SUGGEST') {
+        if (answered(d)) return { id: d.id, action: d.action, field: d.field, rendered: false, where: 'suppressed', reason: 'the buyer has already answered this field — a suggestion would only second-guess him' };
+        return { id: d.id, action: d.action, field: d.field, rendered: true, where: 'spec page · unselected suggestion chip', reason: '', q: phrase };
+      }
+      if (dismissedOffers[d.id]) return { id: d.id, action: d.action, field: d.field, rendered: false, where: 'suppressed', reason: 'the buyer dismissed the strip' };
+      return { id: d.id, action: d.action, field: d.field, rendered: true, where: 'spec page · dismissable offer strip', reason: '', q: phrase };
+    });
+    recordDecisionRoutes(routes);
+  }, [engineDecisions, aiSpecs, baq, enginePhrasing, dismissedOffers, isqSpecs, specValues, aiSpecValues, extraSpecs, suggestPicks]);
 
   // ── LLM-on-image: a seeded product image → analyzeImage → MORE specs, via the same merge path as an
   //    upload. Best-effort: cross-origin image fetch may be CORS-blocked (imimg.com) → skip silently. ──
@@ -876,6 +987,33 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // Bumping aiEpoch re-runs the planner with the new context. The product name, once the buyer has typed
   // it, is NEVER overwritten (it's the primary signal) — a photo only ADDS specs; it names the product
   // only when the buyer left it blank.
+  // The merge, extracted as a PURE function so the same logic can answer "did anything actually change?"
+  // WITHOUT writing state. That question is load-bearing: the epoch bump below re-fires the planner, and an
+  // unconditional bump is a non-terminating loop (see applyExtractedSpecs).
+  const mergeExtracted = (prev: Record<string, string>, specs: Record<string, string>, replace: boolean) => {
+    const next = { ...prev };
+    const machineKeys = new Set(photoSetKeys.current);
+    let changed = false;
+    if (replace) {
+      for (const k of photoSetKeys.current) {
+        const restated = Object.keys(specs).some((sk) => sk.toLowerCase() === k.toLowerCase());
+        if (!restated) { if (k in next) changed = true; delete next[k]; machineKeys.delete(k); }
+      }
+    }
+    for (const s of isqSpecs) {
+      const field = s.IM_SPEC_MASTER_DESC;
+      const hit = Object.keys(specs).find((k) => k.toLowerCase() === field.toLowerCase());
+      if (!hit || !specs[hit]) continue;
+      if (useCaseSetKeys.current.has(field)) continue; // use-case assist OUTRANKS photo/mic (owner) — don't override
+      if (next[field] && !photoSetKeys.current.has(field)) continue; // buyer-owned value — never clobber
+      const opts = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
+      const v = snapToOption(specs[hit], opts);
+      if (next[field] !== v) changed = true;
+      next[field] = v;
+      machineKeys.add(field);
+    }
+    return { next, machineKeys, changed };
+  };
   const applyExtractedSpecs = (specs: Record<string, string>) => {
     if (!Object.keys(specs).length) return;
     // A LATER extraction for the SAME product REPLACES the prior photo/voice evidence (audit #3 photo-reselect):
@@ -888,29 +1026,22 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     // Flush onto the loaded ISQ fields. SNAP each value to the field's real option (audit #10 — no duplicate
     // "Other" chip). Overwrite an EMPTY field OR one a prior extraction set (photoSetKeys); NEVER overwrite a
     // value the buyer typed/picked. On replace, first drop machine-set values the new extraction no longer states.
+    // EAGER pass over the ref mirror, purely to learn whether this changes anything. A setState updater runs on
+    // the NEXT render, so a flag written inside it can never be read here — hence the mirror.
+    const eager = mergeExtracted(specValuesRef.current, specs, replace);
+    specValuesRef.current = eager.next;   // keep the mirror fresh for a second extraction landing in the same tick
     setSpecValues((prev) => {
-      const next = { ...prev };
-      const machineKeys = new Set(photoSetKeys.current);
-      if (replace) {
-        for (const k of photoSetKeys.current) {
-          const restated = Object.keys(specs).some((sk) => sk.toLowerCase() === k.toLowerCase());
-          if (!restated) { delete next[k]; machineKeys.delete(k); }
-        }
-      }
-      for (const s of isqSpecs) {
-        const field = s.IM_SPEC_MASTER_DESC;
-        const hit = Object.keys(specs).find((k) => k.toLowerCase() === field.toLowerCase());
-        if (!hit || !specs[hit]) continue;
-        if (useCaseSetKeys.current.has(field)) continue; // use-case assist OUTRANKS photo/mic (owner) — don't override
-        if (next[field] && !photoSetKeys.current.has(field)) continue; // buyer-owned value — never clobber
-        const opts = s.IM_SPEC_OPTIONS_DESC ? s.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean) : [];
-        next[field] = snapToOption(specs[hit], opts);
-        machineKeys.add(field);
-      }
-      photoSetKeys.current = machineKeys; // idempotent assignment (safe under StrictMode double-invoke)
-      return next;
+      const r = mergeExtracted(prev, specs, replace);
+      photoSetKeys.current = r.machineKeys; // idempotent assignment (safe under StrictMode double-invoke)
+      return r.changed ? r.next : prev;     // identity return → React bails out, no wasted render
     });
-    setAiEpoch((e) => e + 1);
+    // NON-TERMINATING RE-PLAN LOOP (P0, 2026-07-28). This bump used to be UNCONDITIONAL. The planner's own
+    // `prefills` route back through here, and a prefill whose field matches no ISQ spec lands nowhere — so
+    // `filled` stopped changing, the fire-key `mcat:name:aiEpoch:specSig` changed on aiEpoch ALONE, and the
+    // planner re-fired forever with a byte-identical request (up to 200k chars of corpus, maxTokens 8000, at
+    // temperature 0.2, so the model re-emitted the same prefills every time). The only terminator was an LLM
+    // error. Bump ONLY when a spec field genuinely moved — no new truth, no re-plan.
+    if (eager.changed) setAiEpoch((e) => e + 1);
   };
   const showFeedback = (msg: string, type: ToastType = 'info') => showToast(msg, type);
 
@@ -1130,8 +1261,15 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     // submitted lead (not just the screen). Keyed by the question; deduped against specs already carrying the concept.
     if (baq?.opening?.q && baqAnswers.opening?.trim()) { const k = baq.opening.q.replace(/\?+\s*$/, '').trim(); if (k && !(k in merged)) merged[k] = baqAnswers.opening.trim(); }
     (baq?.gaps || []).forEach((g, i) => { const a = baqAnswers[`gap${i}`]; const k = (g.q || '').replace(/\?+\s*$/, '').trim(); if (k && a && a.trim() && !(k in merged)) merged[k] = a.trim(); });
+    // A RESOLVED CONFLICT is the strongest fact on the page — the buyer just chose between two of his own
+    // signals, so it OVERWRITES whatever a prefill put in that field. An unresolved conflict ships nothing:
+    // per the firewall, a value the buyer never settled must not reach a seller under his name.
+    for (const d of engineConflicts) { const v = conflictPicks[d.id]; if (v && v.trim()) merged[d.field] = v.trim(); }
+    // An ACCEPTED suggestion is a buyer tap, so it ships — but only when he actually tapped it (INFERRED tier
+    // is never shipped unaccepted). Never shadows a value already present.
+    for (const d of engineSuggests) { const v = suggestPicks[d.id]; if (v && v.trim() && !(d.field in merged)) merged[d.field] = v.trim(); }
     return Object.entries(merged).filter(([, v]) => v && v.trim());
-  }, [specValues, aiSpecValues, aiSpecs, isqSpecs, extraSpecs, baq, baqAnswers]);
+  }, [specValues, aiSpecValues, aiSpecs, isqSpecs, extraSpecs, baq, baqAnswers, engineConflicts, conflictPicks, engineSuggests, suggestPicks]);
 
   // Compact one-liner for the on-screen "Your requirement" banner.
   const requirementSummary = useMemo(() => {
@@ -1192,6 +1330,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // a transient gateway hiccup shouldn't silently rob the buyer of the smart questions. Loader shows while in flight.
   const retryAiSpecs = () => {
     plannerFiredFor.current = '';       // re-arm the once-per-(mcat:name:epoch:specSig) guard
+    plannerRuns.current = 0;            // an explicit buyer retry is never a runaway — clear the automatic-run ceiling
     setAiSpecsError(false);
     setAiSpecsLoading(true);            // instant loader feedback
     setAiEpoch((e) => e + 1);           // new fireKey → the planner effect re-fires
@@ -1515,21 +1654,147 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       </div>
     </div>
   );
+  // ── ONE SPEC LIST, ONE UI (owner 2026-07-28) ───────────────────────────────────────────────────────────
+  // The planner's questions used to live in their own teal boxed card floating above the specs — a second,
+  // visually louder form on the same page. They are questions about the same requirement, so they now render
+  // with the SAME label + chips markup as every ISQ spec, in one continuous list. The ONLY thing that keeps a
+  // section of its own is the use-case assist, and it sits at the very top of the page.
+  const renderInlineQuestion = (
+    key: string, q: string, why: string | undefined, options: string[] | undefined,
+    value: string, onChange: (v: string) => void, badge?: React.ReactNode,
+  ) => (
+    <div key={key} className="space-y-2">
+      <label className="block text-sm font-medium text-gray-700">{q}
+        {why && <span className="ml-2 font-normal text-gray-500">— {why}</span>}
+        {badge}
+      </label>
+      {options?.length
+        ? <OptionChips ariaLabel={q} options={options} value={value} onChange={onChange} />
+        : <input type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder="Type your answer" aria-label={q}
+            className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-400" />}
+    </div>
+  );
+  // The buyer-aware OPENING question + the single top-ranked gap. Same markup as a spec field — the buyer has
+  // no reason to know one came from the ISQ schema and the other from the Curated-RFQ planner.
+  const plannerQuestions = (
+    <>
+      {baqLoading && !baq && (
+        <p className="text-sm text-gray-500 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Reading what you're after…</p>
+      )}
+      {baq?.opening?.q && renderInlineQuestion('planner-opening', baq.opening.q, baq.opening.why, baq.opening.options,
+        baqAnswers.opening ?? '', (v) => { bes('chip', 'opening'); setBaqAnswers((a) => ({ ...a, opening: v })); })}
+      {(baq?.gaps || []).map((g, i) => renderInlineQuestion(`planner-gap-${i}`, g.q, g.why, g.options,
+        baqAnswers[`gap${i}`] ?? '', (v) => { bes('chip', `gap${i}`); setBaqAnswers((a) => ({ ...a, [`gap${i}`]: v })); }))}
+    </>
+  );
+  // ── RESOLVE_CONFLICT · the A/B widget (fabrication firewall) ────────────────────────────────────────────
+  // Two of the buyer's OWN signals disagree on one field. Neither is settled truth, so NEITHER is pre-selected
+  // and neither may be shipped until he picks. This is the single most important interaction in the whole form
+  // — it is what stops a value the buyer never said reaching a seller — and until now it rendered NOWHERE:
+  // `brainToSeed` built `seed.conflicts` and not one line of UI ever read it.
+  const renderableConflicts = engineConflicts.filter((d) => (d.conflict?.length ?? 0) >= 2);
+  const conflictsSection = renderableConflicts.length > 0 && (
+    <div className="space-y-4">
+      {renderableConflicts.map((d) => {
+        const phrase = enginePhrasing[d.id];
+        return (
+          <div key={d.id} className="space-y-2" ref={() => bes('question_shown', `conflict:${d.field}`)}>
+            <label className="block text-sm font-medium text-gray-700">
+              {phrase?.q || `Which is right for ${d.field.toLowerCase()}?`}
+              <span className="ml-2 font-normal text-amber-700">— You told us both</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {(d.conflict || []).map((o: ConflictOption) => {
+                const picked = conflictPicks[d.id] === o.value;
+                return (
+                  <button key={o.value} type="button" title={o.evidence}
+                    onClick={() => { bes('chip', `conflict:${d.field}`); setConflictPicks((p) => ({ ...p, [d.id]: o.value })); }}
+                    className={`rounded-xl border px-3 py-2 text-left text-sm ${picked ? 'border-teal-600 bg-teal-600 text-white' : 'border-gray-300 bg-white text-gray-800 hover:border-teal-300'}`}>
+                    <span className="block font-medium">{o.value}</span>
+                    <span className={`block text-[11px] ${picked ? 'text-teal-50' : 'text-gray-500'}`}>{o.source}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+  // ── SUGGEST · unselected INFERRED-tier ghost chips ──────────────────────────────────────────────────────
+  // A category norm, not anything this buyer said. Dashed and unselected by construction: the moment one is
+  // pre-selected it stops being a suggestion and becomes a fabricated buyer fact.
+  // Hidden once the buyer has ANSWERED the field himself — a suggestion must never second-guess his own answer.
+  // But a field HE filled by tapping this very chip keeps its row (suggestPicks), so he can tap again to undo.
+  const renderableSuggests = engineSuggests.filter((d) => suggestPicks[d.id] !== undefined || !(specValues[d.field] || aiSpecValues[d.field] || extraSpecs[d.field]));
+  const suggestionsSection = renderableSuggests.length > 0 && (
+    <div className="space-y-4">
+      {renderableSuggests.map((d) => {
+        const opts = d.options?.length ? d.options : (d.value ? [d.value] : []);
+        if (!opts.length) return null;
+        const isqHit = isqSpecs.find((s) => s.IM_SPEC_MASTER_DESC.toLowerCase() === d.field.toLowerCase());
+        const picked = suggestPicks[d.id] || (isqHit ? specValues[isqHit.IM_SPEC_MASTER_DESC] : '') || '';
+        return (
+          <div key={d.id} className="space-y-2" ref={() => bes('question_shown', `suggest:${d.field}`)}>
+            <label className="block text-sm font-medium text-gray-700">{enginePhrasing[d.id]?.q || d.field}
+              <span className="ml-2 font-normal text-gray-500">— Common in this category</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {opts.map((o) => (
+                <button key={o} type="button"
+                  onClick={() => {
+                    bes('chip', `suggest:${d.field}`);
+                    const next = picked === o ? '' : o;   // tap again to un-accept — a suggestion is never sticky
+                    setSuggestPicks((p) => ({ ...p, [d.id]: next }));
+                    if (isqHit) setSpecValue(isqHit.IM_SPEC_MASTER_DESC, next);
+                  }}
+                  className={`rounded-full border px-3 py-1.5 text-[13px] ${picked === o ? 'border-teal-600 bg-teal-600 text-white' : 'border-dashed border-gray-300 bg-white text-gray-500 hover:border-teal-300 hover:text-gray-700'}`}>{o}</button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+  // ── OFFER · dismissable strip ───────────────────────────────────────────────────────────────────────────
+  // Not a question and never merged into the requirement (e.g. the `project` offer for a buyer sourcing several
+  // related items). Dismissing it is recorded in the routing ledger as the reason it stopped rendering.
+  const visibleOffers = engineOffers.filter((d) => !dismissedOffers[d.id]);
+  const offersSection = visibleOffers.length > 0 && (
+    <div className="space-y-2">
+      {visibleOffers.map((d) => (
+        <div key={d.id} className="flex items-start gap-2 rounded-xl border border-indigo-200 bg-indigo-50/60 px-3.5 py-2.5 text-sm text-indigo-900">
+          <span className="shrink-0 text-indigo-400">✦</span>
+          <span className="min-w-0 flex-1">
+            {enginePhrasing[d.id]?.q || d.field}
+            {d.why && <span className="block text-[11.5px] text-indigo-700/80">{d.why}</span>}
+            {!!d.options?.length && <span className="block text-[11.5px] text-indigo-700/80">{d.options.join(' · ')}</span>}
+          </span>
+          <button type="button" aria-label="Dismiss" onClick={() => setDismissedOffers((p) => ({ ...p, [d.id]: true }))}
+            className="w-7 h-7 shrink-0 rounded-lg text-indigo-400 hover:bg-indigo-100 hover:text-indigo-700 flex items-center justify-center"><X size={14} /></button>
+        </div>
+      ))}
+    </div>
+  );
+  // Use-case assist entry (ported from Quick Quote): the ONE thing on the spec page that keeps a section of its
+  // own, and the owner wants it at the very TOP — above the prefill receipt, the conflicts and every question.
+  const useCaseAssistTop = hasFormLLM() && isqSpecs.length > 0 && (
+    <button type="button" onClick={() => setAssistOpen(true)} className="mb-4 w-full flex items-center gap-2 text-left rounded-xl border border-teal-200 bg-teal-50/60 px-3.5 py-2.5 text-sm text-teal-800 hover:bg-teal-50 transition-colors">
+      <span className="text-teal-500 shrink-0">✦</span>
+      <span className="min-w-0">Not sure what to pick? <span className="font-semibold">Tell us your use-case</span> and we'll fill it for you.</span>
+    </button>
+  );
   const specBody = specsLoading && isqSpecs.length === 0 && extraKeys.length === 0 ? (
     <p className="text-sm text-gray-500 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Fetching category spec fields…</p>
   ) : (
     <div data-flash="specifications" className={`space-y-5 ${flashCls('specifications')}`}>
-      {/* Use-case assist entry (ported from Quick Quote): "Not sure what to pick? Tell us your use-case and we'll
-          fill it for you" → opens the "Help me fill the specs" popup (its own LLM, prioritized over photo/mic). */}
-      {hasFormLLM() && isqSpecs.length > 0 && (
-        <button type="button" onClick={() => setAssistOpen(true)} className="w-full flex items-center gap-2 text-left rounded-xl border border-teal-200 bg-teal-50/60 px-3.5 py-2.5 text-sm text-teal-800 hover:bg-teal-50 transition-colors">
-          <span className="text-teal-500 shrink-0">✦</span>
-          <span className="min-w-0">Not sure what to pick? <span className="font-semibold">Tell us your use-case</span> and we'll fill it for you.</span>
-        </button>
-      )}
-      {/* ALL buyer specs on page 1 (owner 2026-07-21) — the buyer's own requirement-form fields. */}
+      {/* ONE list, one UI: the conflict the buyer must settle, then the planner's questions, then his own ISQ
+          spec fields, then the category suggestions. No boxes, no visual hierarchy between them. */}
+      {conflictsSection}
+      {plannerQuestions}
       {visibleSpecs.map(renderSpecField)}
-      {isqSpecs.length === 0 && extraKeys.length === 0 && <p className="text-sm text-gray-500">No standard specs for this product — continue to the smart questions →</p>}
+      {suggestionsSection}
+      {isqSpecs.length === 0 && extraKeys.length === 0 && !baq?.opening && <p className="text-sm text-gray-500">No standard specs for this product — continue to the smart questions →</p>}
       {extrasSection}
     </div>
   );
@@ -1979,6 +2244,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       {aiBusy && <div role="status" aria-live="polite" className="shrink-0 mx-5 mt-2 px-3 py-1.5 flex items-center gap-2 text-[12px] text-teal-700 bg-teal-50 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />{aiBusy}</div>}
       <div className="relative flex-1 min-h-0 flex flex-col">
         <div ref={bodyScrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-auto-hide px-5 py-5">
+          {/* TOP OF THE SPEC PAGE (owner 2026-07-28): the use-case assist first — it's the one thing that keeps
+              its own section — then any OFFER strip, then the prefill receipt. Questions all live in one list below. */}
+          {stage === 'specs' && useCaseAssistTop}
+          {stage === 'specs' && offersSection && <div className="mb-3">{offersSection}</div>}
           {/* STEP-1 TRANSPARENCY — what the Engine filled / corrected from the buyer's own truth, each with its source. */}
           {stage === 'specs' && planCorrections.length > 0 && (
             <div className="mb-3 rounded-xl border border-gray-200 bg-white px-3.5 py-2.5">
@@ -1994,50 +2263,8 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
               </div>
             </div>
           )}
-          {/* THE BUYER-AWARE FIRST QUESTION — shown above the specs on the landing stage. */}
-          {stage === 'specs' && (baqLoading || baq?.opening) && (
-            <div className="mb-4 rounded-2xl border border-teal-200 bg-teal-50/70 p-4">
-              {baqLoading && !baq ? (
-                <div className="flex items-center gap-2 text-[13px] text-teal-700"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Reading what you're after…</div>
-              ) : baq?.opening ? (
-                <>
-                  <p className="text-[15px] font-semibold text-gray-900">{baq.opening.q}</p>
-                  {baq.opening.why && <p className="mt-0.5 text-[11.5px] text-teal-700/80">{baq.opening.why}</p>}
-                  {baq.opening.options?.length ? (
-                    <div className="mt-2.5 flex flex-wrap gap-1.5">
-                      {baq.opening.options.map((o) => (
-                        <button key={o} type="button" onClick={() => { bes('chip', 'opening'); setBaqAnswers((a) => ({ ...a, opening: o })); }}
-                          className={`rounded-full border px-3 py-1.5 text-[13px] ${baqAnswers.opening === o ? 'border-teal-600 bg-teal-600 text-white' : 'border-teal-300 bg-white text-teal-800'}`}>{o}</button>
-                      ))}
-                    </div>
-                  ) : (
-                    <input value={baqAnswers.opening ?? ''} onChange={(e) => setBaqAnswers((a) => ({ ...a, opening: e.target.value }))}
-                      placeholder="Type your answer" className="mt-2 w-full rounded-lg border border-teal-300 bg-white px-3 py-2 text-sm" />
-                  )}
-                  {baq.gaps?.length ? (
-                    <div className="mt-3 space-y-2.5 border-t border-teal-200/70 pt-3">
-                      {baq.gaps.map((g, i) => (
-                        <div key={i}>
-                          <p className="text-[13.5px] font-medium text-gray-800">{g.q}</p>
-                          {g.options?.length ? (
-                            <div className="mt-1.5 flex flex-wrap gap-1.5">
-                              {g.options.map((o) => (
-                                <button key={o} type="button" onClick={() => { bes('chip', `gap${i}`); setBaqAnswers((a) => ({ ...a, [`gap${i}`]: o })); }}
-                                  className={`rounded-full border px-2.5 py-1 text-[12.5px] ${baqAnswers[`gap${i}`] === o ? 'border-teal-600 bg-teal-50 text-teal-800' : 'border-gray-300 text-gray-700'}`}>{o}</button>
-                              ))}
-                            </div>
-                          ) : (
-                            <input value={baqAnswers[`gap${i}`] ?? ''} onChange={(e) => setBaqAnswers((a) => ({ ...a, [`gap${i}`]: e.target.value }))}
-                              placeholder="Type your answer" className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </>
-              ) : null}
-            </div>
-          )}
+          {/* The buyer-aware opening question no longer has a boxed card of its own — it renders inside specBody
+              with the same label + chips UI as every other spec (owner 2026-07-28). */}
           {stage === 'specs' ? <>{specBody}{aiSpecsBody}</> : stage === 'more' ? <div className="space-y-4">{logisticsBody}{moreBody}{contactBody}{consentNote}</div> : resultsBody}</div>
         {/* Subtle "more below" hint — appears only when the body overflows + not at the end; tap to scroll on. */}
         {showScrollHint && (
@@ -2060,7 +2287,9 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
               // HOLD while the AI-specs call is in flight (owner-locked): Next is held; the escape
               // ("Skip for now") takes the buyer straight to the last page. Late answers still merge.
               ? <span className="flex items-center gap-3 shrink-0">
-                  <button type="button" onClick={() => setStage('more')} className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-600">Skip for now</button>
+                  {/* BES: bailing WHILE the planner is still thinking is the most abandonment-prone moment in the
+                      whole flow, and this button (unlike its twin in aiSpecsBody) was emitting nothing at all. */}
+                  <button type="button" onClick={() => { bes('skip'); setStage('more'); }} className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-600">Skip for now</button>
                   <span className="flex items-center gap-1.5 bg-gray-100 text-gray-400 text-sm font-semibold px-5 py-2.5 rounded-lg"><span className="w-3.5 h-3.5 border-2 border-gray-300 border-t-transparent rounded-full animate-spin" />Preparing…</span>
                 </span>
               : <button onClick={() => setStage('more')} className="flex items-center gap-1.5 bg-teal-600 text-white text-sm font-semibold px-5 py-2.5 rounded-lg hover:bg-teal-700 shrink-0">Next <ArrowRight size={15} /></button>)

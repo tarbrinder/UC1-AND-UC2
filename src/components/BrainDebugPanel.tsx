@@ -7,6 +7,8 @@
 import { useEffect, useState } from 'react';
 import { getLLMHealth, getLLMRaw, onLLMActivity, type LLMCallRecord } from '../lib/gemini';
 import { besReport } from '../lib/bes';
+import { buildLadder, STAGE_META, type Cell as LadderCellData, type FacetLadder, type Mark } from '../lib/consumptionLadder';
+import { decisionRoutingReport } from '../lib/brains/formAdapter';
 import type { RequirementBrainPayload, Decision } from '../lib/brains/requirementBrain';
 
 const DOT: Record<string, string> = { green: 'bg-teal-500', amber: 'bg-amber-400', red: 'bg-red-500' };
@@ -39,6 +41,69 @@ function Pre({ v }: { v: unknown }) {
 }
 function Section({ title, count }: { title: string; count?: number | string }) {
   return <p className="mt-3 mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">{title}{count != null ? ` · ${count}` : ''}</p>;
+}
+
+// ─── Consumption Ladder rendering ────────────────────────────────────────────
+// A dense matrix in a ~380px rail: stage INITIALS as column heads (legend below the table), one glyph
+// per cell, everything else in the tooltip and the expanded row. The glyph vocabulary is deliberately
+// small and the two ambiguous states are visually distinct from the two definite ones:
+//   ✓ reached   ◐ reached but only some fields survived   ✗ stopped here   – not applicable
+//   ? not computable (NEVER a ✗ — absence of evidence is not evidence of absence)   ⋯ unverified
+//   ~ suffix    this cell came from a heuristic, not from an accounting record
+const MARK_GLYPH: Record<Mark, { g: string; c: string }> = {
+  yes: { g: '✓', c: 'text-teal-600' },
+  no: { g: '✗', c: 'text-red-500' },
+  na: { g: '–', c: 'text-gray-300' },
+  unknown: { g: '?', c: 'text-amber-500' },
+  unverified: { g: '⋯', c: 'text-gray-400' },
+};
+function LadderCell({ c }: { c: LadderCellData }) {
+  const partial = c.mark === 'yes' && c.of != null && c.n != null && c.n < c.of;
+  const g = partial ? { g: '◐', c: 'text-amber-600' } : MARK_GLYPH[c.mark];
+  const n = c.mark === 'yes' && c.of == null && c.n != null && c.n > 0 ? (c.n > 99 ? '99+' : String(c.n)) : '';
+  return (
+    <span title={c.why} className={`inline-flex w-[22px] shrink-0 items-baseline justify-center align-middle ${g.c}`}>
+      <span className="text-[10px] leading-none">{g.g}</span>
+      {n && <span className="text-[7px] leading-none text-gray-400">{n}</span>}
+      {c.soft && <span className="text-[7px] leading-none text-gray-300">~</span>}
+    </span>
+  );
+}
+function LadderRow({ f }: { f: FacetLadder }) {
+  const [open, setOpen] = useState(false);
+  const badBridge = !!f.bridge && !f.bridge.ok && f.carriedData;
+  const broke = (f.diesAt && f.diesAt !== 'parsed') || badBridge;
+  return (
+    <div className={`border-b border-gray-50 last:border-0 ${broke ? 'bg-red-50/40' : ''}`}>
+      <button onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-px py-1 text-left">
+        <span className={`min-w-0 flex-1 truncate pr-1 text-[10px] ${broke ? 'font-medium text-red-700' : 'text-gray-600'}`} title={f.id}>
+          {badBridge && <span title={f.bridge!.why} className="mr-0.5 text-red-500">⛓</span>}{f.label}
+        </span>
+        {STAGE_META.map((s) => <LadderCell key={s.key} c={f.stages[s.key]} />)}
+      </button>
+      {open && (
+        <div className="mb-1.5 space-y-1 rounded bg-gray-50 px-2 py-1.5">
+          <p className="font-mono text-[9px] text-gray-400">{f.id}</p>
+          {f.note && <p className="text-[9.5px] leading-snug text-indigo-700">{f.note}</p>}
+          {f.bridge && (
+            <p className={`text-[9.5px] leading-snug ${f.bridge.ok ? 'text-gray-500' : 'text-red-700'}`}>
+              <span className="mr-1 text-gray-400">bridge</span>{f.bridge.why}
+            </p>
+          )}
+          {STAGE_META.map((s) => {
+            const c = f.stages[s.key];
+            return (
+              <p key={s.key} className="text-[9.5px] leading-snug text-gray-500">
+                <span className="mr-1 inline-block w-[54px] shrink-0 text-gray-400">{s.name}</span>
+                <LadderCell c={c} />{' '}
+                {c.why}
+              </p>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPayload; onClose: () => void }) {
@@ -94,6 +159,107 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
           <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-600">{ds.suggestions_offered} suggested</span>
           <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-500">{ds.suppressed} suppressed</span>
         </div>
+
+        {/* CONSUMPTION LADDER — the instrument that makes the next data-consumption gap self-reporting.
+            Every one of this codebase's shipped consumption bugs was the same disease at a different rung:
+            parsed-then-dropped, accepted-and-never-passed, decided-and-never-rendered, green-on-empty.
+            One row per source-facet, one column per stage. A facet that reaches a stage and STOPS is the
+            whole point, so it is tinted red and named in the headline. Nothing here is allowed to flatter
+            us: a stage we cannot compute renders '?', never a ✓ and never a ✗. */}
+        {(() => {
+          const pio = raw['curated-planner'];
+          const lad = buildLadder(p, pio?.user, pio?.output);
+          const name = (f: FacetLadder) => f.id;
+          const groups: { node: string; label: string; rows: FacetLadder[] }[] = [];
+          for (const f of lad.facets) {
+            const key = f.node ?? 'client';
+            const g = groups.find((x) => x.node === key);
+            if (g) g.rows.push(f); else groups.push({ node: key, label: key === 'client' ? 'client-side inputs (not in the brain payload)' : key === 'profile' ? 'profile enrichment' : key, rows: [f] });
+          }
+          const dieNames = lad.dying.map(name);
+          return (<>
+            <Section title="consumption ladder — where each signal stops" count={`${lad.facets.length} facets`} />
+
+            {/* THE KPI. `M` is deliberately the facets that actually CARRIED DATA — a source that returned
+                nothing has not "died", it was simply empty, and mixing the two would hide the real number. */}
+            <div className={`rounded-lg px-2.5 py-2 ${lad.dying.length ? 'bg-red-50' : 'bg-teal-50'}`}>
+              <p className={`text-[15px] font-bold leading-none ${lad.dying.length ? 'text-red-700' : 'text-teal-700'}`}>
+                {lad.dying.length} <span className="text-[11px] font-normal text-gray-500">of {lad.m}</span>
+              </p>
+              <p className="mt-0.5 text-[10.5px] leading-snug text-gray-700">
+                facets carried real data and <span className="font-semibold">die before reaching a decision</span>
+                {lad.unverifiable.length ? <span className="text-gray-500"> · {lad.unverifiable.length} more unverifiable</span> : null}
+              </p>
+              {dieNames.length > 0 && (
+                <p className="mt-1 font-mono text-[9.5px] leading-relaxed text-red-700">{dieNames.join(' · ')}</p>
+              )}
+              {lad.unverifiable.length > 0 && (
+                <p className="mt-1 text-[9.5px] leading-snug text-amber-700">
+                  ? {lad.unverifiable.map(name).join(' · ')} — {!lad.hasEvidenceDict ? 'the engine emitted no evidence dictionary, so decisions[].evidence ids dangle and engine-side attribution is unauditable.' : ''}{!lad.plannerRun ? ' No curated-planner call has been captured this session, so the planner columns cannot be read yet — pick a product and they fill in.' : ''}
+                </p>
+              )}
+              {lad.notRendered.length > 0 && (
+                <p className="mt-1 text-[10px] leading-snug text-red-700">
+                  ⚠ {lad.notRendered.length} of the {lad.reachedDecision.length} facets that DID reach a decision are never rendered: <span className="font-mono">{lad.notRendered.map(name).join(' · ')}</span> — decided and thrown away.
+                </p>
+              )}
+              {/* The bridge count is the one break that is provable with NO live planner run: node_raw is a
+                  debug channel, and what the planner is fed comes out of metadata.* via brainToSeed. */}
+              {lad.brokenBridges.length > 0 && (
+                <p className="mt-1 text-[10px] leading-snug text-red-700">
+                  ⛓ {lad.brokenBridges.length} facet{lad.brokenBridges.length === 1 ? ' is' : 's are'} rich in node_raw but dead in the <span className="font-mono">metadata.*</span> slot the form adapter actually reads: <span className="font-mono">{lad.brokenBridges.map((f) => `${name(f)}→${f.bridge?.via}`).join(' · ')}</span>. Provable without a planner run.
+                </p>
+              )}
+              {lad.dying.length === 0 && lad.unverifiable.length === 0 && lad.notRendered.length === 0 && lad.brokenBridges.length === 0 && (
+                <p className="mt-1 text-[10px] text-teal-700">Every facet that carried data reached a decision and a control. Re-check when a source is added.</p>
+              )}
+            </div>
+
+            {/* Column heads — stage initials, hover for the full definition of how each is computed. */}
+            <div className="mt-2 flex items-center gap-px border-b border-gray-200 pb-1">
+              <span className="min-w-0 flex-1 pr-1 text-[9px] uppercase tracking-wide text-gray-400">facet</span>
+              {STAGE_META.map((s) => (
+                <span key={s.key} title={`${s.name} — ${s.how}`} className="w-[22px] shrink-0 text-center text-[8.5px] font-semibold text-gray-500">{s.abbr}</span>
+              ))}
+            </div>
+
+            {groups.map((g) => (
+              <div key={g.node}>
+                <p className="mt-1.5 text-[9px] font-semibold uppercase tracking-wide text-gray-400">{g.label}</p>
+                {g.rows.map((f) => <LadderRow key={f.id} f={f} />)}
+              </div>
+            ))}
+
+            <Row head={<span className="text-[10px] text-gray-500">legend · how each column is computed</span>}>
+              <div className="space-y-1 rounded bg-gray-50 px-2 py-1.5">
+                <p className="text-[9.5px] text-gray-600">
+                  <span className="text-teal-600">✓</span> reached ·{' '}
+                  <span className="text-amber-600">◐</span> reached, but only some of the facet&apos;s fields survived ·{' '}
+                  <span className="text-red-500">✗</span> stopped here ·{' '}
+                  <span className="text-gray-300">–</span> not applicable ·{' '}
+                  <span className="text-amber-500">?</span> not computable ·{' '}
+                  <span className="text-gray-400">⋯</span> unverified ·{' '}
+                  <span className="text-gray-400">~</span> heuristic, not an accounting record ·{' '}
+                  <span className="text-red-500">⛓</span> broken bridge
+                </p>
+                <p className="text-[9.5px] leading-snug text-gray-500">
+                  <span className="font-semibold text-gray-600">⛓ bridge</span> — node_raw is a DEBUG channel; what the planner is fed is built by brainToSeed out of <span className="font-mono">metadata.*</span>. A facet can be an honest Parsed ✓ and still be dead on arrival because its metadata slot is empty. This break is provable with no planner run at all, and it does not show up in any column.
+                </p>
+                <p className="text-[9.5px] leading-snug text-gray-500">
+                  <span className="font-semibold">?</span> is never a failure claim. A stage we cannot compute is rendered <span className="font-semibold">?</span> — never ✓ and never ✗ — because absence of evidence is not evidence of absence. Click any row for the per-stage reason.
+                </p>
+                {STAGE_META.map((s) => (
+                  <p key={s.key} className="text-[9.5px] leading-snug text-gray-500">
+                    <span className="mr-1 font-semibold text-gray-600">{s.abbr} {s.name}</span> — {s.how}
+                  </p>
+                ))}
+                <p className="text-[9.5px] leading-snug text-amber-700">
+                  Submitted and Seller-saw are ⋯ for every facet by design. Nothing in this client records WHICH values left in the submitted RFQ, and no seller-side signal reaches it at all — so they are left unverified rather than guessed. A submitted-payload snapshot would make the first column real.
+                </p>
+              </div>
+            </Row>
+          </>);
+        })()}
 
         {/* LLM CALLS — the eval harness: prompt · tokens · ms · cost, expand → full I/O */}
         <Section title="LLM calls (prompt · tokens · latency · cost)" count={llm.length} />
@@ -305,6 +471,33 @@ export default function BrainDebugPanel({ p, onClose }: { p: RequirementBrainPay
             ))}
           </div>
         </>)}
+
+        {/* DECISION ROUTING — the firewall's accounting record. Every engine Decision Object either rendered
+            somewhere or appears here WITH a reason. Before this, ASK/RESOLVE_CONFLICT/SUGGEST/OFFER were all
+            dropped in the adapter with no trace: _seed.gaps and _seed.conflicts had zero readers anywhere in
+            src/. A decision that vanishes without a reason is now a visible defect, not an invisible one. */}
+        {(() => {
+          const routes = decisionRoutingReport();
+          if (!routes.length) return null;
+          const lost = routes.filter((r) => !r.rendered);
+          return (<>
+            <Section title="decision routing — every engine decision accounted for"
+              count={`${routes.length - lost.length}/${routes.length} rendered`} />
+            <div className="space-y-0.5">
+              {routes.map((r) => (
+                <div key={r.id} className={`rounded px-2 py-1 text-[10px] leading-snug ${r.rendered ? 'bg-teal-50/50' : 'bg-amber-50/60'}`}>
+                  <span className={`mr-1 rounded px-1 text-[8.5px] font-bold ${ACTION_COLOR[r.action] ?? 'bg-gray-100 text-gray-500'}`}>{r.action}</span>
+                  <span className="font-medium text-gray-800">{r.field}</span>
+                  {r.q && r.q !== r.field ? <span className="text-gray-500"> → “{r.q}”</span> : null}
+                  <br />
+                  <span className={r.rendered ? 'text-teal-700' : 'text-amber-700'}>
+                    {r.rendered ? `↳ ${r.where}` : `↳ not shown — ${r.reason || 'NO REASON GIVEN (defect)'}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>);
+        })()}
 
         {/* SUPPRESSED — split, because the old single "never shown" header was FALSE (owner caught it).
             Two different layers suppress for two different reasons and only one of them is truly never shown:
