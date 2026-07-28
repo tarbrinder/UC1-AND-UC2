@@ -128,14 +128,14 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
               </button>
             ))}
           </div>
-          <button disabled={!glid} onClick={() => load(glid)} className="mt-5 w-full rounded-lg bg-teal-700 py-3 text-sm font-semibold text-white disabled:bg-gray-200 disabled:text-gray-400">Draft requirement →</button>
+          <button disabled={!glid} onClick={() => load(glid)} className="mt-5 w-full rounded-lg bg-teal-700 py-3 text-sm font-semibold text-white disabled:bg-gray-200 disabled:text-gray-500">Draft requirement →</button>
           <p className="mt-5 text-[12px] font-medium text-gray-600">Or try a scenario</p>
           <div className="mt-1.5 grid grid-cols-1 gap-1.5">
             {USE_CASES.map((u) => (
               <button key={u.label} onClick={() => { setGlid(u.glid); load(u.glid); }} className="flex items-center gap-2 rounded-lg border border-gray-200 px-2.5 py-1.5 text-left hover:border-teal-300">
                 <span className="text-[12.5px] font-medium text-gray-800">{u.label}</span>
                 {u.instant && <span className="rounded bg-teal-50 px-1 text-[10px] text-teal-700">instant</span>}
-                <span className="ml-auto font-mono text-[10px] text-gray-400">{u.glid}</span>
+                <span className="ml-auto font-mono text-[10px] text-gray-500">{u.glid}</span>
               </button>
             ))}
           </div>
@@ -226,9 +226,9 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
       <div className={`absolute z-20 mt-1 max-h-[220px] overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-lg ${cls}`}>
         {matches.map((m) => (
           <button key={m.label} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(m.label)}
-            className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left hover:bg-teal-50">
+            className="flex min-h-[44px] w-full items-center gap-2 px-3.5 py-2.5 text-left hover:bg-teal-50">
             <span className="min-w-0 flex-1 truncate text-[13.5px] text-gray-800">{m.label}</span>
-            <span className="shrink-0 text-[10px] text-gray-400">{m.kind}</span>
+            <span className="shrink-0 text-[10px] text-gray-500">{m.kind}</span>
           </button>
         ))}
       </div>
@@ -238,7 +238,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
       d == null ? null : d === 0 ? 'today' : d === 1 ? 'yesterday'
       : d < 30 ? `${d}d ago` : d < 60 ? 'last month' : `${Math.round(d / 30)} months ago`;
     const freshCls = (d?: number | null) =>
-      d == null ? 'text-gray-400' : d < 7 ? 'text-teal-700' : d < 30 ? 'text-gray-500' : 'text-gray-400';
+      d == null ? 'text-gray-500' : d < 7 ? 'text-teal-700' : d < 30 ? 'text-gray-500' : 'text-gray-500';
     const openRec = (r: Recommendation) => { const i = recs.indexOf(r); setSeed(i === 0 && payload ? brainToSeed(payload) : recommendationToSeed(r, payload ?? undefined)); setPhase('form'); };
     const startFresh = (name?: string) => {
       const n = (name ?? productInput).trim();
@@ -261,14 +261,14 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
                     <div className="relative mt-3 flex items-center gap-1 rounded-xl bg-white p-1 shadow-sm">
             <input value={productInput} onChange={(e) => setProductInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') startFresh(); }}
               placeholder="What are you looking for?" aria-label="Product name"
-              className="min-w-0 flex-1 rounded-lg px-2.5 py-2.5 text-[14px] outline-none placeholder:text-gray-400" />
-            <button type="button" onClick={() => startFresh()} aria-label="Add a photo" className="shrink-0 rounded-lg p-2 text-gray-500 active:bg-gray-100">
+              className="min-w-0 flex-1 rounded-lg px-2.5 py-2.5 text-[16px] outline-none placeholder:text-gray-500" />
+            <button type="button" onClick={() => startFresh()} aria-label="Continue, then add a photo" title="Continue, then add a photo" className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg text-gray-500 active:bg-gray-100">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3.2"/></svg>
             </button>
-            <button type="button" onClick={() => startFresh()} aria-label="Speak your requirement" className="shrink-0 rounded-lg p-2 text-gray-500 active:bg-gray-100">
+            <button type="button" onClick={() => startFresh()} aria-label="Continue, then speak your requirement" title="Continue, then speak your requirement" className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg text-gray-500 active:bg-gray-100">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>
             </button>
-            <button type="button" onClick={() => startFresh()} className="shrink-0 rounded-lg bg-teal-600 px-3.5 py-2.5 text-[13px] font-semibold text-white active:bg-teal-700">Go</button>
+            <button type="button" onClick={() => startFresh()} className="shrink-0 rounded-lg min-h-[44px] bg-teal-700 px-4 text-[14px] font-semibold text-white active:bg-teal-800">Go</button>
               {suggestList('left-0 right-0 top-full')}
           </div>
         </div>
@@ -276,7 +276,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
         <div className="px-4 py-4">
           {/* LAST requirement in full; everything older hides behind a small CTA. */}
           {!naming && reqCards.length > 0 && (<>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Continue where you left off</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Continue where you left off</p>
             <div className="mt-2 space-y-2">
               {(showAllReqs ? reqCards : reqCards.slice(0, 1)).map((r, i) => {
                 const st = STATUS_OF(r);
@@ -306,7 +306,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
 
           {/* Browsed — ~1.5 tiles visible so the cut edge advertises the scroll. */}
           {!naming && browsed.length > 0 && (<>
-            <p className="mt-5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Products you viewed</p>
+            <p className="mt-5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Products you viewed</p>
             <div className="scroll-auto-hide -mx-4 mt-2 flex snap-x gap-2.5 overflow-x-auto px-4 pb-1.5">
               {browsed.map((r, i) => (
                 <button key={i} onClick={() => openRec(r)} className="w-[62%] max-w-[190px] shrink-0 snap-start rounded-xl border border-gray-200 bg-white p-2 text-left active:border-teal-300">
@@ -335,14 +335,14 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
                         <div className="relative mt-5 flex items-stretch gap-2 rounded-2xl bg-white p-1.5 shadow-lg ring-1 ring-black/5">
               <input value={productInput} onChange={(e) => setProductInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') startFresh(); }}
                 placeholder="What are you looking for?" aria-label="Product name"
-                className="min-w-0 flex-1 rounded-xl px-4 py-3 text-[15px] outline-none placeholder:text-gray-400" />
-              <button type="button" onClick={() => startFresh()} aria-label="Add a photo" title="Add a photo" className="shrink-0 rounded-xl px-3 text-gray-500 hover:bg-gray-50 hover:text-teal-600">
+                className="min-w-0 flex-1 rounded-xl px-4 py-3 text-[16px] outline-none placeholder:text-gray-500" />
+              <button type="button" onClick={() => startFresh()} aria-label="Continue, then add a photo" title="Continue, then add a photo" className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-gray-500 hover:bg-gray-50 hover:text-teal-600">
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3.2"/></svg>
               </button>
-              <button type="button" onClick={() => startFresh()} aria-label="Speak your requirement" title="Speak your requirement" className="shrink-0 rounded-xl px-3 text-gray-500 hover:bg-gray-50 hover:text-teal-600">
+              <button type="button" onClick={() => startFresh()} aria-label="Continue, then speak your requirement" title="Continue, then speak your requirement" className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-gray-500 hover:bg-gray-50 hover:text-teal-600">
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>
               </button>
-              <button type="button" onClick={() => startFresh()} className="shrink-0 rounded-xl bg-teal-600 px-6 text-[14px] font-semibold text-white hover:bg-teal-700">Continue</button>
+              <button type="button" onClick={() => startFresh()} className="shrink-0 rounded-xl bg-teal-700 px-6 text-[14px] font-semibold text-white hover:bg-teal-800">Continue</button>
               {suggestList('left-0 right-0 top-full')}
             </div>
           </div>
@@ -354,7 +354,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
               column takes the full width rather than sitting beside dead space. */}
           {heroImgs.length > 0 && (
             <aside className="hidden w-[248px] shrink-0 lg:block">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Is this what you mean?</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Is this what you mean?</p>
               <div className="mt-2 grid grid-cols-2 gap-2">
                 {heroImgs.map((src, i) => (
                   <div key={i} className="flex h-[104px] items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-white">
@@ -362,7 +362,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
                   </div>
                 ))}
               </div>
-              <p className="mt-2 text-[10.5px] leading-snug text-gray-400">Representative images from IndiaMART — not your own photo. Add yours with the camera above.</p>
+              <p className="mt-2 text-[10.5px] leading-snug text-gray-500">Representative images from IndiaMART — not your own photo. Add yours with the camera above.</p>
             </aside>
           )}
           <div className="min-w-0 flex-1">
@@ -420,7 +420,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
                   </div>
                   <p className="mt-2 line-clamp-2 text-[12.5px] font-medium leading-snug text-gray-800">{r.product}</p>
                   <p className={`mt-0.5 text-[10.5px] ${freshCls(r.age_days)}`}>{ago(r.age_days) ? `viewed ${ago(r.age_days)}` : 'viewed recently'}</p>
-                  {r.specs?.length ? <p className="line-clamp-1 text-[10.5px] text-gray-400">{r.specs.slice(0, 2).map((s) => s.value).join(' · ')}</p> : null}
+                  {r.specs?.length ? <p className="line-clamp-1 text-[10.5px] text-gray-500">{r.specs.slice(0, 2).map((s) => s.value).join(' · ')}</p> : null}
                 </button>
               ))}
             </div>
