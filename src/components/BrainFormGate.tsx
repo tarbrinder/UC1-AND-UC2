@@ -10,6 +10,7 @@ import { fetchRequirementBrain, fetchBuyerBrainRecommendations, fixture, fixture
 import { brainToSeed, recommendationToSeed, blankSeed, type BrainSeed } from '../lib/brains/formAdapter';
 import { USE_CASES } from '../lib/brains/useCaseGlids';
 import { fetchProductSuggestions } from '../utils/productNames';
+import { fetchProductImages } from '../lib/enrichment';
 
 type Phase = 'glid' | 'choose' | 'form';
 const ACTION_LABEL: Record<string, string> = { enrich: 'Enrich', repost: 'Re-post', new: 'Source' };
@@ -33,11 +34,25 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
     () => (typeof window !== 'undefined' && window.innerWidth >= 768 ? 'standalone' : 'mobile'),
   );
   const [showAllReqs, setShowAllReqs] = useState(false);   // desktop landing: "+N more" on the requirement grid
+  // LEFT PANEL (owner-locked): blank until we know a product, then 3-4 representative images fetched for
+  // the entered/picked name. Deliberately NOT fetched for mcats where quantity isn't a real concept — those
+  // buyers skip the landing page entirely, so the images would never be seen.
+  const [heroImgs, setHeroImgs] = useState<string[]>([]);
+  const imgTok = useRef(0);
+  const loadHeroImgs = (name: string, mcat?: string) => {
+    const q = String(name || '').trim();
+    if (q.length < 3) { setHeroImgs([]); return; }
+    const tok = ++imgTok.current;
+    fetchProductImages(q, mcat).then((r) => { if (imgTok.current === tok) setHeroImgs(r.slice(0, 4)); })
+      .catch(() => { if (imgTok.current === tok) setHeroImgs([]); });
+  };
   const [apiSuggest, setApiSuggest] = useState<string[]>([]);   // IndiaMART catalogue suggest (debounced)
   const sugTok = useRef(0);
+  const pickedRef = useRef('');   // a just-picked label must not immediately re-open its own dropdown
   useEffect(() => {
     const q = productInput.trim();
     if (q.length < 2) { setApiSuggest([]); return; }
+    if (q === pickedRef.current) return;   // he chose this one — don't re-suggest it back at him
     const tok = ++sugTok.current;
     const t = setTimeout(() => {
       fetchProductSuggestions(q)
@@ -202,10 +217,15 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
     const matches = q
       ? [...own, ...apiSuggest.filter((l) => !ownKeys.has(l.toLowerCase())).map((l) => ({ label: l, kind: 'on IndiaMART' }))].slice(0, 5)
       : [];
+    // a picked suggestion is a committed name -> load its images immediately
+    // Picking a suggestion NAMES the product; it does not submit. The buyer stays on the landing page so he
+    // can see the images we found and set/confirm quantity (owner-locked: qty-defined mcats are answered
+    // here, qty-undefined mcats skip this page entirely — in which case these images are never fetched).
+    const pick = (label: string) => { pickedRef.current = label.trim(); setProductInput(label); loadHeroImgs(label); setApiSuggest([]); };
     const suggestList = (cls: string) => (matches.length ? (
       <div className={`absolute z-20 mt-1 max-h-[220px] overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-lg ${cls}`}>
         {matches.map((m) => (
-          <button key={m.label} onMouseDown={(e) => e.preventDefault()} onClick={() => { setProductInput(m.label); startFresh(m.label); }}
+          <button key={m.label} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(m.label)}
             className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left hover:bg-teal-50">
             <span className="min-w-0 flex-1 truncate text-[13.5px] text-gray-800">{m.label}</span>
             <span className="shrink-0 text-[10px] text-gray-400">{m.kind}</span>
@@ -328,7 +348,24 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
           </div>
         </div>
 
-        <div className="mx-auto w-full max-w-5xl px-8 py-7">
+        <div className="mx-auto flex w-full max-w-5xl gap-7 px-8 py-7">
+          {/* LEFT PANEL — blank until we know a product (owner: no presumed image on arrival), then the
+              representative images for the entered/picked name. Hidden entirely when empty so the right
+              column takes the full width rather than sitting beside dead space. */}
+          {heroImgs.length > 0 && (
+            <aside className="hidden w-[248px] shrink-0 lg:block">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Is this what you mean?</p>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {heroImgs.map((src, i) => (
+                  <div key={i} className="flex h-[104px] items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-white">
+                    <img src={src} alt="" className="h-full w-full object-contain p-1.5" onError={(e) => { (e.currentTarget.parentElement as HTMLElement).style.display = 'none'; }} />
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-[10.5px] leading-snug text-gray-400">Representative images from IndiaMART — not your own photo. Add yours with the camera above.</p>
+            </aside>
+          )}
+          <div className="min-w-0 flex-1">
           {/* REQUIREMENTS — things he actually expressed. Rectangular cards, status-first. */}
           {!naming && reqCards.length > 0 && (<>
             <div className="flex items-baseline justify-between">
@@ -389,6 +426,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
             </div>
           </>)}
 
+          </div>
         </div>
       </div>
     );
