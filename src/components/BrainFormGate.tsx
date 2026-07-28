@@ -9,6 +9,7 @@ import BrainDebugPanel from './BrainDebugPanel';
 import { fetchRequirementBrain, fetchBuyerBrainRecommendations, fixture, fixtureGlids, type Recommendation, type RequirementBrainPayload } from '../lib/brains/requirementBrain';
 import { brainToSeed, recommendationToSeed, blankSeed, type BrainSeed } from '../lib/brains/formAdapter';
 import { USE_CASES } from '../lib/brains/useCaseGlids';
+import { fetchProductSuggestions } from '../utils/productNames';
 
 type Phase = 'glid' | 'choose' | 'form';
 const ACTION_LABEL: Record<string, string> = { enrich: 'Enrich', repost: 'Re-post', new: 'Source' };
@@ -32,6 +33,19 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
     () => (typeof window !== 'undefined' && window.innerWidth >= 768 ? 'standalone' : 'mobile'),
   );
   const [showAllReqs, setShowAllReqs] = useState(false);   // desktop landing: "+N more" on the requirement grid
+  const [apiSuggest, setApiSuggest] = useState<string[]>([]);   // IndiaMART catalogue suggest (debounced)
+  const sugTok = useRef(0);
+  useEffect(() => {
+    const q = productInput.trim();
+    if (q.length < 2) { setApiSuggest([]); return; }
+    const tok = ++sugTok.current;
+    const t = setTimeout(() => {
+      fetchProductSuggestions(q)
+        .then((r) => { if (sugTok.current === tok) setApiSuggest(r); })   // drop a stale query's results
+        .catch(() => { if (sugTok.current === tok) setApiSuggest([]); });
+    }, 220);
+    return () => clearTimeout(t);
+  }, [productInput]);
 
   const load = (g: string) => {
     setGlid(g); setLoading(true); setLive(false);
@@ -176,8 +190,17 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
       (bmem?.recent_searches ?? []).forEach((q) => add(q, 'you searched this'));
       return out;
     })();
-    const matches = productInput.trim()
-      ? SUGGEST.filter((m) => m.label.toLowerCase().includes(productInput.trim().toLowerCase())).slice(0, 5)
+    // His OWN truth first (requirements / viewed / searches), then IndiaMART's catalogue suggest —
+    // the same /api/suggest endpoint the Simple form uses. Buyer truth outranks the catalogue, always.
+    const q = productInput.trim();
+    // Once he starts naming a product he has left the 'continue where you left off' job, so his history
+    // collapses out of the way. That also makes a separate 'brand-new requirement' CTA redundant — typing a
+    // name IS the brand-new path, and qty/unit are asked on the next page like any other entry.
+    const naming = q.length > 0;
+    const own = q ? SUGGEST.filter((m) => m.label.toLowerCase().includes(q.toLowerCase())) : [];
+    const ownKeys = new Set(own.map((m) => m.label.toLowerCase()));
+    const matches = q
+      ? [...own, ...apiSuggest.filter((l) => !ownKeys.has(l.toLowerCase())).map((l) => ({ label: l, kind: 'on IndiaMART' }))].slice(0, 5)
       : [];
     const suggestList = (cls: string) => (matches.length ? (
       <div className={`absolute z-20 mt-1 max-h-[220px] overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-lg ${cls}`}>
@@ -232,7 +255,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
 
         <div className="px-4 py-4">
           {/* LAST requirement in full; everything older hides behind a small CTA. */}
-          {reqCards.length > 0 && (<>
+          {!naming && reqCards.length > 0 && (<>
             <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Continue where you left off</p>
             <div className="mt-2 space-y-2">
               {(showAllReqs ? reqCards : reqCards.slice(0, 1)).map((r, i) => {
@@ -262,7 +285,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
           </>)}
 
           {/* Browsed — ~1.5 tiles visible so the cut edge advertises the scroll. */}
-          {browsed.length > 0 && (<>
+          {!naming && browsed.length > 0 && (<>
             <p className="mt-5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Products you viewed</p>
             <div className="scroll-auto-hide -mx-4 mt-2 flex snap-x gap-2.5 overflow-x-auto px-4 pb-1.5">
               {browsed.map((r, i) => (
@@ -279,10 +302,6 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
             </div>
           </>)}
 
-          <button onClick={() => { setSeed(blankSeed()); setPhase('form'); }}
-            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-gray-300 px-3 py-3 text-[12.5px] text-gray-600 active:border-teal-400">
-            <span className="text-base leading-none">+</span> Brand-new requirement
-          </button>
         </div>
       </div>
     );
@@ -311,7 +330,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
 
         <div className="mx-auto w-full max-w-5xl px-8 py-7">
           {/* REQUIREMENTS — things he actually expressed. Rectangular cards, status-first. */}
-          {reqCards.length > 0 && (<>
+          {!naming && reqCards.length > 0 && (<>
             <div className="flex items-baseline justify-between">
               <h2 className="text-[15px] font-semibold text-gray-900">Continue where you left off</h2>
               <span className="text-[12px] text-gray-500">{reqCards.length} requirement{reqCards.length > 1 ? 's' : ''} · newest first</span>
@@ -348,7 +367,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
           </>)}
 
           {/* BROWSED — image-first tiles, title under the image. Framed honestly as "only viewed". */}
-          {browsed.length > 0 && (<>
+          {!naming && browsed.length > 0 && (<>
             <div className="mt-8 flex items-baseline justify-between">
               <h2 className="text-[15px] font-semibold text-gray-900">Products you viewed</h2>
               <span className="text-[12px] text-gray-500">Not requested yet · most recently viewed first</span>
@@ -370,10 +389,6 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
             </div>
           </>)}
 
-          <button onClick={() => { setSeed(blankSeed()); setPhase('form'); }}
-            className="mt-8 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-gray-300 px-4 py-3.5 text-[13.5px] text-gray-600 hover:border-teal-400 hover:text-teal-700">
-            <span className="text-lg leading-none">+</span> Start a brand-new requirement — type, speak, snap or upload
-          </button>
         </div>
       </div>
     );
