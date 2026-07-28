@@ -161,18 +161,47 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
     const reqCards = recs.filter((r) => r.action !== 'new').sort(byRecency);
     const browsed = recs.filter((r) => r.action === 'new').sort(byRecency);
     const shownReqs = showAllReqs ? reqCards : reqCards.slice(0, 6);
+    // SUGGESTER — one pool, three origins, each labelled so the buyer knows why it is offered: the titles of
+    // his own requirements (strongest signal, first), products he viewed, and his past searches. Deduped
+    // case-insensitively, max 5, and the list itself scrolls.
+    const bmem = payload?.metadata.buyer_memory;
+    const SUGGEST: { label: string; kind: string }[] = (() => {
+      const seen = new Set<string>(); const out: { label: string; kind: string }[] = [];
+      const add = (label: string, kind: string) => {
+        const k = String(label ?? '').trim().toLowerCase();
+        if (!k || seen.has(k)) return; seen.add(k); out.push({ label: String(label).trim(), kind });
+      };
+      recs.forEach((r) => add(r.product, r.action === 'new' ? 'you viewed this' : 'your requirement'));
+      (bmem?.viewed ?? []).forEach((v) => add(v.name, 'you viewed this'));
+      (bmem?.recent_searches ?? []).forEach((q) => add(q, 'you searched this'));
+      return out;
+    })();
+    const matches = productInput.trim()
+      ? SUGGEST.filter((m) => m.label.toLowerCase().includes(productInput.trim().toLowerCase())).slice(0, 5)
+      : [];
+    const suggestList = (cls: string) => (matches.length ? (
+      <div className={`absolute z-20 mt-1 max-h-[220px] overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-lg ${cls}`}>
+        {matches.map((m) => (
+          <button key={m.label} onMouseDown={(e) => e.preventDefault()} onClick={() => { setProductInput(m.label); startFresh(m.label); }}
+            className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left hover:bg-teal-50">
+            <span className="min-w-0 flex-1 truncate text-[13.5px] text-gray-800">{m.label}</span>
+            <span className="shrink-0 text-[10px] text-gray-400">{m.kind}</span>
+          </button>
+        ))}
+      </div>
+    ) : null);
     // One phrasing for recency everywhere it appears, so a card, a tile and a chip never disagree.
     const ago = (d?: number | null) =>
       d == null ? null : d === 0 ? 'today' : d === 1 ? 'yesterday'
       : d < 30 ? `${d}d ago` : d < 60 ? 'last month' : `${Math.round(d / 30)} months ago`;
     const freshCls = (d?: number | null) =>
       d == null ? 'text-gray-400' : d < 7 ? 'text-teal-700' : d < 30 ? 'text-gray-500' : 'text-gray-400';
-    const openRec = (r: Recommendation) => { const i = recs.indexOf(r); setSeed(i === 0 && payload ? brainToSeed(payload) : recommendationToSeed(r)); setPhase('form'); };
+    const openRec = (r: Recommendation) => { const i = recs.indexOf(r); setSeed(i === 0 && payload ? brainToSeed(payload) : recommendationToSeed(r, payload ?? undefined)); setPhase('form'); };
     const startFresh = (name?: string) => {
       const n = (name ?? productInput).trim();
       if (!n) { setSeed(blankSeed()); setPhase('form'); return; }
       const hit = recs.find((r) => r.product.toLowerCase() === n.toLowerCase());
-      setSeed(hit ? recommendationToSeed(hit) : { ...blankSeed(), productName: n, buyerFacts: payload?.metadata.buyer_facts as Record<string, unknown> | undefined, basket: recs.map((r) => r.product) });
+      setSeed(hit ? recommendationToSeed(hit, payload ?? undefined) : { ...blankSeed(), productName: n, buyerFacts: payload?.metadata.buyer_facts as Record<string, unknown> | undefined, basket: recs.map((r) => r.product) });
       setPhase('form');
     };
     // ── COMPACT SURFACE (popup + msite) — same design language as the desktop landing, DECLUTTERED.
@@ -186,8 +215,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
         {/* Compact green band — the desktop hero's job in a fraction of the height. */}
         <div className="bg-gradient-to-br from-teal-700 to-emerald-800 px-4 pb-4 pt-3.5">
           <h2 className="text-[15px] font-bold text-white">Post a requirement, get quotes</h2>
-          <p className="mt-0.5 text-[11.5px] text-teal-50/80">Tell us the product — we fill in the rest.</p>
-          <div className="mt-3 flex items-center gap-1 rounded-xl bg-white p-1 shadow-sm">
+                    <div className="relative mt-3 flex items-center gap-1 rounded-xl bg-white p-1 shadow-sm">
             <input value={productInput} onChange={(e) => setProductInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') startFresh(); }}
               placeholder="What are you looking for?" aria-label="Product name"
               className="min-w-0 flex-1 rounded-lg px-2.5 py-2.5 text-[14px] outline-none placeholder:text-gray-400" />
@@ -198,6 +226,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>
             </button>
             <button type="button" onClick={() => startFresh()} className="shrink-0 rounded-lg bg-teal-600 px-3.5 py-2.5 text-[13px] font-semibold text-white active:bg-teal-700">Go</button>
+              {suggestList('left-0 right-0 top-full')}
           </div>
         </div>
 
@@ -237,7 +266,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
             <p className="mt-5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Products you viewed</p>
             <div className="scroll-auto-hide -mx-4 mt-2 flex snap-x gap-2.5 overflow-x-auto px-4 pb-1.5">
               {browsed.map((r, i) => (
-                <button key={i} onClick={() => openRec(r)} className="w-[62%] shrink-0 snap-start rounded-xl border border-gray-200 bg-white p-2 text-left active:border-teal-300">
+                <button key={i} onClick={() => openRec(r)} className="w-[62%] max-w-[190px] shrink-0 snap-start rounded-xl border border-gray-200 bg-white p-2 text-left active:border-teal-300">
                   <div className="flex h-[86px] items-center justify-center overflow-hidden rounded-lg bg-gray-50">
                     {r.image
                       ? <img src={r.image} alt="" className="h-full w-full object-contain p-1.5" onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
@@ -264,8 +293,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
         <div className="bg-gradient-to-br from-teal-700 via-teal-700 to-emerald-800">
           <div className="mx-auto w-full max-w-5xl px-8 py-10">
             <h1 className="text-[26px] font-bold leading-tight text-white">Post a requirement, get quotes</h1>
-            <p className="mt-1 text-[13.5px] text-teal-50/80">Tell us the product — we&apos;ll fill in everything we already know about your business.</p>
-            <div className="mt-5 flex items-stretch gap-2 rounded-2xl bg-white p-1.5 shadow-lg ring-1 ring-black/5">
+                        <div className="relative mt-5 flex items-stretch gap-2 rounded-2xl bg-white p-1.5 shadow-lg ring-1 ring-black/5">
               <input value={productInput} onChange={(e) => setProductInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') startFresh(); }}
                 placeholder="What are you looking for?" aria-label="Product name"
                 className="min-w-0 flex-1 rounded-xl px-4 py-3 text-[15px] outline-none placeholder:text-gray-400" />
@@ -276,6 +304,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>
               </button>
               <button type="button" onClick={() => startFresh()} className="shrink-0 rounded-xl bg-teal-600 px-6 text-[14px] font-semibold text-white hover:bg-teal-700">Continue</button>
+              {suggestList('left-0 right-0 top-full')}
             </div>
           </div>
         </div>
@@ -353,7 +382,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
     if (mode === 'popup') return (
       <div className="relative h-screen bg-gray-100">
         <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4">
-          <div className="flex h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">{inner}</div>
+          <div className="flex h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl lg:max-w-3xl">{inner}</div>
         </div>
         {modeSwitch}{debugBtn}{debugRail}
       </div>

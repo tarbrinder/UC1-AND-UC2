@@ -751,6 +751,11 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       // NOTE: keep these on their own lines. An inline `//` here previously swallowed `categoryCorpus` to end-of-line,
       // so the corpus was fetched, stored in the ref, and then silently never passed to the planner.
       categoryTopSpecs: catTopSpecs,
+      // The category's INTENT half. The v6 grounding audit's headline was that intent lives in personas /
+      // b2b_b2c, NOT in top_specs — and the planner has accepted both since v2 while nothing ever passed
+      // them, so <category_personas> and <category_b2b_b2c> were permanently "(none)".
+      categoryPersonas: _seed?.categoryPersonas,
+      categoryB2b: _seed?.categoryB2b,
       categoryCorpus: categoryCorpusRef.current,
       buyerFacts: _seed?.buyerFacts, basket: _seed?.basket, buyerSignals: _seed?.buyerSignals,
       entryMode: _seed?.entryMode, model: RFQ_MODEL_SPECS,
