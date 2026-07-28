@@ -24,7 +24,13 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
   const [seed, setSeed] = useState<BrainSeed | null>(null);
   const [debug, setDebug] = useState(false);
   const [productInput, setProductInput] = useState('');
-  const [mode, setMode] = useState<'mobile' | 'popup' | 'standalone'>('mobile');
+  // THE surface defaults to the one that matches the actual screen. This was hardcoded to 'mobile', so every
+  // desktop visitor landed on the 390px phone column and never saw the desktop landing at all unless they
+  // clicked the demo switcher — which is why it kept looking unbuilt. The switcher stays for demoing.
+  const [mode, setMode] = useState<'mobile' | 'popup' | 'standalone'>(
+    // 768 = the `md` breakpoint the desktop landing's own grid is built around (sm:2-col / lg:3-col).
+    () => (typeof window !== 'undefined' && window.innerWidth >= 768 ? 'standalone' : 'mobile'),
+  );
   const [showAllReqs, setShowAllReqs] = useState(false);   // desktop landing: "+N more" on the requirement grid
 
   const load = (g: string) => {
@@ -202,9 +208,19 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
       r.is_expired ? { label: 'Expired', cls: 'bg-gray-100 text-gray-600 ring-gray-200' }
       : /pending|await/i.test(String(r.status ?? '')) ? { label: 'Awaiting approval', cls: 'bg-amber-50 text-amber-700 ring-amber-200' }
       : { label: 'Active', cls: 'bg-teal-50 text-teal-700 ring-teal-200' };
-    const reqCards = recs.filter((r) => r.action !== 'new');
-    const browsed = recs.filter((r) => r.action === 'new');
+    // TIMELINE-SORTED (owner): both lists run newest-first. Undated entries sink to the bottom rather than
+    // being dropped or silently treated as "today" — unknown recency is not the same as recent.
+    const byRecency = (a: Recommendation, b: Recommendation) =>
+      (a.age_days ?? Number.MAX_SAFE_INTEGER) - (b.age_days ?? Number.MAX_SAFE_INTEGER);
+    const reqCards = recs.filter((r) => r.action !== 'new').sort(byRecency);
+    const browsed = recs.filter((r) => r.action === 'new').sort(byRecency);
     const shownReqs = showAllReqs ? reqCards : reqCards.slice(0, 6);
+    // One phrasing for recency everywhere it appears, so a card, a tile and a chip never disagree.
+    const ago = (d?: number | null) =>
+      d == null ? null : d === 0 ? 'today' : d === 1 ? 'yesterday'
+      : d < 30 ? `${d}d ago` : d < 60 ? 'last month' : `${Math.round(d / 30)} months ago`;
+    const freshCls = (d?: number | null) =>
+      d == null ? 'text-gray-400' : d < 7 ? 'text-teal-700' : d < 30 ? 'text-gray-500' : 'text-gray-400';
     const openRec = (r: Recommendation) => { const i = recs.indexOf(r); setSeed(i === 0 && payload ? brainToSeed(payload) : recommendationToSeed(r)); setPhase('form'); };
     const startFresh = (name?: string) => {
       const n = (name ?? productInput).trim();
@@ -240,7 +256,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
           {reqCards.length > 0 && (<>
             <div className="flex items-baseline justify-between">
               <h2 className="text-[15px] font-semibold text-gray-900">Continue where you left off</h2>
-              <span className="text-[12px] text-gray-500">{reqCards.length} requirement{reqCards.length > 1 ? 's' : ''} from the last 30 days</span>
+              <span className="text-[12px] text-gray-500">{reqCards.length} requirement{reqCards.length > 1 ? 's' : ''} · newest first</span>
             </div>
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {shownReqs.map((r, i) => {
@@ -254,7 +270,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
                         : <div className="h-14 w-14 shrink-0 rounded-lg border border-dashed border-gray-200 bg-gray-50" />}
                       <div className="min-w-0 flex-1">
                         <p className="line-clamp-2 text-[14px] font-semibold leading-snug text-gray-900">{r.product}</p>
-                        <p className="mt-1 text-[11.5px] text-gray-500">{r.age_days != null ? `${r.age_days}d ago` : 'from your history'}</p>
+                        <p className={`mt-1 text-[11.5px] ${freshCls(r.age_days)}`}>{ago(r.age_days) ?? 'date unknown'}</p>
                       </div>
                     </div>
                     {r.specs?.length ? <p className="mt-2.5 line-clamp-2 text-[11.5px] leading-relaxed text-gray-500">{r.specs.slice(0, 3).map((s) => `${s.name}: ${s.value}`).join(' · ')}</p> : null}
@@ -277,7 +293,7 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
           {browsed.length > 0 && (<>
             <div className="mt-8 flex items-baseline justify-between">
               <h2 className="text-[15px] font-semibold text-gray-900">Products you viewed</h2>
-              <span className="text-[12px] text-gray-500">Not requested yet — start one from any of these</span>
+              <span className="text-[12px] text-gray-500">Not requested yet · most recently viewed first</span>
             </div>
             <div className="scroll-auto-hide mt-3 flex snap-x gap-3 overflow-x-auto pb-2">
               {browsed.map((r, i) => (
@@ -289,7 +305,8 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
                       : <span className="text-[11px] text-gray-300">no image</span>}
                   </div>
                   <p className="mt-2 line-clamp-2 text-[12.5px] font-medium leading-snug text-gray-800">{r.product}</p>
-                  {r.specs?.length ? <p className="mt-0.5 line-clamp-1 text-[10.5px] text-gray-400">{r.specs.slice(0, 2).map((s) => s.value).join(' · ')}</p> : null}
+                  <p className={`mt-0.5 text-[10.5px] ${freshCls(r.age_days)}`}>{ago(r.age_days) ? `viewed ${ago(r.age_days)}` : 'viewed recently'}</p>
+                  {r.specs?.length ? <p className="line-clamp-1 text-[10.5px] text-gray-400">{r.specs.slice(0, 2).map((s) => s.value).join(' · ')}</p> : null}
                 </button>
               ))}
             </div>
