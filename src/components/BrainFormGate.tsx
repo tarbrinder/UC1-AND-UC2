@@ -141,60 +141,6 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
         <span className={`rounded px-2 py-0.5 text-[11px] ${loading ? 'bg-amber-100 text-amber-700' : live ? 'bg-teal-100 text-teal-700' : 'bg-gray-100 text-gray-500'}`}>{loading ? `loading (${pns})…` : live ? 'live' : 'fixture'}</span>
       </div>
     );
-    const chooseBody = (
-      <div className="mx-auto w-full max-w-md flex-1 overflow-y-auto px-5 py-5">
-          <h2 className="text-base font-semibold text-gray-900">What do you want quotes for?</h2>
-          <p className="mt-0.5 text-[12px] text-gray-500">Type it, or continue where you left off.</p>
-
-          {/* Product field + Buyer-Memory dropdown (your own past searches/products appear as you type) */}
-          {(() => {
-            const bm = payload?.metadata.buyer_memory;
-            const memory = Array.from(new Set([...(bm?.recent_searches ?? []), ...((bm?.viewed ?? []).map((v) => v.name))].filter(Boolean)));
-            const q = productInput.trim().toLowerCase();
-            const matches = q ? memory.filter((m) => m.toLowerCase().includes(q)).slice(0, 6) : [];
-            const startNew = (name: string) => {
-              const hit = recs.find((r) => r.product.toLowerCase() === name.toLowerCase());
-              setSeed(hit ? recommendationToSeed(hit) : { ...blankSeed(), productName: name, buyerFacts: payload?.metadata.buyer_facts as Record<string, unknown> | undefined, basket: recs.map((r) => r.product) });
-              setPhase('form');
-            };
-            return (
-              <div className="relative mt-3">
-                <input value={productInput} onChange={(e) => setProductInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && productInput.trim()) startNew(productInput.trim()); }}
-                  placeholder="What are you looking for?" className="w-full rounded-xl border border-gray-300 px-3.5 py-3 text-[15px] outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100" />
-                {matches.length > 0 && (
-                  <div className="absolute z-10 mt-1 w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg">
-                    {matches.map((m) => (
-                      <button key={m} onClick={() => startNew(m)} className="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[13.5px] text-gray-700 hover:bg-teal-50">
-                        <span className="text-gray-300">↩</span>{m}<span className="ml-auto text-[10px] text-gray-400">you searched this</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* Prev requirements — subtly below the field, with their specs; select fills them in */}
-          {recs.length > 0 && <p className="mt-5 text-[11px] font-medium uppercase tracking-wide text-gray-400">Continue where you left off</p>}
-          <div className="mt-2 space-y-2">
-            {recs.map((r, i) => (
-              <button key={i} onClick={() => { setSeed(i === 0 && payload ? brainToSeed(payload) : recommendationToSeed(r)); setPhase('form'); }}
-                className="flex w-full items-start gap-3 rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-left hover:border-teal-300">
-                {r.image ? <img src={r.image} alt="" className="h-11 w-11 shrink-0 rounded-lg border border-gray-100 object-cover" onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} /> : null}
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[14px] font-medium text-gray-900">{r.product}</p>
-                  <p className="text-[11px] text-gray-500">{r.age_days != null ? `${r.age_days}d ago` : 'from your history'}{r.is_expired ? ' · expired' : r.status ? ` · ${r.status}` : ''}</p>
-                  {r.specs?.length ? <p className="mt-0.5 truncate text-[11px] text-gray-400">{r.specs.slice(0, 3).map((s) => `${s.name}: ${s.value}`).join(' · ')}</p> : null}
-                </div>
-                <span className={`mt-0.5 shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${ACTION_TONE[r.action]}`}>{ACTION_LABEL[r.action]}</span>
-              </button>
-            ))}
-            <button onClick={() => { setSeed(blankSeed()); setPhase('form'); }} className="flex w-full items-center gap-2 rounded-xl border border-dashed border-gray-300 px-3 py-2.5 text-left text-[13px] text-gray-600 hover:border-teal-300">
-              <span className="text-lg">+</span> Brand-new requirement (type / speak / snap / upload)
-            </button>
-          </div>
-        </div>
-    );
     // ── DESKTOP LANDING (owner, asked repeatedly): the narrow max-w-md column above is a phone layout and
     // reads as a cramped list on a 1280px screen. Desktop gets its own composition:
     //   · a green hero band carrying the one job of this page — name the product (type / snap / speak)
@@ -229,6 +175,89 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
       setSeed(hit ? recommendationToSeed(hit) : { ...blankSeed(), productName: n, buyerFacts: payload?.metadata.buyer_facts as Record<string, unknown> | undefined, basket: recs.map((r) => r.product) });
       setPhase('form');
     };
+    // ── COMPACT SURFACE (popup + msite) — same design language as the desktop landing, DECLUTTERED.
+    // Owner: "the more the clutter the more the user will flake away." Both narrow surfaces previously
+    // rendered a flat 6-card vertical list, which buries the one thing this screen is for: name the product.
+    // So: the most recent requirement gets a full card; the rest collapse behind a deliberately small
+    // "+N more" text CTA; browsed products become a horizontal carousel showing ~1.5 tiles so the cut-off
+    // second tile signals scrollability without spending vertical space.
+    const compactBody = (
+      <div className="flex-1 overflow-y-auto">
+        {/* Compact green band — the desktop hero's job in a fraction of the height. */}
+        <div className="bg-gradient-to-br from-teal-700 to-emerald-800 px-4 pb-4 pt-3.5">
+          <h2 className="text-[15px] font-bold text-white">Post a requirement, get quotes</h2>
+          <p className="mt-0.5 text-[11.5px] text-teal-50/80">Tell us the product — we fill in the rest.</p>
+          <div className="mt-3 flex items-center gap-1 rounded-xl bg-white p-1 shadow-sm">
+            <input value={productInput} onChange={(e) => setProductInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') startFresh(); }}
+              placeholder="What are you looking for?" aria-label="Product name"
+              className="min-w-0 flex-1 rounded-lg px-2.5 py-2.5 text-[14px] outline-none placeholder:text-gray-400" />
+            <button type="button" onClick={() => startFresh()} aria-label="Add a photo" className="shrink-0 rounded-lg p-2 text-gray-500 active:bg-gray-100">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3.2"/></svg>
+            </button>
+            <button type="button" onClick={() => startFresh()} aria-label="Speak your requirement" className="shrink-0 rounded-lg p-2 text-gray-500 active:bg-gray-100">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>
+            </button>
+            <button type="button" onClick={() => startFresh()} className="shrink-0 rounded-lg bg-teal-600 px-3.5 py-2.5 text-[13px] font-semibold text-white active:bg-teal-700">Go</button>
+          </div>
+        </div>
+
+        <div className="px-4 py-4">
+          {/* LAST requirement in full; everything older hides behind a small CTA. */}
+          {reqCards.length > 0 && (<>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Continue where you left off</p>
+            <div className="mt-2 space-y-2">
+              {(showAllReqs ? reqCards : reqCards.slice(0, 1)).map((r, i) => {
+                const st = STATUS_OF(r);
+                return (
+                  <button key={i} onClick={() => openRec(r)} className="flex w-full items-start gap-3 rounded-xl border border-gray-200 bg-white p-3 text-left active:border-teal-300">
+                    {r.image
+                      ? <img src={r.image} alt="" className="h-12 w-12 shrink-0 rounded-lg border border-gray-100 bg-gray-50 object-contain" onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
+                      : <div className="h-12 w-12 shrink-0 rounded-lg border border-dashed border-gray-200 bg-gray-50" />}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[14px] font-semibold text-gray-900">{r.product}</p>
+                      <p className={`mt-0.5 text-[11px] ${freshCls(r.age_days)}`}>{ago(r.age_days) ?? 'date unknown'}</p>
+                      <div className="mt-1.5 flex items-center gap-1.5">
+                        <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ring-1 ${st.cls}`}>{st.label}</span>
+                        <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${ACTION_TONE[r.action]}`}>{ACTION_LABEL[r.action]} →</span>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            {reqCards.length > 1 && (
+              <button onClick={() => setShowAllReqs((v) => !v)} className="mt-1.5 text-[11.5px] font-medium text-teal-700 active:text-teal-800">
+                {showAllReqs ? '− Show less' : `+ ${reqCards.length - 1} more requirement${reqCards.length - 1 > 1 ? 's' : ''}`}
+              </button>
+            )}
+          </>)}
+
+          {/* Browsed — ~1.5 tiles visible so the cut edge advertises the scroll. */}
+          {browsed.length > 0 && (<>
+            <p className="mt-5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Products you viewed</p>
+            <div className="scroll-auto-hide -mx-4 mt-2 flex snap-x gap-2.5 overflow-x-auto px-4 pb-1.5">
+              {browsed.map((r, i) => (
+                <button key={i} onClick={() => openRec(r)} className="w-[62%] shrink-0 snap-start rounded-xl border border-gray-200 bg-white p-2 text-left active:border-teal-300">
+                  <div className="flex h-[86px] items-center justify-center overflow-hidden rounded-lg bg-gray-50">
+                    {r.image
+                      ? <img src={r.image} alt="" className="h-full w-full object-contain p-1.5" onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
+                      : <span className="text-[10px] text-gray-300">no image</span>}
+                  </div>
+                  <p className="mt-1.5 line-clamp-2 text-[12px] font-medium leading-snug text-gray-800">{r.product}</p>
+                  <p className={`text-[10px] ${freshCls(r.age_days)}`}>{ago(r.age_days) ? `viewed ${ago(r.age_days)}` : 'viewed recently'}</p>
+                </button>
+              ))}
+            </div>
+          </>)}
+
+          <button onClick={() => { setSeed(blankSeed()); setPhase('form'); }}
+            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-gray-300 px-3 py-3 text-[12.5px] text-gray-600 active:border-teal-400">
+            <span className="text-base leading-none">+</span> Brand-new requirement
+          </button>
+        </div>
+      </div>
+    );
+
     const desktopBody = (
       <div className="flex-1 overflow-y-auto">
         {/* HERO — green ground, one job: name the product. */}
@@ -319,7 +348,8 @@ export default function BrainFormGate({ glid: initialGlid }: { glid: string }) {
         </div>
       </div>
     );
-    const inner = <>{glidBar}{chooseBody}</>;
+    // popup + msite share the SAME decluttered body; standalone gets the wide landing below.
+    const inner = <>{glidBar}{compactBody}</>;
     if (mode === 'popup') return (
       <div className="relative h-screen bg-gray-100">
         <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4">
