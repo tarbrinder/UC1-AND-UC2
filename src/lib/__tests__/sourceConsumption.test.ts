@@ -48,7 +48,6 @@ const DEAD_FACET_ALLOWLIST: Record<string, string> = {
   // ── RFQ ────────────────────────────────────────────────────────────────────
   'rfq:[].specs[].mandatory': 'WIRE — the planner ranks gaps by a category corpus average while ignoring which specs this category actually forces a buyer to answer.',
   'rfq:[].specs[].priority': 'WIRE — the buyer\'s own form order is the natural order for the seeded chips.',
-  'rfq:[].order_value': 'WIRE — becomes a stated evidence atom and a PREFILL decision, then formAdapter drops it on the context skip-list and no surface renders it. Either show it or stop emitting the decision.',
   'rfq:[].category_name': 'WIRE — the planner gets categoryName from the McatDtl API instead, so the label the buyer actually posted under is discarded.',
   'rfq:[]._name_from': 'KEEP — merge-ledger provenance, debug-only by design.',
   'rfq:[]._renamed_from': 'KEEP — merge-ledger provenance, debug-only by design.',
@@ -74,10 +73,7 @@ const DEAD_FACET_ALLOWLIST: Record<string, string> = {
   'profile:location.pincode': 'WIRE — the form asks the buyer for a delivery pincode we already hold.',
   'profile:location.address': 'KEEP — PII-adjacent, not needed pre-quote.',
   'profile:location.country_iso': 'DELETE — single-country product.',
-  'profile:business.turnover': 'WIRE — order-size sanity, budget banding and the B2B/B2C call all guess without it.',
   'profile:kyb.pan': 'KEEP — identity document, not a requirement signal.',
-  'profile:kyb.legal_status': 'WIRE — proprietorship vs pvt ltd is a direct read on B2B-ness; the planner infers it from the category instead.',
-  'profile:kyb.registration_year': 'WIRE — business age, same argument as member_since which IS used.',
   'profile:kyb.nature_secondary': 'WIRE — a second line of business explains an otherwise unrelated basket.',
   'profile:activity.past_requirements': 'WIRE — repeat-buyer detection currently uses total_requirements alone.',
   'profile:activity.enquiry_replies': 'WIRE — responsiveness is never scored, yet it predicts whether quotes will be answered.',
@@ -85,7 +81,6 @@ const DEAD_FACET_ALLOWLIST: Record<string, string> = {
   'profile:activity.buy_replies': 'WIRE — same responsiveness argument.',
   'profile:rating': 'KEEP or DELETE — ratings the buyer gave bear on nothing in this flow.',
   'profile:seller_status': 'WIRE — listing_status / is_paid / trustseal say this buyer is a paying seller; today only the opaque custtype_weight survives and nothing reads it.',
-  'profile:seller_context': 'WIRE — THE named incident. Parsed by buyer-brain, dropped by the node_raw whitelist, re-emitted in v8, still zero consumers. custtype_name = "qgFCPplus with PNS" means the buyer is a paid seller, and he is treated exactly like a cold buyer.',
   'profile:interests.browse_interest': 'DELETE or WIRE — parsed by parseBuyer and dropped before node_raw, so it is both invisible and unread.',
   'profile:verified_business_buyer': 'WIRE — a verified business buyer should never be shown the "Are you GST registered?" identity gap.',
 
@@ -95,8 +90,6 @@ const DEAD_FACET_ALLOWLIST: Record<string, string> = {
   'calls:buyer.mobile': 'KEEP — PII.',
   'calls:buyer.city': 'WIRE — a city the buyer STATED on a call outranks both the browsing city and the registered city in the delivery_city A/B, and it is not even a candidate.',
   'calls:buyer.state': 'WIRE — same argument as buyer.city.',
-  'calls:buyer.b2b_b2c': 'WIRE — the per-buyer B2B/B2C read from his own call is dropped while category.b2b_b2c (a corpus average over other buyers) IS passed to the planner. The average beats the individual.',
-  'calls:buyer.persona': 'WIRE — same inversion: category.personas is passed to the LLM, the buyer\'s own persona is not.',
   'calls:requirement.products[].name': 'WIRE — buyer-brain pools csl/rfq/profile/whatsapp into clusters; calls arrive a level later at requirement-brain, so a product the buyer SPOKE about can never become or rename a requirement.',
   'calls:requirement.products[].source': 'KEEP — provenance of the extraction.',
   'calls:requirement.products[].quantity': 'WIRE — a quantity the buyer said out loud, dropped, while the form still asks him for it.',
@@ -174,7 +167,8 @@ describe('parsed-then-dropped — a facet with zero consumers is a build failure
   test('the allow-list only shrinks', () => {
     // Locked at the count measured when this guardrail was built (2026-07-28, engine req-brain-v2
     // fixtures + v11 workflow). Raising it means a new facet was parsed and dropped.
-    const LOCKED_AT = 78;
+    const LOCKED_AT = 71;   // 78 -> 71: P1 wired turnover, legal_status, registration_year,
+    // seller_context, calls.buyer.persona/.b2b_b2c and rfq order_value into the bulk-B2B gate.
     assert.ok(
       Object.keys(DEAD_FACET_ALLOWLIST).length <= LOCKED_AT,
       `dead-facet allow-list grew to ${Object.keys(DEAD_FACET_ALLOWLIST).length} (locked at ${LOCKED_AT}). Lower LOCKED_AT when you fix one; never raise it.`,

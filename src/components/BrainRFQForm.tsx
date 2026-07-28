@@ -16,9 +16,12 @@ import VoiceRecorder from './VoiceRecorder';
 import IndiaMartHeader from './IndiaMartHeader';
 import SellerSearchProgress from './SellerSearchProgress';
 import { searchSellers, curateSellers, type SellerResult, type SellerPick, type RibbonTone } from '../lib/sellerSearch';
-import { analyzeImage, voiceToSpecs, hasGeminiKey, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan } from '../lib/gemini';
+import { analyzeImage, voiceToSpecs, hasGeminiKey, inferSpecsFromApplication, runCuratedPlanner, RFQ_LLM_ENABLED, type AiSpecQuestion, type CuratedPlan, type CuratedPreAnswer } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchCategoryTopSpecs, fetchProductImages, upsizeImimg } from '../lib/enrichment';
-import { recordDecisionRoutes, decisionKey, type BrainSeed, type DecisionRoute } from '../lib/brains/formAdapter';
+import {
+  recordDecisionRoutes, decisionKey, resolvePlacements, relocatableConceptOf, RELOCATABLE_LAST_PAGE_FIELDS,
+  type BrainSeed, type DecisionRoute, type RelocatableField, type PlacementSurface,
+} from '../lib/brains/formAdapter';
 import type { ConflictOption } from '../lib/brains/requirementBrain';
 import { matchUnit } from '../lib/quantity';
 import { emit, EV, emitApiError } from '../lib/emit';
@@ -95,6 +98,9 @@ const PAYMENT_TERMS = ['Full Advance', 'Credit (Post-Delivery)', 'COD', 'Loan/Fi
 const CREDIT_PERIODS = ['15 Days', '30 Days', '45 Days', '60 Days', '90 Days'];
 const PAYMENT_MODES = ['Online Transfer', 'Cash', 'Cheque'];
 const BUSINESS_TYPES = ['Online Business', 'Exporter', 'Manufacturer', 'Retailer', 'Service Provider', 'Wholesaler', 'Individual Buyer'];
+// Purchase cadence has never had a last-page control (it arrives as a ranked gap when it earns a slot). It
+// gets one now ONLY when the planner explicitly places it there — see RENDERS_BY_DEFAULT in formAdapter.
+const PURCHASE_FREQUENCIES = ['One-time', 'Monthly', 'Quarterly', 'Every season', 'Ongoing contract'];
 
 // SimpleRFQForm AI calls run on the form's /api/llm proxy path (key injected server-side, never bundled; all pass
 // route:'form'). Per-call MODEL routing (owner 2026-07-24): hints + mic → the fast lite tier (3.5-flash-lite);
@@ -274,6 +280,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const [paymentMode, setPaymentMode] = useState('');
   const [buyerType, setBuyerType] = useState('');
   const [industry, setIndustry] = useState('');
+  const [purchaseFrequency, setPurchaseFrequency] = useState('');   // ITEM 3: rendered only where the planner placed it
   const [gstRegistered, setGstRegistered] = useState<boolean | null>(null); // null = UNKNOWN (Golden Rule: never assume "No"); only ASKED for a business role (not Individual Buyer)
   const [gstNumber, setGstNumber] = useState('');
   const [requirementNotes, setRequirementNotes] = useState('');
@@ -741,6 +748,34 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // question among its top gaps, it rides the SAME gaps list (kind:'identity') — this just pulls it out so its
   // answer writes to the REAL gstRegistered state (not a throwaway aiSpecValues entry) and P3 knows to hide it.
   const [identityAsk, setIdentityAsk] = useState<{ q: string; options?: string[]; why?: string } | null>(null);
+  // ── ITEM 1 · PERSONA, by the SAME mechanism as identity (owner never resolved the placement; the
+  //    identity decision already answered it by analogy — there is no persona screen and no "profile
+  //    spiral"). A persona question defaults to the last page's Business type / Industry and is promoted
+  //    onto the spec page only when it wins a slot in the ranked gaps AND passes the deterministic
+  //    bulk-B2B gate. Everything the planner UNDERSTANDS about the persona still happens either way;
+  //    only the QUESTION is gated. `personaRoute` is why a rejected one never reached the buyer.
+  const [personaAsk, setPersonaAsk] = useState<{ q: string; options?: string[]; why?: string } | null>(null);
+  const [personaAnswer, setPersonaAnswer] = useState('');
+  const [personaRoute, setPersonaRoute] = useState<DecisionRoute | null>(null);
+  // ── ITEM 2 · PRE-ANSWERED questions — intent and non-spec questions the planner answered from the
+  //    buyer's own truth. Rendered as a CONFIRM CHIP with its provenance, never as a silent fill: he sees
+  //    the question, sees our answer, sees where it came from, and can change it in one tap. Anything he
+  //    leaves standing ships; anything he clears does not.
+  const [preAnswered, setPreAnswered] = useState<CuratedPreAnswer[]>([]);
+  const [preAnswerValues, setPreAnswerValues] = useState<Record<string, string>>({});
+  // ── ITEM 3 · where the relocatable last-page fields live for THIS buyer. Defaults to "everything stays
+  //    where it is"; only the planner's allow-listed decisions move anything. Contractual fields are not
+  //    in the allow-list at all, so no model output can reach them.
+  //    `placement` answers ONE question — where does each field render — so no caller can accidentally read
+  //    "keep_last_page" as "visible" for a field that has never had a last-page control.
+  const [placement, setPlacement] = useState<Record<RelocatableField, PlacementSurface>>(
+    () => Object.fromEntries(RELOCATABLE_LAST_PAGE_FIELDS.map((f) => [f, f === 'purchase_frequency' ? 'none' : 'last_page'])) as Record<RelocatableField, PlacementSurface>,
+  );
+  const [placementRoutes, setPlacementRoutes] = useState<DecisionRoute[]>([]);
+  //    Why the form de-duped a planner gap away, keyed by its question AND by any engine_ref it carried, so an
+  //    ENGINE ASK that ended up inside a relocated field is reported with the real reason and not the
+  //    "the planner never ranked it" defect line — it did rank it; we merged it into a field.
+  const [coveredGapReasons, setCoveredGapReasons] = useState<Record<string, string>>({});
   // ─── ONE DECISION SYSTEM — the engine's non-question decisions, and the planner's wording for them ──────
   // The engine emits RESOLVE_CONFLICT / SUGGEST / OFFER alongside its ASKs. They are NOT gap questions, so
   // they never ride `aiSpecs`; each has its own surface below. The planner still ranks and PHRASES them, and
@@ -777,6 +812,17 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     if (quantity) filled['Quantity'] = quantity;
     if (unit) filled['Quantity Unit'] = unit;
     if (deliveryLocation) filled['Delivery location'] = deliveryLocation;
+    // ITEM 3 — what we ALREADY hold for each relocatable last-page field. This is what makes `drop` safe:
+    // resolvePlacements refuses to drop a field we cannot answer ourselves, so a "drop" can only ever remove
+    // a question whose answer we are about to ship anyway.
+    const bfPlace = _seed?.buyerFacts as { business_type?: string } | undefined;
+    const heldLastPage: Partial<Record<RelocatableField, string>> = {
+      business_type: buyerType || bfPlace?.business_type || '',
+      industry,
+      purchase_frequency: purchaseFrequency || _seed?.contextFacts?.purchase_frequency || '',
+      delivery_timeline: deliveryTimeline,
+      payment_terms: paymentTerms,
+    };
     runCuratedPlanner({
       requirement: name, categoryName: categoryNameRef.current, filled, buyerSpecs: specNames, buyerSpecOptions,
       sellerSpecs: sellerSpecsRef.current,
@@ -796,6 +842,17 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       // NOTHING read either field — the planner invented its own questions and overwrote aiSpecs with them.
       // Two decision systems. Now: the ENGINE decides what to ask, the PLANNER ranks and phrases.
       engineDecisions,
+      // ── ITEM 1 · the bulk-B2B truth expansion. `buyerProfile` (turnover / nature / legal status /
+      // registration year / he-is-also-a-paid-seller) and `buyerPersona` (his own per-buyer persona and
+      // B2B/B2C read) were both parsed by the engine and consumed by NOTHING — while the CATEGORY average
+      // of the same two persona fields was being passed to this very call. The average was beating the
+      // individual. `bulkGate` is the deterministic verdict; the planner is told it, not asked for it.
+      buyerProfile: _seed?.buyerProfile, buyerPersona: _seed?.buyerPersona,
+      bulkGate: _seed?.bulkGate, contextFacts: _seed?.contextFacts,
+      // ── ITEM 3 · the ONLY last-page fields it may place, each with what we already hold for it.
+      relocatableFields: RELOCATABLE_LAST_PAGE_FIELDS.map((f) => ({
+        field: f, renders_by_default: f !== 'purchase_frequency', held: heldLastPage[f] || undefined,
+      })),
       entryMode: _seed?.entryMode, model: RFQ_MODEL_SPECS,
     }).then((r) => {
       if (plannerFiredFor.current !== fireKey || gen !== commitGen.current) return;
@@ -805,6 +862,62 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       // codebase's "dedup cannot be an LLM promise" discipline: never honor a promoted ask for a fact we hold.
       const identityGap = gstOnFile ? undefined : (r.gaps || []).find((g) => g.kind === 'identity');
       setIdentityAsk(identityGap ? { q: identityGap.q, options: identityGap.options, why: identityGap.why } : null);
+      // ── ITEM 1 · PERSONA — the identity mechanism, applied to persona. Same ranked list, same chip UI, no
+      // separate screen. The POLICY is decided here rather than trusted from the prompt, for exactly the
+      // reason the GST gate is: "never ask a small or one-off buyer what kind of business he runs" is an
+      // invariant, and an invariant that lives only in a prompt is a suggestion. Two ways it is refused:
+      // the deterministic bulk gate said no, or we already hold his persona (then it is a pre-answer).
+      const gate = _seed?.bulkGate;
+      const personaGap = (r.gaps || []).find((g) => g.kind === 'persona');
+      const personaOnFile = gate?.persona_on_file || _seed?.buyerPersona?.persona;
+      const personaRefusal = !personaGap ? ''
+        : personaOnFile ? `we already hold his persona ("${personaOnFile}") from his own calls — asking makes him repeat himself; it belongs in a confirm chip, not a question`
+        : gate?.vetoed_by ? `the bulk-B2B gate vetoed it — ${gate.vetoed_by}`
+        : !gate ? 'no buyer truth reached the form, so nothing establishes this is a bulk business buyer'
+        : !gate.is_bulk_b2b ? `the bulk-B2B gate did not pass — only ${gate.score} business signal${gate.score === 1 ? '' : 's'} fired (${gate.met.join('; ') || 'none'}), and a small or one-off buyer is never asked this`
+        : '';
+      const personaAllowed = !!personaGap && !personaRefusal;
+      setPersonaAsk(personaAllowed && personaGap ? { q: personaGap.q, options: personaGap.options, why: personaGap.why } : null);
+      setPersonaRoute(!personaGap ? null : personaAllowed
+        ? { id: 'planner:persona', action: 'PERSONA', field: 'business persona', rendered: true, where: 'spec page · promoted question', reason: `the bulk-B2B gate passed on ${gate?.score} signals: ${gate?.met.join('; ')}`, q: personaGap.q }
+        : { id: 'planner:persona', action: 'PERSONA', field: 'business persona', rendered: false, where: 'suppressed', reason: personaRefusal, q: personaGap.q });
+      // ── ITEM 2 · PRE-ANSWERED questions. Kept as their own list rather than merged into the gaps, because
+      // they render differently on purpose: the answer is already in, and its SOURCE is on screen next to it.
+      // A previous answer the buyer already corrected is never overwritten by a re-plan.
+      const pre = r.pre_answered || [];
+      setPreAnswered(pre);
+      setPreAnswerValues((prev) => {
+        const next: Record<string, string> = {};
+        for (const p of pre) next[p.q] = p.q in prev ? prev[p.q] : p.value;
+        return next;
+      });
+      // ── ITEM 3 · PLACEMENTS, through the allow-list. Whatever the planner returned, consent / contact /
+      // delivery location are not in RELOCATABLE_LAST_PAGE_FIELDS and cannot come out of this call moved.
+      const resolved = resolvePlacements(r.placements, heldLastPage);
+      const renders = { ...resolved.renders };
+      const extraPlacementRoutes: DecisionRoute[] = [];
+      // A pre-answer that IS one of these fields wins the surface: it already carries the answer and its
+      // source, so rendering the empty field underneath it would ask the same thing a second time. The
+      // pre-answer ships through allSpecEntries, so suppressing the field loses no fact.
+      for (const p of r.pre_answered || []) {
+        const f = relocatableConceptOf(p.q);
+        if (!f || renders[f] === 'none') continue;
+        renders[f] = 'none';
+        extraPlacementRoutes.push({ id: `place:${f}:pre`, action: 'PLACEMENT', field: f, rendered: false, where: 'suppressed',
+          reason: `a pre-answered question already covers it ("${p.q}" — ${p.source}), so the field itself would ask him the same thing twice.` });
+      }
+      setPlacement(renders);
+      // setPlacementRoutes is deferred until after the gaps are split — the gap de-dupe below adds rows to
+      // extraPlacementRoutes, and a half-written ledger is exactly the silent drop this ledger exists to stop.
+      // A dropped field must still SHIP — we dropped it precisely because we hold the answer, so seed it.
+      if (resolved.effective.business_type === 'drop' && heldLastPage.business_type) {
+        const hit = BUSINESS_TYPES.find((t) => t.toLowerCase() === heldLastPage.business_type!.toLowerCase());
+        if (hit) setBuyerType((v) => v || hit);
+      }
+      if (resolved.effective.industry === 'drop' && heldLastPage.industry) setIndustry((v) => v || heldLastPage.industry!);
+      if (resolved.effective.purchase_frequency === 'drop' && heldLastPage.purchase_frequency) setPurchaseFrequency((v) => v || heldLastPage.purchase_frequency!);
+      if (resolved.effective.delivery_timeline === 'drop' && heldLastPage.delivery_timeline) setDeliveryTimeline((v) => v || heldLastPage.delivery_timeline!);
+      if (resolved.effective.payment_terms === 'drop' && heldLastPage.payment_terms) setPaymentTerms((v) => v || heldLastPage.payment_terms!);
       // ── STAGE 2 · HARVEST THE PLANNER'S WORDING FOR THE ENGINE'S NON-QUESTION DECISIONS ────────────────
       // A RESOLVE_CONFLICT / SUGGEST / OFFER has its OWN surface (A/B widget · ghost chip · dismissable strip),
       // so if the planner returned it as a `gap` we take only its WORDING and chips, then pull it out of the
@@ -822,8 +935,29 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       // twice inside the banner. Match on a punctuation/case-insensitive key, not string equality.
       const qKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const openKey = r.opening?.q ? qKey(r.opening.q) : '';
-      const rankedGaps = (r.gaps || []).filter((g) => g.kind !== 'identity' && (!openKey || qKey(g.q) !== openKey)
-        && !(g.engine_ref && nonQuestion.has(g.engine_ref)));   // conflicts/suggestions/offers render on their own surface
+      const coveredReasons: Record<string, string> = {};   // question-key / engine_ref → why the form de-duped it
+      // `identity` and `persona` are pulled out above and render on their own line with the real state behind
+      // them; a persona gap the gate REFUSED must not fall back into the ordinary question list either.
+      const rankedGaps = (r.gaps || []).filter((g) => g.kind !== 'identity' && g.kind !== 'persona' && (!openKey || qKey(g.q) !== openKey)
+        && !(g.engine_ref && nonQuestion.has(g.engine_ref)))    // conflicts/suggestions/offers render on their own surface
+        // THE DOUBLE-ASK BACKSTOP. A gap that is really one of the relocatable last-page fields is dropped —
+        // that field has its own control and its own placement decision, so the gap can only ever be the same
+        // question a second time. Seen live: "How soon do you need delivery?" sitting directly above the
+        // promoted delivery-timeline chips. The prompt has forbidden this since v2; this is the invariant.
+        .filter((g) => {
+          const f = relocatableConceptOf(g.q);
+          if (!f) return true;
+          const surface = renders[f] === 'spec_page' ? 'the spec page' : renders[f] === 'last_page' ? 'the last page' : 'nowhere — we already hold the answer';
+          const why = `this question IS the "${f.replace(/_/g, ' ')}" field, which is placed on ${surface} — asking it here as well would ask him twice.`;
+          extraPlacementRoutes.push({ id: `place:${f}:gap`, action: 'PLACEMENT', field: g.q, rendered: false, where: 'suppressed', reason: why, q: g.q });
+          // Remember WHY, keyed both ways, so an ENGINE ASK the planner phrased into this gap is reported with
+          // the real reason instead of the "planner defect" fallback (it did rank it — the form de-duped it).
+          coveredReasons[qKey(g.q)] = why;
+          if (g.engine_ref) coveredReasons[g.engine_ref] = why;
+          return false;
+        });
+      setCoveredGapReasons(coveredReasons);
+      setPlacementRoutes([...resolved.routes, ...extraPlacementRoutes]);
       // NOTHING MAY BE SILENTLY DROPPED. An engine ASK the planner neither asked NOR recorded in its ledger is a
       // planner failure, not a ranking call — the engine already decided it was worth the buyer's effort, so it
       // is appended (capped at 3, in the engine's own priority order) instead of vanishing. A ranked-and-dropped
@@ -878,6 +1012,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       if (plannerFiredFor.current === fireKey && gen === commitGen.current) {
         setAiSpecsError(true);
         setEnginePhrasing({});
+        // A dead planner means no persona read, no pre-answers and no placement decisions. On a FIRST load
+        // that means the last page keeps every field exactly as it always was — the safe default, and the
+        // one the form starts in. On a RE-plan we keep the last good ones, same rule as the questions.
+        if (aiEpoch === 0) { setPersonaAsk(null); setPersonaRoute(null); setPreAnswered([]); setPreAnswerValues({}); }
         const engineAsks = engineDecisions.filter((d) => d.action === 'ASK');
         if (aiEpoch === 0) setAiSpecs(engineAsks.map((d) => ({ fieldName: d.field, options: d.options || [], helperText: d.why, kind: d.kind === 'non_spec' ? 'intent' : 'spec', engineRef: d.id } as AiSpecQuestion)));
       }
@@ -895,7 +1033,28 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // list. SUPPRESS decisions are deliberately absent — the ENGINE already dropped those and the debug panel
   // reads them straight off `p.decisions`; this ledger is about what the FORM did with what it was handed.
   useEffect(() => {
-    if (!engineDecisions.length) { recordDecisionRoutes([]); return; }
+    // The PLANNER's own decisions are accounted for on the same ledger, because "nothing may be silently
+    // dropped" was never a rule about engine decisions specifically — it is a rule about the buyer never
+    // losing a question without a recorded reason. Three new kinds of row: the persona question and why it
+    // was or was not asked, every relocatable last-page field and where it ended up (including the ones a
+    // planner tried to move that it may not touch), and every question we answered instead of asking.
+    const plannerRoutes: DecisionRoute[] = [
+      ...(personaRoute ? [personaRoute] : []),
+      ...placementRoutes,
+      ...preAnswered.map((p, i) => {
+        const v = preAnswerValues[p.q] ?? '';
+        const corrected = !!v && v !== p.value;
+        return {
+          id: `planner:pre${i + 1}`, action: 'PRE_ANSWER', field: p.q, rendered: true,
+          where: `spec page · confirm chip (${p.source})`,
+          reason: !v ? `the buyer cleared our answer — nothing ships for this, and that is a wrong pre-answer we should count`
+            : corrected ? `the buyer corrected our answer to "${v}" — our "${p.value}" from ${p.source} was wrong`
+            : `answered "${p.value}" from ${p.source} instead of asking him`,
+          q: p.q,
+        } as DecisionRoute;
+      }),
+    ];
+    if (!engineDecisions.length) { recordDecisionRoutes(plannerRoutes); return; }
     const isqLower = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase()));
     const renderedAsk = new Map<string, string>();     // engine id → the wording the buyer actually sees
     for (const q of aiSpecs) if (q.engineRef && !isqLower.has(q.fieldName.toLowerCase())) renderedAsk.set(q.engineRef, q.fieldName);
@@ -910,6 +1069,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       if (d.action === 'ASK') {
         const q = renderedAsk.get(d.id);
         if (q) return { id: d.id, action: d.action, field: d.field, rendered: true, where: 'spec page · question', reason: '', q };
+        // The form itself may have merged this ASK into a relocated last-page field — that is a real reason and
+        // it outranks both the planner's own and the defect fallback, because it is what actually happened.
+        const covered = coveredGapReasons[d.id] || coveredGapReasons[decisionKey(d.field)];
+        if (covered) return { id: d.id, action: d.action, field: d.field, rendered: false, where: 'merged into a relocated field', reason: covered };
         return { id: d.id, action: d.action, field: d.field, rendered: false, where: 'suppressed', reason: lost || 'the planner never ranked it and it was not in the ledger (planner defect)' };
       }
       if (d.action === 'RESOLVE_CONFLICT') {
@@ -923,8 +1086,9 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       if (dismissedOffers[d.id]) return { id: d.id, action: d.action, field: d.field, rendered: false, where: 'suppressed', reason: 'the buyer dismissed the strip' };
       return { id: d.id, action: d.action, field: d.field, rendered: true, where: 'spec page · dismissable offer strip', reason: '', q: phrase };
     });
-    recordDecisionRoutes(routes);
-  }, [engineDecisions, aiSpecs, baq, enginePhrasing, dismissedOffers, isqSpecs, specValues, aiSpecValues, extraSpecs, suggestPicks]);
+    recordDecisionRoutes([...routes, ...plannerRoutes]);
+  }, [engineDecisions, aiSpecs, baq, enginePhrasing, dismissedOffers, isqSpecs, specValues, aiSpecValues, extraSpecs, suggestPicks,
+    personaRoute, placementRoutes, preAnswered, preAnswerValues, coveredGapReasons]);
 
   // ── LLM-on-image: a seeded product image → analyzeImage → MORE specs, via the same merge path as an
   //    upload. Best-effort: cross-origin image fetch may be CORS-blocked (imimg.com) → skip silently. ──
@@ -1209,8 +1373,12 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   const showGstBadge = isBusinessRole && gstOnFile;                       // known → shown back as a verified badge
   const showGstAnswered = isBusinessRole && !gstOnFile && !!identityAsk && gstRegistered !== null; // answered on P2 → echo it
   // Business type + Industry are per-ORDER facts (a registered Manufacturer may buy as a Wholesaler on this order,
-  // and Industry is on file nowhere) — so they always render, prefilled+provenanced where we know them, never hidden.
-  const showBuyerTypeField = true, showIndustryField = true;
+  // and Industry is on file nowhere) — so by DEFAULT they always render, prefilled+provenanced where we know them.
+  // ITEM 3 (2026-07-28) makes that default overridable by the planner, and only through the allow-list: it may
+  // move either of them onto the spec page, or drop one when we already hold the answer (and the drop path seeds
+  // the value into state above, so a dropped field still ships — it is one fewer question, never one less fact).
+  const showBuyerTypeField = placement.business_type === 'last_page';
+  const showIndustryField = placement.industry === 'last_page';
   // The card renders iff at least ONE child does. Today that's always — the honest outcome for this buyer, not a bug.
   // The machinery is real: flip a child flag off and the header disappears with it instead of stranding an empty box.
   const aboutYouHasContent = showBuyerTypeField || showIndustryField || showGstQuestion || showGstBadge || showGstAnswered;
@@ -1261,6 +1429,18 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     // submitted lead (not just the screen). Keyed by the question; deduped against specs already carrying the concept.
     if (baq?.opening?.q && baqAnswers.opening?.trim()) { const k = baq.opening.q.replace(/\?+\s*$/, '').trim(); if (k && !(k in merged)) merged[k] = baqAnswers.opening.trim(); }
     (baq?.gaps || []).forEach((g, i) => { const a = baqAnswers[`gap${i}`]; const k = (g.q || '').replace(/\?+\s*$/, '').trim(); if (k && a && a.trim() && !(k in merged)) merged[k] = a.trim(); });
+    // ITEM 2 — a PRE-ANSWERED question ships exactly like an answered one, because that is what it is: he saw
+    // the question, saw our answer and its source, and left it standing or changed it. What he CLEARED ships
+    // nothing — an answer he rejected is not truth, and the firewall does not care that we were the ones who
+    // filled it in. (An INFERRED value he never confirmed must never reach a seller as his own words.)
+    for (const p of preAnswered) {
+      const v = (preAnswerValues[p.q] ?? '').trim();
+      const k = p.q.replace(/\?+\s*$/, '').trim();
+      if (k && v && !(k in merged)) merged[k] = v;
+    }
+    // ITEM 1 — the persona ANSWER (his tap), never the persona we inferred. The inferred one lives in
+    // understanding{} and stops there; it is our reading of his behaviour, not something he told anyone.
+    if (personaAsk?.q && personaAnswer.trim()) { const k = personaAsk.q.replace(/\?+\s*$/, '').trim(); if (k && !(k in merged)) merged[k] = personaAnswer.trim(); }
     // A RESOLVED CONFLICT is the strongest fact on the page — the buyer just chose between two of his own
     // signals, so it OVERWRITES whatever a prefill put in that field. An unresolved conflict ships nothing:
     // per the firewall, a value the buyer never settled must not reach a seller under his name.
@@ -1269,7 +1449,8 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     // is never shipped unaccepted). Never shadows a value already present.
     for (const d of engineSuggests) { const v = suggestPicks[d.id]; if (v && v.trim() && !(d.field in merged)) merged[d.field] = v.trim(); }
     return Object.entries(merged).filter(([, v]) => v && v.trim());
-  }, [specValues, aiSpecValues, aiSpecs, isqSpecs, extraSpecs, baq, baqAnswers, engineConflicts, conflictPicks, engineSuggests, suggestPicks]);
+  }, [specValues, aiSpecValues, aiSpecs, isqSpecs, extraSpecs, baq, baqAnswers, engineConflicts, conflictPicks, engineSuggests, suggestPicks,
+    preAnswered, preAnswerValues, personaAsk, personaAnswer]);
 
   // Compact one-liner for the on-screen "Your requirement" banner.
   const requirementSummary = useMemo(() => {
@@ -1293,7 +1474,10 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       payment && `Payment: ${payment}`,
       buyerType && `Business type: ${buyerType}`,
       industry.trim() && `Industry: ${industry.trim()}`,
-      // Purchase cadence, when relevant, is an LLM-driven AI-spec (page 2) → already in allSpecEntries above.
+      // ITEM 3: cadence now has a real field of its own WHEN the planner placed one. When it did not, cadence
+      // still arrives as an ordinary ranked gap and is already inside allSpecEntries above — so it ships either
+      // way and never twice (an answered gap and an empty field cannot both be non-empty for the same concept).
+      purchaseFrequency && `Purchase frequency: ${purchaseFrequency}`,
       // GST only for a business role (never for an individual buyer), and only once answered.
       isBusinessRole && gstRegistered === true && `GST: ${isValidGSTIN(gstNumber) ? gstNumber.trim().toUpperCase() : 'Registered'}`, // ship the number ONLY if it's a valid GSTIN, else just "Registered" (never garbage)
       isBusinessRole && gstRegistered === false && `GST: Not registered`,
@@ -1674,6 +1858,100 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
             className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-400" />}
     </div>
   );
+  // ── ITEM 2 · PRE-ANSWERED questions — a confirm chip, never a silent fill ──────────────────────────────
+  // The failure this replaces: `calls.requirement.intended_application` says "Food Packaging Business" and the
+  // form asks him what it is for anyway. Now the question still appears, with our answer already selected and
+  // WHERE WE GOT IT written next to it, and one tap changes or clears it.
+  //
+  // It is deliberately NOT hidden. Hiding a known answer would look like the least effort of all, and it is the
+  // wrong trade twice over: he never sees what we assumed about him, and TUS's CONFIRMED stage — the whole
+  // point of holding truth — can never fire, because nothing was ever put in front of him to confirm.
+  const preAnsweredSection = preAnswered.length > 0 && (
+    <>
+      {preAnswered.map((p, i) => {
+        const v = preAnswerValues[p.q] ?? '';
+        const opts = [p.value, ...(p.options || []).filter((o) => o.toLowerCase() !== p.value.toLowerCase())].slice(0, 6);
+        const untouched = v === p.value;
+        return (
+          <div key={`pre-${i}`} className="space-y-2" ref={() => { bes('question_shown', `pre:${p.q}`); if (untouched) bes('confirm', `pre:${p.q}`); }}>
+            <label className="block text-sm font-medium text-gray-700">{p.q}
+              {p.why && <span className="ml-2 font-normal text-gray-500">— {p.why}</span>}
+              {/* provenance, in his words, always on screen — this is the trust receipt, not a tooltip */}
+              <span className="ml-2 font-normal text-teal-600">✦ {p.source}</span>
+            </label>
+            <OptionChips ariaLabel={p.q} options={opts} value={v}
+              onChange={(nv) => {
+                bes(nv && nv !== p.value ? 'correction' : nv ? 'confirm' : 'backspace', `pre:${p.q}`);
+                setPreAnswerValues((prev) => ({ ...prev, [p.q]: nv }));
+              }} />
+            {!v && <p className="text-[11px] text-amber-700">We had this as “{p.value}” {p.source}. Pick an answer, or leave it blank and we won’t send it.</p>}
+          </div>
+        );
+      })}
+    </>
+  );
+  // ── ITEM 1 · the PERSONA question — identical chip UI to every other gap, and it only reaches here after
+  // the deterministic bulk-B2B gate passed. There is no persona screen; this is one more ranked question.
+  const personaSection = personaAsk && (() => {
+    const opts = personaAsk.options?.length ? personaAsk.options : ['For my own use or production', 'For resale to my customers', 'Both'];
+    return (
+      <div className="space-y-2" ref={() => bes('question_shown', 'persona')}>
+        <label className="block text-sm font-medium text-gray-700">{personaAsk.q}
+          {personaAsk.why && <span className="ml-2 font-normal text-gray-500">— {personaAsk.why}</span>}
+        </label>
+        <OptionChips ariaLabel={personaAsk.q} options={opts} value={personaAnswer}
+          onChange={(v) => { bes('chip', 'persona'); setPersonaAnswer(v); }} />
+      </div>
+    );
+  })();
+  // ── ITEM 3 · a last-page field the planner PROMOTED onto the spec page. Same markup as everything else, and
+  // it writes to the REAL state behind the field, so the answer travels through buildRequirementText exactly
+  // as it would have from the last page. Nothing here is a copy of the field — it IS the field, moved.
+  const promotedLastPage = (
+    <>
+      {placement.delivery_timeline === 'spec_page' && (
+        <div className="space-y-2" ref={() => bes('question_shown', 'promoted:delivery-timeline')}>
+          <label className="block text-sm font-medium text-gray-700">How soon do you need it?
+            <span className="ml-2 font-normal text-gray-500">— Filters far sellers</span></label>
+          <OptionChips ariaLabel="Delivery timeline" options={TIMELINE} value={deliveryTimeline}
+            onChange={(v) => { bes('chip', 'promoted:delivery-timeline'); setDeliveryTimeline(v); }} />
+        </div>
+      )}
+      {placement.payment_terms === 'spec_page' && (
+        <div className="space-y-2" ref={() => bes('question_shown', 'promoted:payment-terms')}>
+          <label className="block text-sm font-medium text-gray-700">How would you like to pay?
+            <span className="ml-2 font-normal text-gray-500">— Changes the price</span></label>
+          <OptionChips ariaLabel="Payment terms" options={PAYMENT_TERMS} value={paymentTerms}
+            onChange={(v) => { bes('chip', 'promoted:payment-terms'); setPaymentTerms(v); }} />
+        </div>
+      )}
+      {placement.purchase_frequency === 'spec_page' && (
+        <div className="space-y-2" ref={() => bes('question_shown', 'promoted:purchase-frequency')}>
+          <label className="block text-sm font-medium text-gray-700">How often will you order this?
+            <span className="ml-2 font-normal text-gray-500">— Better rates on repeats</span></label>
+          <OptionChips ariaLabel="Purchase frequency" options={PURCHASE_FREQUENCIES} value={purchaseFrequency}
+            onChange={(v) => { bes('chip', 'promoted:purchase-frequency'); setPurchaseFrequency(v); }} />
+        </div>
+      )}
+      {placement.business_type === 'spec_page' && (
+        <div className="space-y-2" ref={() => bes('question_shown', 'promoted:business-type')}>
+          <label className="block text-sm font-medium text-gray-700">What kind of business are you buying for?
+            <span className="ml-2 font-normal text-gray-500">— Sellers quote differently</span></label>
+          <OptionChips ariaLabel="Business type" options={BUSINESS_TYPES} value={buyerType}
+            onChange={(v) => { bes('chip', 'promoted:business-type'); setBuyerType(v); }} />
+        </div>
+      )}
+      {placement.industry === 'spec_page' && (
+        <div className="space-y-2" ref={() => bes('question_shown', 'promoted:industry')}>
+          <label className="block text-sm font-medium text-gray-700">Which industry is this for?
+            <span className="ml-2 font-normal text-gray-500">— Matches specialist sellers</span></label>
+          <input type="text" aria-label="Industry" value={industry} onChange={(e) => { bes('text', 'promoted:industry'); setIndustry(e.target.value); }}
+            placeholder="e.g., Food processing"
+            className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-400" />
+        </div>
+      )}
+    </>
+  );
   // The buyer-aware OPENING question + the single top-ranked gap. Same markup as a spec field — the buyer has
   // no reason to know one came from the ISQ schema and the other from the Curated-RFQ planner.
   const plannerQuestions = (
@@ -1681,6 +1959,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       {baqLoading && !baq && (
         <p className="text-sm text-gray-500 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Reading what you're after…</p>
       )}
+      {preAnsweredSection}
       {baq?.opening?.q && renderInlineQuestion('planner-opening', baq.opening.q, baq.opening.why, baq.opening.options,
         baqAnswers.opening ?? '', (v) => { bes('chip', 'opening'); setBaqAnswers((a) => ({ ...a, opening: v })); })}
       {(baq?.gaps || []).map((g, i) => renderInlineQuestion(`planner-gap-${i}`, g.q, g.why, g.options,
@@ -1803,17 +2082,20 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   // Filter out any question a late authoritative getISQs has since made a page-1 ISQ field (no dup ask).
   const isqNameSet = new Set(isqSpecs.map((s) => s.IM_SPEC_MASTER_DESC.toLowerCase()));
   const visibleAiSpecs = aiSpecs.filter((q) => !isqNameSet.has(q.fieldName.toLowerCase()));
+  // The persona ask and any PROMOTED last-page field are real questions on this page, so "no extra questions
+  // needed" must not be shown over the top of them.
+  const hasSpecPageExtras = !!personaAsk || RELOCATABLE_LAST_PAGE_FIELDS.some((f) => placement[f] === 'spec_page');
   const aiSpecsBody = (
     <div data-flash="smart-questions" className={`space-y-5 ${flashCls('smart-questions')}`}>
       {/* (Category-corpus status chip removed — it was a dev/debug line, not for buyers. The corpus still loads
           in the background for Category mode; it's just no longer surfaced.) */}
-      {aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && (
+      {aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && !hasSpecPageExtras && (
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-gray-500 flex items-center gap-2"><span className="w-3.5 h-3.5 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />Preparing smart questions…</p>
           <button type="button" onClick={() => { bes('skip'); setStage('more'); }} className="text-xs text-gray-500 underline underline-offset-2 hover:text-gray-600 shrink-0">Skip for now</button>
         </div>
       )}
-      {!aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && (
+      {!aiSpecsLoading && visibleAiSpecs.length === 0 && !identityAsk && !hasSpecPageExtras && (
         aiSpecsError ? (
           // FAILURE → retry (re-fires the planner) + a quiet continue. We DON'T auto-skip (owner) — a transient
           // gateway blip shouldn't silently drop the smart questions.
@@ -1843,6 +2125,11 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           </div>
         );
       })()}
+      {/* ITEM 1 — the persona question, when (and only when) the bulk-B2B gate let it through. Sits with the
+          identity ask because both are the same idea: a last-page fact promoted into the ranked list. */}
+      {personaSection}
+      {/* ITEM 3 — the last-page fields the planner moved here for THIS buyer. */}
+      {promotedLastPage}
       {visibleAiSpecs.map((q) => (
         <div key={q.fieldName} className="space-y-2" ref={() => bes('question_shown', `ai:${q.fieldName}`)}>
           <label className="block text-sm font-medium text-gray-700">
@@ -1871,15 +2158,29 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           </button>
           {locationEditing && renderLocationPopover('left')}
         </div>
+        {/* ITEM 3 — Delivery timeline and Payment terms are RELOCATABLE: the planner may promote either onto
+            the spec page or drop it when we already hold the answer. Delivery LOCATION above is not, and never
+            can be: it is one of the three contractual fields the allow-list does not contain. */}
         <div className="flex flex-col sm:grid sm:grid-cols-2 gap-4 sm:gap-6">
+          {placement.delivery_timeline === 'last_page' && (
           <div data-flash="delivery-timeline" className={flashCls('delivery-timeline')}>
             <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><Clock size={13} className="text-teal-500" /> Delivery</p>
             <div className="flex flex-wrap gap-2">{TIMELINE.map((t) => <RadioChip key={t} label={t} selected={deliveryTimeline === t} onClick={() => setDeliveryTimeline(t)} />)}</div>
           </div>
+          )}
+          {placement.payment_terms === 'last_page' && (
           <div data-flash="payment-terms" className={flashCls('payment-terms')}>
             <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><CreditCard size={13} className="text-teal-500" /> Payment terms</p>
             <div className="flex flex-wrap gap-2">{PAYMENT_TERMS.map((t) => <RadioChip key={t} label={t} selected={paymentTerms === t} onClick={() => setPaymentTerms(t)} />)}</div>
           </div>
+          )}
+          {/* Cadence has no last-page control by default — it only appears when the planner put it here. */}
+          {placement.purchase_frequency === 'last_page' && (
+          <div data-flash="purchase-frequency">
+            <p className="flex items-center gap-1.5 text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide"><RotateCcw size={13} className="text-teal-500" /> How often</p>
+            <div className="flex flex-wrap gap-2">{PURCHASE_FREQUENCIES.map((f) => <RadioChip key={f} label={f} selected={purchaseFrequency === f} onClick={() => setPurchaseFrequency(purchaseFrequency === f ? '' : f)} />)}</div>
+          </div>
+          )}
         </div>
         {paymentTerms === 'Credit (Post-Delivery)' && (
           <div className="mt-4"><p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">Credit period</p><div className="flex flex-wrap gap-2">{CREDIT_PERIODS.map((c) => <RadioChip key={c} label={c} selected={creditPeriod === c} onClick={() => setCreditPeriod(c)} />)}</div></div>
