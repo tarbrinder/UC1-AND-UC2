@@ -1368,7 +1368,6 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
   //     the buyer never sees what we assumed, can't correct it, and TUS's CONFIRMED stage can never fire on it.
   const bfIdent = _seed?.buyerFacts as { gst_verified?: boolean; has_gst?: boolean; business_type?: string } | undefined;
   const gstOnFile = !!bfIdent?.gst_verified || !!bfIdent?.has_gst;
-  const buyerTypeFromProfile = !!bfIdent?.business_type && buyerType.toLowerCase() === bfIdent.business_type.toLowerCase();
   const showGstQuestion = isBusinessRole && !gstOnFile && !identityAsk;  // asked on P2, or on file → no question here
   const showGstBadge = isBusinessRole && gstOnFile;                       // known → shown back as a verified badge
   const showGstAnswered = isBusinessRole && !gstOnFile && !!identityAsk && gstRegistered !== null; // answered on P2 → echo it
@@ -1805,12 +1804,9 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
     // BROWSED — often a seller's catalogue row — not from anything he said. It is still pre-filled so he
     // doesn't retype it, but it must carry its real source and read as "confirm this", never as his own word.
     // Only badge it while it still holds the seeded value; the moment he edits it, it's his.
-    const observedWhy = _seed?.observedFields?.[s.IM_SPEC_MASTER_DESC];
-    const stillSeeded = observedWhy && specValues[s.IM_SPEC_MASTER_DESC] === _seed?.specValues?.[s.IM_SPEC_MASTER_DESC];
     return (
       <div key={s.IM_SPEC_MASTER_DESC} className="space-y-2">
         <label className="block text-sm font-medium text-gray-700">{s.IM_SPEC_MASTER_DESC}{hint && <span className="ml-2 font-normal text-gray-500">— {hint}</span>}
-          {stillSeeded && <span className="ml-2 font-normal text-amber-700">· {observedWhy} — confirm</span>}
         </label>
         {opts.length > 0 ? <OptionChips ariaLabel={s.IM_SPEC_MASTER_DESC} options={opts} value={specValues[s.IM_SPEC_MASTER_DESC] || ''} onChange={(v) => setSpecValue(s.IM_SPEC_MASTER_DESC, v)} />
           : <input type="text" value={specValues[s.IM_SPEC_MASTER_DESC] || ''} onChange={(e) => setSpecValue(s.IM_SPEC_MASTER_DESC, e.target.value)} placeholder={hint || `Enter ${s.IM_SPEC_MASTER_DESC.toLowerCase()}`} className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-400" />}
@@ -2016,7 +2012,6 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
         return (
           <div key={d.id} className="space-y-2" ref={() => bes('question_shown', `suggest:${d.field}`)}>
             <label className="block text-sm font-medium text-gray-700">{enginePhrasing[d.id]?.q || d.field}
-              <span className="ml-2 font-normal text-gray-500">— Common in this category</span>
             </label>
             <div className="flex flex-wrap gap-2">
               {opts.map((o) => (
@@ -2135,7 +2130,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           <label className="block text-sm font-medium text-gray-700">
             {q.fieldName}
             {q.helperText && <span className="ml-2 font-normal text-gray-500">— {q.helperText}</span>}
-            {q.prefill && aiSpecValues[q.fieldName] === q.prefill && <span className="ml-2 font-normal text-teal-600">✦ from your input</span>}
+            
           </label>
           <OptionChips ariaLabel={q.fieldName} options={q.options} value={aiSpecValues[q.fieldName] || ''} onChange={(v) => { bes('chip', `ai:${q.fieldName}`); setAiSpecValues((p) => ({ ...p, [q.fieldName]: v })); }} />
         </div>
@@ -2228,7 +2223,6 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           <div data-flash="buyer-type" className={flashCls('buyer-type')}>
             <p className="text-xs uppercase font-semibold text-gray-500 mb-2 tracking-wide">Business type
               {/* provenance, not a silent fill — the buyer can see WHY it's pre-selected and change it for THIS order */}
-              {buyerTypeFromProfile && <span className="ml-2 normal-case font-normal text-teal-600">✦ from your profile</span>}
             </p>
             <div className="flex flex-wrap gap-2">{BUSINESS_TYPES.map((t) => <RadioChip key={t} label={t} selected={buyerType === t} onClick={() => setBuyerType(buyerType === t ? '' : t)} />)}</div>
           </div>
@@ -2550,7 +2544,7 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
           {stage === 'specs' && useCaseAssistTop}
           {stage === 'specs' && offersSection && <div className="mb-3">{offersSection}</div>}
           {/* STEP-1 TRANSPARENCY — what the Engine filled / corrected from the buyer's own truth, each with its source. */}
-          {stage === 'specs' && planCorrections.length > 0 && (
+          {stage === 'specs' && (planCorrections.length > 0 || Object.keys(_seed?.observedFields ?? {}).length > 0) && (
             <div className="mb-3 rounded-xl border border-gray-200 bg-white px-3.5 py-2.5">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Filled from your history</p>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -2561,6 +2555,16 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
                     <span className="text-gray-400">· {p.source}</span>
                   </span>
                 ))}
+                {/* engine-seeded OBSERVED values — they lost their inline badge to the no-hierarchy rule,
+                    so their provenance lives here instead. Skipped when the planner already listed them. */}
+                {Object.entries(_seed?.observedFields ?? {})
+                  .filter(([f]) => !planCorrections.some((p) => p.field === f) && specValues[f])
+                  .map(([f, why]) => (
+                    <span key={`obs-${f}`} className="inline-flex flex-wrap items-center gap-1 rounded-full border border-teal-200 bg-teal-50 px-2.5 py-1 text-[12px] text-teal-800">
+                      <span className="font-medium">{f}:</span> {specValues[f]}
+                      <span className="text-gray-400">· {why}</span>
+                    </span>
+                  ))}
               </div>
             </div>
           )}
