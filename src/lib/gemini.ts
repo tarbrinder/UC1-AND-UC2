@@ -135,7 +135,10 @@ export function onLLMActivity(cb: LLMActivityCb): () => void {
 export const llmActive = (): number => llmInFlight;
 
 async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } }): Promise<string> {
-  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature, label = 'llm', timeoutMs = 240000, route = 'form' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
+  // temperature defaults to 0, NOT to omission. Omitting it let the provider default (~1.0) govern five
+  // prompts that emit calibrated numbers — worst was deduceLogistics, whose 0.6/0.85 confidences GATE
+  // client-side auto-prefill. Extraction and ranking want determinism; pass a value explicitly to opt out.
+  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature = 0, label = 'llm', timeoutMs = 240000, route = 'form' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
   const endpoint = route === 'card' ? ENDPOINT_CARD : ENDPOINT; // proxy injects the Bearer key per path — never bundled
   // audit 2026-07-13 (P1): no timeout meant a hung gateway never resolved — llmInFlight stuck, global 'working…' loader
   // spun forever with no health record. 240s default comfortably clears the ~100s extract; a truly hung socket now aborts.
@@ -791,7 +794,7 @@ ${args.procurementContext ? `PROCUREMENT CONTEXT — the process this buyer is i
 5. "leadingQuestion": if lead.source=="qualifier", repeat its text here; else "".
 6. "mustHaveSpecs": the top 1-4 DECISIVE specs (a subset of specOrder).
 7. "personaOptions": 4-6 CATEGORY-TAILORED buyer types — NOT the generic Manufacturer/Stockist/Reseller/Trader/End User. e.g. cosmetics → ["Salon","Retailer","Distributor","Private-label brand","Individual"]; fencing → ["Contractor","Farmer","Wholesaler","Builder"]; cable → ["Contractor","Electrician","Wholesaler","Distributor"].
-8. "questions": 3-6 non-spec questions a seller in THIS trade asks to qualify the lead — kind "context" or "persona" ONLY. Each: {id, label, options (3-5 chips, REQUIRED), kind: context|persona, decisive (bool), placement: page1|specpage|wizard|laststep, order (int), reason (<=12 words), priority (0-100 — YOUR value-rank for this question: how decisive it is for a seller to quote; higher = more decisive. For DEBUG visibility only; it does NOT change which questions you ask)}.
+8. "questions": AT MOST 3 non-spec questions (see the HARD CAP above — 3 is the ceiling, not a target) a seller in THIS trade asks to qualify the lead — kind "context" or "persona" ONLY. Each: {id, label, options (3-5 chips, REQUIRED), kind: context|persona, decisive (bool), placement: page1|specpage|wizard|laststep, order (int), reason (<=12 words), priority (0-100 — YOUR value-rank for this question: how decisive it is for a seller to quote; higher = more decisive. For DEBUG visibility only; it does NOT change which questions you ask)}.
    HARD RULES for "questions" (every one matters — a buyer abandons a typing box):
    a. CHIPS ONLY — NEVER free text. Every question MUST carry 3-5 SPECIFIC, mutually-exclusive, category-tailored option chips. NEVER return an empty options array. The form appends an "Other…" chip automatically, so you never need a text box. If you CANNOT enumerate 3-5 concrete options (open-ended things like "what material / size / application / install location?"), DROP the question entirely — do NOT emit it with empty options. Better to ask fewer, sharp chip questions than any text box.
    b. DO THE HARD WORK on options — real, decision-useful buckets, NOT lazy yes/no. Cadence GOOD = ["One-time","Monthly","Quarterly","Annual contract"]; cadence BAD = ["Yes, regular","No"]. Budget bands MUST be ₹, in Indian numbering, and SIZED TO THE ACTUAL ORDER = Quantity × this product's realistic unit price — NOT a generic lakh/crore ladder. A few pieces of a low-value commodity ≈ tens/hundreds of ₹ (e.g. cable lugs, fasteners) → bands like "Under ₹2,000","₹2,000–₹10,000","₹10,000+"; a truckload or machinery → lakh/crore. NEVER emit a lakh/crore budget band for a handful of low-value units. NEVER $.
@@ -812,7 +815,7 @@ RULES:
 - Do NOT duplicate the ISQ fields above as questions — specs are captured separately; non-spec questions must add NEW signal.
 - BRAND: if ANY ISQ field above is about brand/make/manufacturer/OEM, NEVER add a brand or brand-preference question — that spec already captures it. Only ask "specific brand or best rate?" when brand is ENTIRELY ABSENT from the ISQ fields.
 - QUANTITY is a dedicated form field — NEVER make it a question (no "approximate quantity / order size / how much / volume").
-- EVERY question carries 3-5 real option chips. Zero free-text questions. Tight: 3-6 questions, decisive first.
+- EVERY question carries 3-5 real option chips. Zero free-text questions. Tight: AT MOST 3 questions, decisive first.
 
 Return ONLY JSON: { "archetype": "...", "orderMode": "...", "specOrder": ["..."], "specReasons": { "<spec name>": "why it ranks here (≤12 words)" }, "lead": { "source": "spec", "ref": "..." }, "leadingQuestion": "", "mustHaveSpecs": ["..."], "personaOptions": ["..."], "questions": [ { "id": "", "label": "How often will you need this?", "options": ["One-time","Monthly","Quarterly","Annual contract"], "kind": "context", "tier": "scale", "decisive": true, "placement": "wizard", "order": 1, "reason": "", "groundedIn": "category is a consumable, repeat purchase likely", "priority": 90 } ], "serveSignals": ["..."], "twinResolved": [], "considered": [{"label":"What's your budget range?","score":71,"reason":"below the 3-question cap"}] }`;
 
@@ -1836,6 +1839,7 @@ CONSISTENCY (this is checked): every question in the final gaps array, and the o
 - CADENCE — include a purchase-frequency gap ONLY if genuinely meaningful for this product AND not already known, and only if it earns a slot over other candidates. Skip for a genuine one-off.
 - QUANTITY is a first-class landing-page field, not a gap-question topic here. If already_known contains a quantity, NEVER ask it. If NOT known, you MAY include ONE quantity gap — ONLY when quantity is meaningful for this product (consumable/packaging/raw-material/component: yes; a one-off capital good, machine, or whole plant/setup: NEVER ask "how many").
 - Aim for up to 5 total gaps when the product genuinely has that many meaningful ones beyond what's known — do not under-ask with just 1-2 unless the requirement truly needs no more.
+- NEVER emit a gap that duplicates a field the form already collects on its own last page: delivery location · delivery timeline · payment terms · credit period · GST/tax registration · business type · industry · company name · contact details. The buyer answers those on a dedicated screen, so asking here asks him twice. If one seems decisive, still drop it and record that reason in "considered".
 - ≤12 words per question. See the LANGUAGE rule below.
 
 # LANGUAGE — how everything must be worded
