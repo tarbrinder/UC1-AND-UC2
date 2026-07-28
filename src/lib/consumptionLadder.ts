@@ -72,10 +72,16 @@ export interface LadderReport {
 // Mirrors the `blk(...)` list in runCuratedPlanner (gemini.ts). A facet whose `block` is null has NO
 // CHANNEL into the planner at all — that is an architectural ✗, provable without a live run, and it is
 // the single most valuable thing this table reports.
+// The blocks runCuratedPlanner ACTUALLY fences into its user turn. This list is asserted against the real
+// prompt by src/lib/__tests__/plannerBlocks.test.ts — it declared 13 while 19 were being sent, and the six
+// it missed (engine_decisions, buyer_business, buyer_persona, context_facts, bulk_b2b_gate,
+// relocatable_last_page_fields) are the newest and most load-bearing. A hand-kept mirror of a moving list is
+// the exact rot this instrument exists to detect, so the test now fails if they diverge again.
 export const PLANNER_BLOCKS = [
-  'requirement', 'category_name', 'flow', 'already_known', 'page1_buyer_specs', 'seller_flagged_specs',
-  'seller_top_questions', 'category_personas', 'category_b2b_b2c', 'buyer_facts', 'also_sourcing',
-  'buyer_signals', 'category_corpus',
+  'requirement', 'category_name', 'flow', 'already_known', 'engine_decisions', 'page1_buyer_specs',
+  'seller_flagged_specs', 'seller_top_questions', 'category_personas', 'category_b2b_b2c', 'buyer_facts',
+  'also_sourcing', 'buyer_signals', 'buyer_business', 'buyer_persona', 'context_facts', 'bulk_b2b_gate',
+  'relocatable_last_page_fields', 'category_corpus',
 ] as const;
 
 // ── The RENDER MAP (heuristic — the honest kind: read off the code, and dated) ─────────────────────

@@ -10,6 +10,7 @@ import { sanitizeQty, qtyIsMeaningful, isValidGSTIN } from '../utils/formValidat
 import type { ISQSpec, RFQFormData } from '../types';
 import { calcScore, getScoreColor, getScoreLabel, type ScoreCheck } from '../utils/score';
 import { bes, besReset, besSubmitted } from '../lib/bes';
+import { registerRenderedActions } from '../lib/consumptionLadder';
 import OptionChips from './OptionChips';
 import OTPGate from './OTPGate';
 import VoiceRecorder from './VoiceRecorder';
@@ -1087,6 +1088,19 @@ export default function BrainRFQForm({ onClose, surface, categoryMode = 'categor
       return { id: d.id, action: d.action, field: d.field, rendered: true, where: 'spec page · dismissable offer strip', reason: '', q: phrase };
     });
     recordDecisionRoutes([...routes, ...plannerRoutes]);
+    // Tell the consumption ladder what this surface ACTUALLY renders, rather than letting it fall back to a
+    // hand-dated static map. That map still said ASK/RESOLVE_CONFLICT/SUGGEST/OFFER don't render — true when
+    // it was written, false since the dual-planner fix. An instrument built to catch drift had itself drifted
+    // within hours, so the declaration now lives HERE, beside the code that does the rendering.
+    registerRenderedActions('BrainRFQForm', {
+      PREFILL: 'spec chips (specValues / quantity / unit / delivery)',
+      CONFIRM: 'spec chips, provenance in the "Filled from your history" strip',
+      ASK: 'inline question in the single spec list, planner-ranked and phrased',
+      RESOLVE_CONFLICT: 'A/B widget at the top of the spec list, two values with their sources',
+      SUGGEST: 'unselected ghost chip, tap to accept',
+      OFFER: 'dismissable strip above the spec list',
+      // SUPPRESS deliberately omitted — the firewall drops it by design, so "unrendered" is correct.
+    });
   }, [engineDecisions, aiSpecs, baq, enginePhrasing, dismissedOffers, isqSpecs, specValues, aiSpecValues, extraSpecs, suggestPicks,
     personaRoute, placementRoutes, preAnswered, preAnswerValues, coveredGapReasons]);
 
