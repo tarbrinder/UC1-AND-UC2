@@ -9,7 +9,7 @@
 // The deterministic core (assembleBundle · verifyDecision · prompts) is harnessed in reasoningtest.mjs.
 
 import { type Ledger, type Decision, nodeContract } from './ledger';
-import { hasGeminiKey, type SynthLLMOut } from './gemini';
+import { type SynthLLMOut } from './gemini';
 
 // ── the bundle the synthesis model sees: full catalog (every node, counts, roles) + signal facts in full ──
 export interface SynthBundle {
@@ -95,7 +95,12 @@ export interface SynthMeta { mode: 'llm' | 'rule'; prompt: { system: string; use
 
 export function synthMeta(L: Ledger): SynthMeta {
   const bundle = assembleBundle(L);
-  return { mode: hasGeminiKey() ? 'llm' : 'rule', prompt: buildSynthPrompt(bundle), bundle, verify: verifyLedger(L) };
+  // ALWAYS 'rule'. This reported 'llm' whenever a Gemini key merely EXISTED — but the only consumer of
+  // SYNTH_SYSTEM_PROMPT (synthesizeProfileLLM) had zero callers and has now been deleted, so no model has
+  // ever seen this prompt and no code path exists by which one could. BuyerLedgerView rendered that as
+  // "synthesis: LLM (gemini)" with the prompt beside it — a debug panel asserting an LLM answered when none
+  // did. Same defect class as the dangling evidence ids and the camera button that opened no camera.
+  return { mode: 'rule', prompt: buildSynthPrompt(bundle), bundle, verify: verifyLedger(L) };
 }
 
 // ── verify the LIVE LLM output the SAME way (#8) — every reasoning step must cite a real evidence_id. ──
