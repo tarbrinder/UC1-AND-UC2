@@ -42,9 +42,11 @@ export function emit(event: string, props: EmitProps = {}): void {
     const w = window as unknown as { __rfqEvents?: unknown[] };
     (w.__rfqEvents = w.__rfqEvents || []).push(payload);
     if (w.__rfqEvents.length > 300) w.__rfqEvents.shift();
-    // 3) ⚑ DEV-TODO: real collector. Uncomment + set VITE_EVENTS_URL to POST the funnel to n8n / /api/events.
-    // const url = import.meta.env.VITE_EVENTS_URL;
-    // if (url && 'sendBeacon' in navigator) navigator.sendBeacon(url, JSON.stringify(payload));
+    // 3) Real collector (P0-b, 2026-08-13): POST the funnel to the events sink. WIRED but GATED — fires only when
+    //    VITE_EVENTS_URL is set (owner points it at the n8n /api/events collector), otherwise a safe no-op. This is
+    //    what makes any of the audit dimensions measurable at scale; until the env is set, dev keeps the local ring.
+    const url = import.meta.env.VITE_EVENTS_URL as string | undefined;
+    if (url && typeof navigator !== 'undefined' && 'sendBeacon' in navigator) navigator.sendBeacon(url, JSON.stringify(payload));
   } catch { /* analytics must never break the form */ }
 }
 

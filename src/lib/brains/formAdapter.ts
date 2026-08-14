@@ -101,6 +101,9 @@ const B2B_LEGAL = new Set([
   'private limited', 'private limited company', 'pvt ltd', 'public limited', 'public limited company',
   'limited company', 'limited', 'llp', 'limited liability partnership', 'partnership', 'company',
 ]);
+// A member_since string that clearly reads as a BRAND-NEW account (IndiaMART shows "This Month" / "This Week" and
+// relative "N days ago" phrasings). Used only as a one-off veto BACKSTOP — never fires on an absent member_since.
+const NEW_ACCOUNT = /this\s*(month|week)|\btoday\b|\byesterday\b|\b\d{1,2}\s*(day|week)s?\s*ago\b/i;
 
 export interface BulkB2BSignals {
   buyer_b2b_b2c?: string;        // calls.buyer.b2b_b2c — HIS OWN call, outranks the category average
@@ -145,13 +148,28 @@ export function assessBulkB2B(s: BulkB2BSignals): BulkB2BGate {
   if (s.also_a_paid_seller) met.push(`he is himself a paid IndiaMART seller (${s.also_a_paid_seller})`);
   if ((s.total_requirements ?? 0) >= 10) met.push(`${s.total_requirements} requirements posted before this one`);
   const order = parseInrRange(s.order_value);
-  if (order && order.max >= 50000) met.push(`this order is worth about ${s.order_value}`);
+  // order_value is a CORROBORATOR, never a standalone bulk trigger (deep-audit 2026-08-12 #13): a consumer buying 500
+  // diaper packets legitimately reaches Rs 1–2 Lakh, so a basket size ALONE is not evidence of B2B — it was Sadhana's
+  // only firing signal. It now counts only when a GENUINE business signal (GST / seller account / turnover /
+  // incorporation / role / his own B2B call) has ALREADY fired, and the bar is raised above a consumer basket.
+  if (order && order.max >= 100000 && met.length > 0) met.push(`this order is worth about ${s.order_value}`);
 
   // VETOES. Either one forbids the question no matter how the rest scores.
   let vetoed_by: string | undefined;
   if (b2b === 'b2c') vetoed_by = 'he reads as B2C on his own seller call — his own voice outranks every profile signal';
-  else if ((s.total_requirements ?? 0) <= 2 && !s.has_gst && !s.also_a_paid_seller) {
+  // The one-off veto must fire only when we AFFIRMATIVELY KNOW he is a one-off — not when the counters are simply
+  // ABSENT. Requiring `typeof total_requirements === 'number'` stops the veto from firing on an empty buyer_facts
+  // payload; without this guard, a missing profile vetoed EVERY buyer and the persona prompt then silenced page 3
+  // for everyone (the "same generic/empty page 3" bug, 2026-08-10). Unknown → neutral gate → LLM 3 may still ask.
+  else if (typeof s.total_requirements === 'number' && s.total_requirements <= 2 && !s.has_gst && !s.also_a_paid_seller) {
     vetoed_by = 'a one-off buyer — barely any requirement history, no GST and no seller account';
+  }
+  // BACKSTOP (deep-audit 2026-08-12): even if the count is missing/inflated upstream, a BRAND-NEW buyer-only account
+  // with NO bulk signal at all (met.length === 0), no GST and no seller account is a one-off — veto so the persona
+  // layer cannot inflate him into a wholesaler. Gated on a PRESENT, clearly-new member_since (never on absent facts),
+  // so it does NOT reintroduce the "empty page 3 for everyone" bug: an empty payload has no member_since to match.
+  else if (met.length === 0 && !s.has_gst && !s.also_a_paid_seller && NEW_ACCOUNT.test(String(s.member_since ?? ''))) {
+    vetoed_by = 'a brand-new buyer-only account — no bulk signal, no GST, no seller account, joined recently';
   }
   const persona_on_file = s.buyer_persona && String(s.buyer_persona).trim() ? String(s.buyer_persona).trim() : undefined;
   return { is_bulk_b2b: !vetoed_by && met.length >= BULK_B2B_MIN_SCORE, score: met.length, met, vetoed_by, persona_on_file, signals: s };
@@ -346,6 +364,11 @@ export interface BrainSeed {
    *  seller's catalogue row could ride in as PREFILL/"from your posted requirement". */
   observedFields?: Record<string, string>; // field → buyer-facing provenance ("from a product you viewed")
   deliveryLocation: string;
+  /** ⚠ NO LONGER READ BY THE FORM (2026-07-28), and it must stay that way. The form always enters on the
+   *  LANDING, because the owner-locked quantity rule is decided there and cannot be decided before the mcat
+   *  resolves. Honouring a 'specs'/'more' start was exactly the bug: a seeded requirement skipped the qty ask
+   *  and then got bounced backwards a second later. Kept as the adapter's statement of INTENT (which entry
+   *  mode this is) — do not wire it back into the initial stage. */
   startStage: BrainStage;
   entryMode: string;
   gaps: { q: string; kind?: string; options?: string[] }[];   // ASK decisions → shown on the spec page's "smart questions"
@@ -364,6 +387,9 @@ export interface BrainSeed {
   categoryKeywords?: string[];
   categoryPersonas?: unknown;   // where INTENT actually lives (v6 grounding audit), not in top_specs
   categoryB2b?: unknown;
+  categoryCorpus?: unknown;   // the WHOLE category object (top_specs + personas + keywords + b2b_b2c) → drives catCorpus for
+  //                            LLM 2. The form used to read only categoryTopSpecs and leave catCorpus null, so LLM 2 got
+  //                            the DISTILLED feed (personas/keywords/b2b_b2c stripped) and fell back to generic. (2026-08-10)
   // ── ITEM 1 · the buyer's OWN business truth (node_raw.profile) — turnover, what he does, how he is
   //    incorporated, how old the business is, and whether he is himself a paid IndiaMART seller. Every one
   //    of these was parsed by the engine and read by nothing; they are what a BUSINESS PERSONA is built from.
@@ -373,6 +399,16 @@ export interface BrainSeed {
   };
   /** The per-buyer persona the engine already computes from his own calls. Held → PREFILL, never asked. */
   buyerPersona?: { persona?: string; b2b_b2c?: string };
+  /** ── THE BUYER'S OWN CONTACT IDENTITY (2026-07-28) ───────────────────────────────────────────────────
+   *  What a LOGGED-IN form pre-fills its name / mobile / email / GST from. It was reading five hard-coded
+   *  literals instead ('Demo Buyer', '9876543210', 'Manufacturer', 'Construction Equipment', a fake GSTIN),
+   *  so a paper buyer rendered as a construction buyer on the page he submits from — and the form's own
+   *  comment said "never ship a hard-coded identity".
+   *  Values are passed through VERBATIM, including the masked placeholders this channel carries in
+   *  non-production pulls ("MASKED"). Deciding what is presentable is the FORM's job, not the adapter's:
+   *  the adapter's contract is "what does the engine know", and dropping data here would hide the masking
+   *  from every other reader. The form drops placeholders + validates the GSTIN before it fills a field. */
+  buyerIdentity?: { name?: string; mobile?: string; email?: string; gstin?: string };
   /** The engine's requirement-level CONTEXT facts (order_value / requirement_type / purchase_frequency /
    *  buyer_context). These are not ISQ chips — they were being skip-listed and dropped on the floor. */
   contextFacts?: Record<string, string>;
@@ -385,6 +421,12 @@ export interface BrainSeed {
     whatsapp_specs?: { name: string; value: string }[];   // buyer-typed specs on WhatsApp (e.g. gsm) → PREFILL
     objections?: string[];                                 // "too far" / "high price" → planner reframes a gap
     business_intent?: string[];                            // reselling / wholesale → flips the KYB/GST ask
+    // CSL clickstream (owner 2026-07-29: "truth lies in his recent viewed product, search keywords, filters used").
+    // These reached the buyer-twin PROFILE prompt but never the QUESTION planner — so the granular "he viewed three
+    // 5-kVA gensets" / "he filtered Phase=3" signal that should SHARPEN a curated question was dropped. Now fed in.
+    viewed_products?: string[];   // supplier-profile / product pages he browsed
+    search_keywords?: string[];   // what he searched on site
+    isq_filters?: string[];       // spec filters he applied while browsing (e.g. "Phase: 3-Phase")
   };
 }
 
@@ -404,6 +446,17 @@ function extractBuyerSignals(p: RequirementBrainPayload): BrainSeed['buyerSignal
   const whatsapp_specs = asArr(wa.buyer_typed_enquiries)
     .flatMap((e) => { const o = e as Record<string, unknown>; return Object.entries(o).filter(([k, v]) => k !== 'product' && v != null && String(v).trim()).map(([k, v]) => ({ name: k, value: String(v) })); })
     .slice(0, 8);
+  // CSL clickstream — the browsing truth the QUESTION planner never got (owner 2026-07-29). Defensive shapes:
+  // `viewed` may be strings or {name/product} objects; `isq_filters` may be strings or {name,value} pairs.
+  const csl = (nr.csl ?? {}) as Record<string, unknown>;
+  const nameOf = (v: unknown) => typeof v === 'string' ? v.trim() : String((v as Record<string, unknown>)?.name ?? (v as Record<string, unknown>)?.product ?? '').trim();
+  const viewed_products = asArr(csl.viewed).map(nameOf).filter(Boolean).slice(0, 8);
+  const search_keywords = asStrs(csl.searches).slice(0, 8);
+  const isq_filters = asArr(csl.isq_filters).map((f) => {
+    if (typeof f === 'string') return f.trim();
+    const o = f as Record<string, unknown>; const n = String(o?.name ?? '').trim(); const val = String(o?.value ?? '').trim();
+    return n ? (val ? `${n}: ${val}` : n) : '';
+  }).filter(Boolean).slice(0, 8);
   const sig = {
     whatsapp_products: asStrs(wa.products_enquired).slice(0, 8),
     call_queries: asStrs(cr.buyer_queries).slice(0, 8),
@@ -411,9 +464,10 @@ function extractBuyerSignals(p: RequirementBrainPayload): BrainSeed['buyerSignal
     call_specs, whatsapp_specs,
     objections: asStrs(wa.objections).slice(0, 6),
     business_intent: asStrs(wa.explicit_business_intent).slice(0, 6),
+    viewed_products, search_keywords, isq_filters,
   };
   // only return if there's at least one real signal
-  return (sig.whatsapp_products.length || sig.call_queries.length || sig.call_application || sig.call_specs.length || sig.whatsapp_specs.length || sig.objections.length || sig.business_intent.length) ? sig : undefined;
+  return (sig.whatsapp_products.length || sig.call_queries.length || sig.call_application || sig.call_specs.length || sig.whatsapp_specs.length || sig.objections.length || sig.business_intent.length || sig.viewed_products.length || sig.search_keywords.length || sig.isq_filters.length) ? sig : undefined;
 }
 
 const str = (x: unknown): string | undefined => {
@@ -446,6 +500,21 @@ function extractBuyerPersona(p: RequirementBrainPayload): BrainSeed['buyerPerson
   const b = obj(obj(obj(p.observability?.node_raw).calls).buyer);
   const out = { persona: str(b.persona), b2b_b2c: str(b.b2b_b2c) };
   return out.persona || out.b2b_b2c ? out : undefined;
+}
+/** The buyer's contact identity: `profile.identity` first (the account record), then `calls.buyer` as a
+ *  backstop for the two fields it also carries. GSTIN comes off `profile.kyb.gst`. Read-through only — no
+ *  cleaning, no validation, no invention: an absent field stays absent so the form can leave it EMPTY. */
+function extractBuyerIdentity(p: RequirementBrainPayload): BrainSeed['buyerIdentity'] {
+  const pr = obj(obj(p.observability?.node_raw).profile);
+  const identity = obj(pr.identity), kyb = obj(pr.kyb);
+  const caller = obj(obj(obj(p.observability?.node_raw).calls).buyer);
+  const out = {
+    name: str(identity.name) ?? str(caller.name),
+    mobile: str(identity.mobile) ?? str(caller.mobile),
+    email: str(identity.email),
+    gstin: str(kyb.gst),
+  };
+  return Object.values(out).some(Boolean) ? out : undefined;
 }
 
 const val = (d: Decision) => (typeof d.value === 'string' ? d.value : '');
@@ -483,6 +552,30 @@ function gateFor(
 // The four actions that are a QUESTION-SELECTION decision (as opposed to a fill). These are the ones the
 // planner must rank/phrase rather than re-invent. Ordered by how load-bearing they are for the firewall.
 const PLANNABLE: DecisionAction[] = ['RESOLVE_CONFLICT', 'ASK', 'SUGGEST', 'OFFER'];
+
+// ─── THE CALL-PRIVACY GATE (P0, owner 2026-07-28) ─────────────────────────────
+// "nowhere should buyer know that we are listening his calls."
+//
+// `why` is the ONE engine-authored string that reaches a BUYER-FACING caption: when the planner dies or never
+// ranks an ASK, BrainRFQForm renders the decision's own `why` as the "— …" caption beside the question. And
+// `why` falls back to `reason`, which the engine writes in the buyer's voice ("two of your own signals
+// disagree", "you have other active needs"). So the day the engine words one of those with a call in it — "you
+// said 500 litres on a call" is exactly the phrasing its RESOLVE_CONFLICT sources already use — it ships to the
+// buyer, and no amount of prompt discipline in gemini.ts can stop it, because this string never goes near the
+// planner. The prompt rule is a promise; this is the invariant.
+//
+// It can only ever SUPPRESS — absent beats wrong, and losing a four-word caption costs the buyer nothing. The
+// decision itself, its `reason`, its conflict sources and its evidence are untouched, so the debug panel and
+// the planner still see the full, un-redacted truth. Word-bounded, because unbounded name matching is the
+// recurring defect in this codebase; matched against free-form PROSE, not a field name, so it routes nothing.
+// A false positive ("sellers call to confirm the size") costs one caption and is the right trade.
+const CALL_REVEALING = /\b(call|calls|called|calling|phone|phoned|spoke|spoken|speaking|heard|listen|listened|listening|recorded|recording|recordings|transcript|transcribed|transcription|conversation|conversations)\b/i;
+/** Buyer-facing caption, or nothing. Anything that would tell the buyer we read/heard his calls is dropped. */
+export function buyerSafeWhy(s: unknown): string | undefined {
+  const t = String(s ?? '').trim();
+  if (!t) return undefined;
+  return CALL_REVEALING.test(t) ? undefined : t;
+}
 /** Flatten the engine's question-selection decisions into the planner's input shape. Options are normalised:
  *  a RESOLVE_CONFLICT carries `ConflictOption` objects (value + WHERE it came from), everything else plain
  *  strings — the planner needs the source strings to explain the A/B choice in the buyer's own terms. */
@@ -501,7 +594,8 @@ export function toEngineDecisions(decisions: Decision[]): EngineDecisionInput[] 
       value: typeof d.value === 'string' && d.value.trim() ? d.value : undefined,
       options: opts.map((o) => (typeof o === 'string' ? o : o.value)).filter(Boolean),
       conflict: conflict && conflict.length ? conflict : undefined,
-      why: d.why || d.reason || undefined,
+      // `why` reaches a BUYER-FACING caption (see buyerSafeWhy) — the planner is not in that path, so the gate is.
+      why: buyerSafeWhy(d.why) || buyerSafeWhy(d.reason),
       kind: d.kind,
       priority: typeof d.priority === 'number' ? d.priority : undefined,
       confidence: typeof d.confidence === 'number' ? d.confidence : undefined,
@@ -575,8 +669,9 @@ export function brainToSeed(p: RequirementBrainPayload): BrainSeed {
     categoryKeywords: m.category?.keywords,
     categoryPersonas: m.category?.personas,
     categoryB2b: m.category?.b2b_b2c,
+    categoryCorpus: m.category,
     buyerSignals: extractBuyerSignals(p),
-    buyerProfile, buyerPersona,
+    buyerProfile, buyerPersona, buyerIdentity: extractBuyerIdentity(p),
     contextFacts: Object.keys(contextFacts).length ? contextFacts : undefined,
     bulkGate: gateFor(m.buyer_facts as Record<string, unknown> | undefined, buyerProfile, buyerPersona, contextFacts),
     // the primary card has an image too — brainToSeed was the only builder dropping it
@@ -627,13 +722,23 @@ export function recommendationToSeed(
     // BUYER-LEVEL truth — identical for every card, so it must not depend on which card was tapped.
     buyerFacts: p?.metadata.buyer_facts as Record<string, unknown> | undefined,
     basket: (p?.metadata.recommendations ?? []).map((r) => r.product),
-    categoryTopSpecs: (p?.metadata.category?.top_specs ?? []).map((x) => ({ ...x, pct: typeof x.pct === 'number' ? Math.min(100, Math.round(x.pct)) : x.pct })),
-    categoryKeywords: p?.metadata.category?.keywords,
-    categoryPersonas: p?.metadata.category?.personas,
-    categoryB2b: p?.metadata.category?.b2b_b2c,
+    // CATEGORY IS PRIMARY-SCOPED, so carry it ONLY when the tapped card IS the engine's primary (owner 2026-07-29,
+    // the anchor bug). The engine computes metadata.category for its OWN primary (chosen by source-count, which can
+    // be the WRONG requirement); this seed sets mcatId to the TAPPED card. Carrying the primary's category under a
+    // different mcat is exactly how a Tata Chhota Hathi repost showed notebook-machine questions. When the tapped
+    // card is not the primary, omit it and let the form re-fetch the RIGHT category for the resolved mcat (the
+    // catBrain effect now re-fetches when the seed has no category for this mcat). Same discipline as buyerSeed.
+    ...((p?.metadata.primary?.mcat && rec.mcat && String(p.metadata.primary.mcat) === String(rec.mcat)) ? {
+      categoryTopSpecs: (p?.metadata.category?.top_specs ?? []).map((x) => ({ ...x, pct: typeof x.pct === 'number' ? Math.min(100, Math.round(x.pct)) : x.pct })),
+      categoryKeywords: p?.metadata.category?.keywords,
+      categoryPersonas: p?.metadata.category?.personas,
+      categoryB2b: p?.metadata.category?.b2b_b2c,
+      categoryCorpus: p?.metadata.category,
+    } : {}),
     buyerSignals: p ? extractBuyerSignals(p) : undefined,
-    // Buyer-LEVEL again: his business truth, his persona and the bulk gate are identical for every card.
-    buyerProfile, buyerPersona,
+    // Buyer-LEVEL again: his business truth, his persona, his identity and the bulk gate are identical for
+    // every card — none of them may depend on which card he happened to tap.
+    buyerProfile, buyerPersona, buyerIdentity: p ? extractBuyerIdentity(p) : undefined,
     contextFacts: Object.keys(contextFacts).length ? contextFacts : undefined,
     bulkGate: gateFor(p?.metadata.buyer_facts as Record<string, unknown> | undefined, buyerProfile, buyerPersona, contextFacts),
   };
@@ -644,3 +749,32 @@ export const blankSeed = (): BrainSeed => ({
   productName: '', mcatId: '', committed: false, quantity: '', unit: '', deliveryLocation: '',
   startStage: 'product', entryMode: 'blank_multimodal', specValues: {}, gaps: [], conflicts: [], gstAsk: false,
 });
+
+/** ── THE LANDING SEED (2026-07-28) ────────────────────────────────────────────
+ *  The chooser is no longer a page of its own: it shares the LANDING with the product input and the
+ *  quantity ask, so the form now mounts BEFORE any requirement is picked. That mount needs everything
+ *  true about the BUYER — his facts, his business profile, his own persona, the bulk-B2B gate, his
+ *  WhatsApp/call signals — and nothing at all about a requirement he has not chosen yet.
+ *
+ *  Deliberately absent, and each for a reason:
+ *   • productName / mcatId — naming the product is the job of the page this seeds.
+ *   • engineDecisions / gaps / conflicts / offers — Decision Objects are REQUIREMENT-scoped. They arrive
+ *     the moment he taps a card, through brainToSeed (the engine's primary) or recommendationToSeed.
+ *   • categoryTopSpecs / personas / b2b_b2c — those describe the PRIMARY's category, which is the wrong
+ *     category for a product he has not picked. The form re-fetches top-specs per resolved mcat anyway.
+ */
+export function buyerSeed(p: RequirementBrainPayload): BrainSeed {
+  const m = p.metadata;
+  const buyerProfile = extractBuyerProfile(p);
+  const buyerPersona = extractBuyerPersona(p);
+  return {
+    ...blankSeed(),
+    entryMode: m.entry_mode || 'blank_multimodal',
+    buyerFacts: m.buyer_facts as Record<string, unknown> | undefined,
+    basket: (m.recommendations ?? []).map((r) => r.product),
+    buyerSignals: extractBuyerSignals(p),
+    buyerProfile, buyerPersona, buyerIdentity: extractBuyerIdentity(p),
+    // No requirement is chosen, so there is no order_value to score — the gate runs on buyer-level truth only.
+    bulkGate: gateFor(m.buyer_facts as Record<string, unknown> | undefined, buyerProfile, buyerPersona, {}),
+  };
+}

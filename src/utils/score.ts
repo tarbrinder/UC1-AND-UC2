@@ -76,8 +76,12 @@ export function calcScore(
   add('Specs', `Specifications (${Math.min(filledSpecs, specTarget)}/${specTarget})`, 30, filledSpecs >= specTarget, isqSpecs.length > 0, specEarned);
 
   add('Details', 'Delivery location', 8, !!form.deliveryLocation?.trim());
-  add('Details', 'Delivery timeline', 7, !!form.deliveryTimeline?.trim());
-  add('Details', 'Payment terms', 10, !!form.paymentTerms?.trim());
+  // #79: the deterministic timeline/payment EDITOR (the old 'more' logistics card) is gone — these now live as
+  // Commercial-page questions (LLM 2) and only reach these atoms via seed/recs. So they're BONUS-only: applicable
+  // (and always earned) when a value is present, inapplicable when absent — never unearnable dead weight that caps
+  // the dial below 100, and never a "fill next" nudge pointing at a field the buyer can no longer see.
+  add('Details', 'Delivery timeline', 7, !!form.deliveryTimeline?.trim(), !!form.deliveryTimeline?.trim());
+  add('Details', 'Payment terms', 10, !!form.paymentTerms?.trim(), !!form.paymentTerms?.trim());
   add('Details', 'Buyer type', 5, !!form.buyerType?.trim(), profileApplicable);
   // For End Users this captures "Buying for"; for business it's Industry.
   add('Details', 'Profile detail', 5, !!form.industry?.trim(), profileApplicable);

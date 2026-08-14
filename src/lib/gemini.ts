@@ -23,17 +23,25 @@ const ENDPOINT_CARD = api('/api/cardllm/chat/completions');   // buyer-card key 
 // Two-tier model strategy. Most calls are short, structured, low-reasoning text
 // tasks (hints, "Not sure?", requirement summary, question generation) → the
 // faster/cheaper "lite" model keeps the UI snappy for impatient mobile buyers.
-// Multimodal extraction (image, audio) keeps the richer model, where lite
-// measurably degrades quality.
-const MODEL_FAST = 'google/gemini-2.5-flash-lite';
-const MODEL_RICH = 'google/gemini-2.5-flash';
+// MODEL LOCK (owner 2026-07-31: "across all use 3.5 flash lite only"). Both FORM tiers point at
+// gemini-3.5-flash-lite: a newer generation than 2.5-flash, and the owner's own transcription benchmark put it AHEAD
+// of 2.5-flash on quality while being ~2.8× faster. Verified live on the FORM gateway path (200s, and thinking
+// actually scales: low 0 · medium ~300-400 · high ~404-457 reasoning tokens).
+const MODEL_FAST = 'google/gemini-3.5-flash-lite';
+const MODEL_RICH = 'google/gemini-3.5-flash-lite';
+// ⚠️ The BUYER-CARD path is NOT covered by the lock, and must not be. `/api/cardllm` is authorised with a different,
+// entitlement-capped key; probing it live (2026-08-01) returns a hard 401 for anything else:
+//   "team not allowed to access model. This team can only access models=['google/gemini-2.5-flash-lite']"
+// So the card stays pinned to the ONLY model its team can reach. Pointing it at MODEL_FAST broke every card call
+// outright (a 401 that extractBuyerProfileLLM swallows into a silent empty-card fallback). Re-probe before changing.
+const MODEL_CARD = 'google/gemini-2.5-flash-lite';
 
 // Buyer-profile-card LLM gate. Kept as an exported name (BuyerLedgerView / mergedTwinStore import it as a
 // truthiness gate) but it is now a BOOLEAN — the actual buyer-card key is proxy-injected on /api/llm-card and
 // never bundled. Runs on flash-lite (the buyer-card key 401s on flash), isolated from the form's /api/llm path.
 export const RFQ_FORM_LLM_KEY: boolean = RFQ_LLM_ENABLED;
 export { RFQ_LLM_ENABLED };
-export const RFQ_FORM_LLM_MODEL = MODEL_FAST;
+export const RFQ_FORM_LLM_MODEL = MODEL_CARD;   // card path — see the MODEL_CARD note above (401s on anything else)
 
 // ── India B2B context (injected into EVERY prompt) ────────────────────
 // IndiaMART is an India-only B2B marketplace. Every model output — options,
@@ -120,6 +128,7 @@ interface LLMOpts {
   temperature?: number; // F1/F2: low temp on CLASSIFICATION calls (archetype, twin) → consistent labels across runs
   reasoningEffort?: ReasoningEffort; // thinking level matched to task complexity; forwarded as OpenAI-compatible `reasoning_effort`
   label?: string; // A4: which logical call this is (e.g. 'deriveIntent') — for the LLM Call Health ring
+  captureRaw?: boolean; // AI-Debug ONLY: retain the full prompt+output (with buyer PII) for the inspector. OFF in production (no dead debug work on the buyer path).
   timeoutMs?: number; // audit 2026-07-13: per-call deadline (AbortController) so a hung gateway can't spin the loader forever
   route?: 'form' | 'card'; // which proxy path (and therefore which server-injected key) this call uses; default 'form'
 }
@@ -133,7 +142,7 @@ interface LLMOpts {
 // never asked". Optional by construction: a caller that never reports leaves it undefined, which reads as
 // "not instrumented" rather than as a failure. `reasoningEffort` records what was actually sent — including
 // `undefined` after the compatibility strip below, so a gateway that rejected the parameter is visible.
-export interface LLMCallRecord { label: string; ok: boolean; ms: number; status: number; bytes: number; model: string; at: number; promptTokens?: number; completionTokens?: number; reasoningTokens?: number; costUsd?: number; promptVersion?: string; maxTokens?: number; temperature?: number; reasoningEffort?: ReasoningEffort; parseOk?: boolean; }
+export interface LLMCallRecord { id?: number; label: string; ok: boolean; ms: number; status: number; bytes: number; model: string; at: number; promptTokens?: number; completionTokens?: number; reasoningTokens?: number; costUsd?: number; promptVersion?: string; maxTokens?: number; temperature?: number; reasoningEffort?: ReasoningEffort; parseOk?: boolean; }
 
 // VERSIONING (regression attribution): a build stamp for all form prompts + a per-prompt version for
 // the ones that change most. When an eval/score regresses, the trace says exactly which prompt-version
@@ -148,12 +157,15 @@ const PROMPT_VER: Record<string, string> = {
   planRequirement: 'plan-v8', deriveIntent: 'intent-v6', refineQuestions: 'refine-v3',
   inferSpecsFromApplication: 'cascade-v4', deriveBuyerTwin: 'twin-v2', deriveBuyerProfile: 'profile-v2',
   getSpecHints: 'spechints-v3', classifyFieldTypes: 'biasgate-v2',
+  // The three Dynamic-RFQ LLMs. Without these the panel stamped the build date on every call, so no prompt change
+  // in the 3-LLM work was attributable in telemetry. Keep in sync with RFQ_LLM_VERSION in src/lib/rfq/llm.ts.
+  'requirement-brain': 'rb-v1', 'commercial-planner': 'cx-v1', 'persona-planner': 'ps-v1',
   // These had no entry at all and therefore reported the build stamp instead of a prompt version — which meant
   // an eval regression on any of them could not be attributed to a prompt change (framework §4.6 rule 7).
   getMissingSpecs: 'missing-v2', deduceLogistics: 'logistics-v2', summarizeRequirement: 'summary-v2',
   explainSpec: 'explain-v2', generateEnrichmentQuestions: 'enrich-q-v2', voiceToSpecs: 'voice-v2',
   analyzeImage: 'image-v2', deriveBuyerStory: 'story-v2', twinPrune: 'prune-v1',
-  'curated-planner': 'curated-v5', // v5 (2026-07-28, RPS-1): local blk() promoted to the shared fence()/fenceAll() (corpus-last now enforced by size, not by convention); temperature 0.2 -> 0 because every considered[] entry carries a ranking score; maxTokens 8000 -> 14000 paired with reasoningEffort high; parse failure now stamped on LLM_HEALTH via recordParse so the empty-plan return is no longer indistinguishable from success. v4 (2026-07-28): the three unbuilt Curated-RFQ items — (1) BULK-B2B TRUTH EXPANSION: business_persona + buyer_persona inferred into `understanding` from node_raw.profile (turnover / nature / legal status / registration year / he-is-also-a-paid-seller) + calls.buyer.persona·b2b_b2c, with AT MOST ONE kind:"persona" gap, code-gated on the deterministic bulk-B2B verdict and never asked when the persona is on file; (2) PRE-ANSWERED questions — the opening intent question and non-spec gaps may be ANSWERED from buyer truth and rendered as a provenanced confirm chip instead of being asked (the call_application/buyer_context TUS failure); (3) PLACEMENTS — the planner returns keep_last_page|promote_to_spec_page|drop for the five relocatable last-page fields, enforced against a code allow-list that no model output can move consent / contact / delivery location out of. v3 (2026-07-28): ONE DECISION SYSTEM — <engine_decisions> is now an input; the engine decides WHAT to ask, the planner only RANKS + PHRASES + supplies chips (engine_ref echoed through considered[] and gaps[], from_source "engine_decision"). + the ≤4-word / no-verb-opener hint rule, enforced in the parse step. v2 (audit §3): +UNDERSTAND layer + question-competition ledger, XML-fenced data (corpus last), input glossary, worked example, cold-buyer path, INDIA_CTX restored, jargon-suppression line replaced with a positive language rule.
+  'curated-planner': 'curated-v8', // v8 (2026-07-29): +considered[].from_ref — each considered question copies VERBATIM the exact candidate string it was built from (a seller_flagged_specs / seller_top_questions / page1_buyer_specs entry) or null, so the debug "candidate pool" can map a re-phrased question ("How many compartments?") back to its raw candidate ("Cavity Count") and show a TRUE per-candidate verdict instead of a false "NOT USED" from name-mismatch. Also reasoningEffort high→medium (latency). v7 (2026-07-28, owner P0 PRIVACY + the offer rejection): a new hard PRIVACY rule — the buyer must never be told that we read, listened to or analysed his phone calls, so every string he can see (opening.q · gaps[].q · option chips · every "why" · field_hints · pre_answered[].q/.value/.source · person.source) may cite ONLY what he TYPED, what he POSTED or his IndiaMART profile/account. The prompt used to enumerate "your call with a seller" as a source value in THREE places (pre_answered, prefills, person) and the worked example printed it four times, and the form rendered those strings verbatim — "✦ from your call with a seller — change it if we read you wrong" under his own persona field. The fact is still USED (prefill it, pre-answer with it, rank on it); only the attribution changes, to "already on your IndiaMART account" or to nothing. The INTERNAL fields are untouched on purpose (understanding · considered[].from_source/.why_ranked/.dropped_because · prefills[].source), so calls are still named where our own team reads them and the decision stays auditable — full provenance internally, no call anywhere he can see it. Also: a RESOLVE_CONFLICT is now phrased as ONE ordinary question carrying the two conflicting values plus 1-3 more plausible ones and NEVER says where either came from (it used to be told to say "you said 6 on a call" vs "a tray page you looked at"); an OFFER now renders NOWHERE at all (owner: "what is this section, why we need this") and its dropped_because says so instead of claiming a strip; and the worked example was rewritten to demonstrate the split — calls named in "considered", invisible in everything the buyer reads. v6 (2026-07-28): +STEP 6b "person" — the last page's THREE facts about the BUYER (persona · business_type · industry) are now FILLED from truth instead of asked from scratch. `placements` (v4) decided where those questions render and nothing ever decided what they say, so the buyer's persona — which the engine already reads off his own calls — reached the form and rendered nowhere, while the logged-in path filled the same fields with hard-coded literals ('Manufacturer', 'Construction Equipment') and a paper buyer submitted as a construction buyer. Grounded against its OWN token set (buyer_persona + buyer_business + buyer_facts + context_facts), because `signalText` is deliberately narrow for SPEC prefills and loosening it would have weakened that firewall to fix an unrelated field; any of the three that cannot be traced to a named input is dropped, and `industry` is expected to be absent for almost every buyer. v5 (2026-07-28, RPS-1): local blk() promoted to the shared fence()/fenceAll() (corpus-last now enforced by size, not by convention); temperature 0.2 -> 0 because every considered[] entry carries a ranking score; maxTokens 8000 -> 14000 paired with reasoningEffort high; parse failure now stamped on LLM_HEALTH via recordParse so the empty-plan return is no longer indistinguishable from success. v4 (2026-07-28): the three unbuilt Curated-RFQ items — (1) BULK-B2B TRUTH EXPANSION: business_persona + buyer_persona inferred into `understanding` from node_raw.profile (turnover / nature / legal status / registration year / he-is-also-a-paid-seller) + calls.buyer.persona·b2b_b2c, with AT MOST ONE kind:"persona" gap, code-gated on the deterministic bulk-B2B verdict and never asked when the persona is on file; (2) PRE-ANSWERED questions — the opening intent question and non-spec gaps may be ANSWERED from buyer truth and rendered as a provenanced confirm chip instead of being asked (the call_application/buyer_context TUS failure); (3) PLACEMENTS — the planner returns keep_last_page|promote_to_spec_page|drop for the five relocatable last-page fields, enforced against a code allow-list that no model output can move consent / contact / delivery location out of. v3 (2026-07-28): ONE DECISION SYSTEM — <engine_decisions> is now an input; the engine decides WHAT to ask, the planner only RANKS + PHRASES + supplies chips (engine_ref echoed through considered[] and gaps[], from_source "engine_decision"). + the ≤4-word / no-verb-opener hint rule, enforced in the parse step. v2 (audit §3): +UNDERSTAND layer + question-competition ledger, XML-fenced data (corpus last), input glossary, worked example, cold-buyer path, INDIA_CTX restored, jargon-suppression line replaced with a positive language rule.
   extractBuyerProfile: 'extract-v43', // MUST mirror EXTRACT_PROMPT_VERSION (v43: products_of_interest infers brand/colloquial→category+implication; v42: buyer_maturity three-way no-fabricate + requirement-fields omit-without-signal; v41: field-level namesake flags consumed from n8n v44 websearch-parse — flagged web fields reach the LLM as ⚠ unverified leads, never silent facts; v40: ID-first web anchors + PAN-alone gate + jargon ban; v39: identity phone-holder-vs-GST-owner + email-domain institutional + web key-people reconciliation; v38: +company_reg (IndiaMART verified GST/KYB — constitution·nature·turnover-band·reg-year·PAN·partners·reg-IDs, PRIMARY authority) + buyerprofile (business_type·MCAT interests·products-sold[also-seller]·cleaned social·geo·activity·verification) composers+source-defs; trust badge TrustSEAL(6-9)/Verified-Business(4-5)/Verified(mob+email)/Unverified; v37: sourcing_channel names web-found marketplaces; v36: +deal_readiness + primary_language keys, card 360° reorg; v35: +use_case; v34: PNS-location aggregate lock; v33: source-policy architecture; v32: clean sectioned structure; v31: SUPERSET — frontend extract also outputs the dashboard-card slots (business_type/business_stage/annual_turnover/annual_procurements/sourcing_channel/preferred_suppliers/procurement_approach/target_customers/selling_channel/sales_geography/business_story) so one client call fills UC1 + the card; location P0 keeps a PAN-only buyer's registered city. v30: RECHECK MISSES — removed false "GST number not in this pull" clause when GSTIN present (N2); procurement_model=Bulk requires buyer's own commercial-scale QTY not seller/entity status (N4); communication responsiveness grounded in real two-way behavior + language only from buyer-authored signal (N5). v29: LOCATION-LEAK BLOCK — a city appearing ONLY inside an OUR-outbound fN is never a sourcing signal; emit sourcing city only from a buyer-side signal, else operating-city-alone; fixes the live "Sources from New Delhi" fabrication. v27: live-audit hardening — LOCATION sourcing-vs-operating + conflict-stays-unresolved + no-OUR-outbound-citation; COVERAGE carry concrete specs (GSM/machine dims); INTENT-vs-open-blockers; no internal mechanics (fallback/SIM-circle) in values; discrete confidence ladder {50,60,70,85,95}; name-a-vendor-only-if-cited. v26: fast-mode Gemini 2.5 Flash + Google Search grounding web engine self-reports match_confidence/matched_on/turnover_source; composeWebOsint emits a verdict line FIRST + WITHHOLDS unanchored/namesake web from the bundle; webVerified honors match_confidence!=='none'. v25: call evidence = Go-schema structured extraction (products/specs/price/qty · buyer_intent · call_outcome · B2B/persona/order/repeat · deal_readiness · payment · language) from calls[].extraction — n8n v18 audio nodes do full structured extraction per the Go call-extractor, not just transcription; transcript_en fallback kept; v24: prompt hygiene — glossary hoisted to top (define-before-use) + SYNTHESIZE-don't-ECHO + NAME-THE-VENDOR (Befisc vs Sign3) global rules + web_osint reframed to verify-then-use (per-field anchor check, no cap) + composeWebOsint reads basis[]/proofs[] → citations to LLM; v23: noise-strip + curated csl/external/identity/pns composers + widened SKIP_KEY + TIMELINE/NUMBERS/SELLER-GLID rules; v22: web_osint LOW-confidence + strict corroboration-gate (matches verified GST/Udyam/PAN/name/location or IGNORE; caps ~45; never overrides KYB); v21: Udyam/MSME source-def — enterprise_type=size + NIC industry + org type + address triangulation; v20: Web OSINT Parallel.ai deep web-search — footprint/scale/legitimacy, corroboration + identity_confidence, never overrides KYB; v19: Sign3 multi-vendor triangulation — mobiles/pan_union/gstin_union/gst_detail_union 3-vendor consensus + agreement→confidence + pan_type authority; v18: IDfy sources live end-to-end — pan_gst_idfy/gst_cert_idfy/epfo now emitted by backend v15; v17: PNS calls source — sourcing basket/persona + circle→location + offer_id⋈BuyLead + transcript→UC2; v16: IDfy triangulation source-defs; v15: PAN/GSTIN entity-char → b2b_b2c; v14: verified-address lock on operating city; v13: Call-recordings source-def + composeCalls; v12: Befisc GST Advanced source-def → B2B/role/sub_industry/hard-city; v11: clean `sources` catalog, never external/profile; v10: recurring guard · req-scoped purchase_frequency · Preferred sourcing city · strip is_expired · retail_wholesale · b2b_b2c)
   offerEnrich: 'offerEnrich.v1', uc2Enrich: 'uc2Enrich.v10', // audit 2026-07-13: mirror UC2_PROMPT_VERSION (was stale v9; lib is v10 — telemetry logged the wrong version). v10: plain-layman-English; v9: date-matched call transcript; v8: "Preferred sourcing city"
 
@@ -165,11 +177,16 @@ const promptVer = (label: string): string => PROMPT_VER[label] || PROMPTS_VERSIO
 const LLM_RATES: Record<string, { in: number; out: number }> = {
   'google/gemini-2.5-flash': { in: 0.30, out: 2.50 },
   'google/gemini-2.5-flash-lite': { in: 0.10, out: 0.40 },
+  // 3.5-flash-lite: rate ASSUMED equal to 2.5-flash-lite pending a published price. Debug-only cost display, never
+  // billing — if it is wrong the $ figure is wrong, nothing else. Without an entry it would fall to the mid rate and
+  // silently over-report every call in the new default model.
+  'google/gemini-3.5-flash-lite': { in: 0.10, out: 0.40 },
 };
 function estCostUsd(model: string, promptTok: number, complTok: number): number {
   const r = LLM_RATES[model] || { in: 0.15, out: 0.60 };
   return (promptTok / 1e6) * r.in + (complTok / 1e6) * r.out;
 }
+let LLM_SEQ = 0;   // monotonic per-call id so raw I/O can be keyed PER CALL (H-fix), not per label
 const LLM_HEALTH: LLMCallRecord[] = [];
 function recordLLM(rec: LLMCallRecord): void {
   LLM_HEALTH.push(rec);
@@ -187,11 +204,25 @@ export function recordParse(label: string, ok: boolean): void {
 
 // Raw prompt INPUT / OUTPUT per label (last call) — for the Output-Acceptance ledger (P2 · Gap 3).
 // Truncated; debug-only. Keyed by label so the Observatory can show "what went in / what came out".
-export interface LLMRawIO { input?: string; output?: string; system?: string; user?: string; at: number; model?: string; maxTokens?: number; temperature?: number; promptVersion?: string }
+export interface LLMRawIO { id?: number; label?: string; input?: string; output?: string; system?: string; user?: string; at: number; model?: string; maxTokens?: number; temperature?: number; promptVersion?: string }
 const LLM_RAW: Record<string, LLMRawIO> = {};
+// H-fix: also index raw I/O by the monotonic call id. LLM_RAW (by label) kept the LAST call only, so a repeated
+// label (e.g. requirement-brain fired for two products) showed the wrong prompt/output when expanded. The panel
+// now looks up byId first (per-call truth), byLabel as the offline/seed fallback.
+const LLM_RAW_BY_ID: Record<number, LLMRawIO> = {};
 export const getLLMRaw = (): Record<string, LLMRawIO> => ({ ...LLM_RAW });
+export const getLLMRawById = (): Record<number, LLMRawIO> => ({ ...LLM_RAW_BY_ID });
 // OFFLINE HYDRATION (P4) — seed captured LLM prompt/output records so L4/L5 render the exact prompts + outputs offline.
 export const seedLLMRaw = (map: Record<string, LLMRawIO>): void => { if (map && typeof map === 'object') for (const k in map) if (Object.prototype.hasOwnProperty.call(map, k)) LLM_RAW[k] = map[k]; };
+/** Clear per-call LLM telemetry (health list + raw I/O). Called once per GLID pull so the inspector's "N LLM calls"
+ *  reflects THIS pull, not every call accumulated since the tab opened — the source of the misleading "18 LLM calls"
+ *  count that actually spanned multiple product commits. */
+export const resetLLMTelemetry = (): void => {
+  LLM_HEALTH.length = 0;
+  for (const k of Object.keys(LLM_RAW_BY_ID)) delete LLM_RAW_BY_ID[Number(k)];
+  for (const k of Object.keys(LLM_RAW)) delete LLM_RAW[k];
+  try { (globalThis as unknown as { __llmHealth?: unknown }).__llmHealth = LLM_HEALTH; } catch { /* noop */ }
+};
 
 // L4 · prompt-template registry — prompt-owning libs register their STATIC system template at module load
 // (e.g. buyerProfileExtract registers 'extractBuyerProfile' → EXTRACT_BUYER_PROFILE_SYSTEM) so the dashboard can
@@ -217,11 +248,11 @@ export function onLLMActivity(cb: LLMActivityCb): () => void {
 }
 export const llmActive = (): number => llmInFlight;
 
-async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } }): Promise<string> {
+export async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } }): Promise<string> {
   // temperature defaults to 0, NOT to omission. Omitting it let the provider default (~1.0) govern five
   // prompts that emit calibrated numbers — worst was deduceLogistics, whose 0.6/0.85 confidences GATE
   // client-side auto-prefill. Extraction and ranking want determinism; pass a value explicitly to opt out.
-  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature = 0, reasoningEffort, label = 'llm', timeoutMs = 240000, route = 'form' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
+  const { jsonMode = true, model = MODEL_FAST, maxTokens = 16000, temperature = 0, reasoningEffort, label = 'llm', captureRaw = false, timeoutMs = 240000, route = 'form' } = opts; // V10 (owner #4/#13): default raised 1024→16000 so no call silently clips JSON; per-call overrides still apply. Cost optimized LATER.
   const endpoint = route === 'card' ? ENDPOINT_CARD : ENDPOINT; // proxy injects the Bearer key per path — never bundled
   // audit 2026-07-13 (P1): no timeout meant a hung gateway never resolved — llmInFlight stuck, global 'working…' loader
   // spun forever with no health record. 240s default comfortably clears the ~100s extract; a truly hung socket now aborts.
@@ -240,7 +271,23 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
       max_tokens: maxTokens,
       // Thinking level. Forwarded the same way `temperature` is — only when the caller stated one, so an
       // unset call sends exactly the bytes it sent before this parameter existed.
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      // 'none' is NOT forwarded: probed live 2026-08-01, this gateway answers
+      //   "Reasoning is mandatory for this endpoint and cannot be disabled." (400)
+      // Before `allowed_openai_params` the parameter was being dropped anyway so 'none' was harmless; now that
+      // effort is real, sending it would 400 every voice/photo/summarise/classify call and burn a retry to
+      // recover. Omitting the field is the closest the endpoint allows to "spend no thinking budget", and it is
+      // exactly what these call sites meant. `sentEffort` below still records 'none' so telemetry stays honest.
+      ...(reasoningEffort && reasoningEffort !== 'none' ? { reasoning_effort: reasoningEffort } : {}),
+      // GATEWAY FIX (probed live 2026-07-31, owner-approved). The gateway is LiteLLM in front of OpenRouter, and it
+      // rejected our thinking level with:
+      //   litellm.UnsupportedParamsError: openrouter does not support parameters: ['reasoning_effort'] …
+      //   "If you want to use these params dynamically send allowed_openai_params=['reasoning_effort']"
+      // — i.e. LiteLLM's own documented remedy, which we now send. Measured on the live gateway:
+      //   WITHOUT it → 1-in-4 hard 400s AND the successes came back with reasoning_tokens = 0 (effort silently
+      //               dropped, so low/medium/high were all identical — the whole knob was inert).
+      //   WITH it    → 12/12 success, reasoning_tokens actually scale: low 0 · medium ~300-400 · high ~404-457.
+      // Sent ONLY alongside reasoning_effort, so a call that states no effort is byte-identical to before.
+      ...(reasoningEffort && reasoningEffort !== 'none' ? { allowed_openai_params: ['reasoning_effort'] } : {}),
     };
     let sentEffort: ReasoningEffort | undefined = reasoningEffort;
     let payload = JSON.stringify(bodyObj);
@@ -259,7 +306,10 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
       // is what fixed it, `reasoningEffort` lands in LLM_HEALTH as undefined — that is the live confirmation
       // the framework asked for, obtained without a manual probe.
       if (sentEffort && (status === 400 || status === 422) && !ac.signal.aborted) {
-        delete bodyObj.reasoning_effort; sentEffort = undefined; payload = JSON.stringify(bodyObj);
+        // Backstop only, now that `allowed_openai_params` is sent (above) — it should no longer fire. Drop the
+        // companion key too: it exists solely to whitelist reasoning_effort, so leaving it behind would send a
+        // stray param on the retry that the strip is trying to make minimal.
+        delete bodyObj.reasoning_effort; delete bodyObj.allowed_openai_params; sentEffort = undefined; payload = JSON.stringify(bodyObj);
         continue;
       }
       if ((status !== 429 && status < 500) || attempt >= 2 || ac.signal.aborted) break;
@@ -267,7 +317,10 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
     }
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      recordLLM({ label, ok: false, ms: Date.now() - t0, status, bytes: 0, model, at: Date.now(), promptVersion: promptVer(label) });
+      // Carry id + the effort ACTUALLY sent onto the failure record too. Without them the panel could not tell
+      // "effort stripped by the compat path" from "this call never stated an effort", which is precisely the
+      // distinction that exposed the gateway bug — so the indicator has to survive a failure to mean anything.
+      recordLLM({ id: ++LLM_SEQ, label, ok: false, ms: Date.now() - t0, status, bytes: 0, model, at: Date.now(), maxTokens, temperature, reasoningEffort: sentEffort, promptVersion: promptVer(label) });
       throw new Error(`LLM error: ${res.status} ${body}`);
     }
     const data = await res.json();
@@ -277,12 +330,13 @@ async function callLLM(messages: object[], opts: LLMOpts = {}, meta?: { usage?: 
     // on it yielded '[object Object],[object Object]' and blanked the L4 ledger for exactly the voice/image calls. Serialize
     // text parts and tag binary ones so 'nothing hidden' is literally true for multimodal too.
     const partStr = (c: unknown): string => Array.isArray(c) ? (c as Array<{ type?: string; text?: string }>).map((p) => p && p.type === 'text' ? String(p.text ?? '') : (p && p.type ? `[${p.type}]` : String(p ?? ''))).join(' ') : String(c ?? '');
-    try { const msgs = messages as Array<{ role?: string; content?: unknown }>; const inText = msgs.map((m) => partStr(m.content)).join(' — '); const sys = msgs.find((m) => m.role === 'system'); const usr = [...msgs].reverse().find((m) => m.role === 'user' || !m.role); LLM_RAW[label] = { input: inText, output: content, system: sys ? partStr(sys.content) : undefined, user: usr ? partStr(usr.content) : undefined, at: Date.now(), model, maxTokens, temperature, promptVersion: promptVer(label) }; } catch { /* noop */ } // V10 (owner #4/#13): capture FULL prompt+output so L4 'nothing hidden' is literally true. Debug mode, PII ok.
+    const callId = ++LLM_SEQ;
+    if (captureRaw) try { const msgs = messages as Array<{ role?: string; content?: unknown }>; const inText = msgs.map((m) => partStr(m.content)).join(' — '); const sys = msgs.find((m) => m.role === 'system'); const usr = [...msgs].reverse().find((m) => m.role === 'user' || !m.role); const rawIO: LLMRawIO = { id: callId, label, input: inText, output: content, system: sys ? partStr(sys.content) : undefined, user: usr ? partStr(usr.content) : undefined, at: Date.now(), model, maxTokens, temperature, promptVersion: promptVer(label) }; LLM_RAW[label] = rawIO; LLM_RAW_BY_ID[callId] = rawIO; } catch { /* noop */ } // V10 (owner #4/#13): capture FULL prompt+output so L4 'nothing hidden' is literally true. Debug mode, PII ok. H-fix: also key by call id.
     const u = data.usage || {};
     const promptTokens = u.prompt_tokens ?? 0;
     const completionTokens = u.completion_tokens ?? 0;
     const reasoningTokens = u.completion_tokens_details?.reasoning_tokens ?? 0;
-    recordLLM({ label, ok: true, ms: Date.now() - t0, status, bytes: content.length, model, at: Date.now(), promptTokens, completionTokens, reasoningTokens, costUsd: estCostUsd(model, promptTokens, completionTokens), promptVersion: promptVer(label), maxTokens, temperature, reasoningEffort: sentEffort });
+    recordLLM({ id: callId, label, ok: true, ms: Date.now() - t0, status, bytes: content.length, model, at: Date.now(), promptTokens, completionTokens, reasoningTokens, costUsd: estCostUsd(model, promptTokens, completionTokens), promptVersion: promptVer(label), maxTokens, temperature, reasoningEffort: sentEffort });
     if (meta) meta.usage = { promptTokens, completionTokens, reasoningTokens };
     return content;
   } catch (e) {
@@ -335,7 +389,7 @@ export async function extractBuyerProfileLLM(system: string, user: string): Prom
     // 'medium' effort (reconciliation: ten sources that disagree, each judgement needing a cited reason) is
     // paired with 32000 → 48000. 32k is what today's contract already needs; the extra 16k is the reasoning
     // headroom, and 48k stays inside flash-lite's ~64k output ceiling.
-    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 48000, reasoningEffort: 'medium', model: RFQ_FORM_LLM_MODEL, route: 'card', label: 'extractBuyerProfile' }, meta);
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 48000, reasoningEffort: 'medium', model: RFQ_FORM_LLM_MODEL, route: 'card', label: 'extractBuyerProfile', captureRaw: true }, meta);
     applyMeta();
     const parsed = JSON.parse(out) as Record<string, unknown>;
     recordParse('extractBuyerProfile', true);
@@ -355,7 +409,7 @@ export async function extractBuyerProfileLLM(system: string, user: string): Prom
 export async function pruneTwinLLM(system: string, user: string): Promise<string[] | null> {
   if (!hasGeminiKey()) return null;
   try {
-    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 2000, reasoningEffort: 'low', label: 'twinPrune' });
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 2000, reasoningEffort: 'low', label: 'twinPrune', captureRaw: true });
     const p = JSON.parse(out) as Record<string, unknown>;
     const keep = Array.isArray((p as { keep?: unknown }).keep) ? (p as { keep: unknown[] }).keep
       : Array.isArray(p) ? (p as unknown[])
@@ -375,7 +429,7 @@ export async function offerEnrichLLM(system: string, user: string): Promise<Offe
   try {
     // MODEL_RICH (not FAST): offer reconstruction must READ buried call-narrative specs (e.g. "54 GSM", "0.5–1 ton")
     // and reconcile several conflicting PNS calls — the lite model demonstrably missed these; the rich model gets them.
-    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 8000, reasoningEffort: 'medium', model: MODEL_RICH, label: 'offerEnrich' });
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 8000, reasoningEffort: 'medium', model: MODEL_RICH, label: 'offerEnrich', captureRaw: true });
     const p = JSON.parse(out) as Record<string, unknown>;
     const fields = Array.isArray((p as { fields?: unknown }).fields) ? (p as { fields: unknown[] }).fields
       : Array.isArray(p) ? (p as unknown[])
@@ -395,7 +449,7 @@ export async function enrichRequirementLLM(system: string, user: string): Promis
   const meta: { usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number } } = {};
   const applyMeta = () => { usage.ms = Date.now() - t0; if (meta.usage) { usage.promptTokens = meta.usage.promptTokens; usage.completionTokens = meta.usage.completionTokens; usage.reasoningTokens = meta.usage.reasoningTokens; } };
   try {
-    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 24000, reasoningEffort: 'medium', model: MODEL_RICH, label: 'uc2Enrich' }, meta);
+    const out = await callLLM([{ role: 'system', content: system }, { role: 'user', content: user }], { jsonMode: true, temperature: 0, maxTokens: 24000, reasoningEffort: 'medium', model: MODEL_RICH, label: 'uc2Enrich', captureRaw: true }, meta);
     applyMeta();
     const p = JSON.parse(out) as Record<string, unknown>;
     const edits = Array.isArray((p as { edits?: unknown }).edits) ? (p as { edits: unknown[] }).edits
@@ -496,6 +550,7 @@ export async function analyzeImage(
   additionalSpecifications: Record<string, string>;
   quantity: string | null;
   additionalDetails: string;
+  productMatch?: 'match' | 'related' | 'unrelated' | 'unclear';
 }> {
   const hasFields = isqFieldNames.length > 0;
   // RPS-1: axis B was 0.5 — the image was a separate content part but the field list, the options map and the
@@ -541,7 +596,7 @@ Identify a B2B product and its key specs from an image. The IMAGE arrives as its
   "additionalDetails": ""
 }`;
 
-  const GROUND = `\nGROUNDING (critical): report ONLY what is actually VISIBLE/READABLE in this image. If it is not a product (blurry, irrelevant, a person, a screenshot) return productName:null and empty specs — that is the correct answer for a misfired photo, and it is what the form needs in order to say "we couldn't read that" instead of pre-filling a guess. NEVER infer a spec from category priors or a "typical" value — only what you can see. Put ANY visible attribute that isn't a listed field into additionalSpecifications (never drop it). A rating/dimension number (e.g. "5 kVA", "6 mm") is a SPEC value, NOT the order quantity.`;
+  const GROUND = `\nGROUNDING (critical): report ONLY what is actually VISIBLE/READABLE in this image. If it is not a product (blurry, irrelevant, a person, a screenshot) return productName:null and empty specs — that is the correct answer for a misfired photo, and it is what the form needs in order to say "we couldn't read that" instead of pre-filling a guess. NEVER infer a spec from category priors or a "typical" value — only what you can see. Put ANY visible attribute that isn't a listed field into additionalSpecifications (never drop it). A rating/dimension number (e.g. "5 kVA", "6 mm") is a SPEC value, NOT the order quantity. ALSO return "productMatch": how this image relates to <product_context> — "match" (the same product), "related" (same family / an accessory or variant of it), "unrelated" (a clearly different product), or "unclear" (cannot tell, or <product_context> is (none)). Judge strictly by what is visible versus the stated product; when there is no product_context, return "unclear". This gates whether a photo added after the buyer named his product is trusted, so only answer "unrelated" when you are confident it is a different product.`;
   const text = await callLLM([
     { role: 'system', content: sys + GROUND },
     { role: 'user', content: [
@@ -557,6 +612,135 @@ Identify a B2B product and its key specs from an image. The IMAGE arrives as its
   // audit #6: guard against truncated/invalid JSON so a bad body can't throw and break the photo feature.
   try { return JSON.parse(text); }
   catch { return { productName: '', specifications: {}, additionalSpecifications: {}, quantity: null, additionalDetails: '' }; }
+}
+
+// ── Title ↔ MCAT mismatch (fly-ash class, owner #65) — a port of the production title_mcat_mismatch.py contract.
+// Called ONLY when the deterministic mcatPlausible() pre-filter finds zero word-overlap, so the cheap majority of
+// commits never hit an LLM. Returns whether the committed product truly belongs to the resolved category.
+const TITLE_MCAT_MISMATCH_SYSTEM = `You are a semantic mismatch detector for an Indian B2B marketplace (IndiaMart). Decide whether requirement_title belongs to mcat_name (its resolved category).
+RULES:
+1. mismatch=1 only when requirement_title is a clearly DIFFERENT product/service than mcat_name (e.g. "Laptop" vs "Washing Machine").
+2. mismatch=0 when requirement_title is a sub-type, variant, component or accessory of mcat_name (e.g. "Industrial Grade Steel Bolt" vs "Fasteners"; "500W Motor Pump" vs "Water Pumps"). Partial/approximate matches are NOT a mismatch.
+3. is_irrelevant=1 when requirement_title is gibberish/nonsensical ("asdfgh", "test 123"); if is_irrelevant=1 also set mismatch=1.
+4. Do NOT flag brand names, model numbers or grade variants. Do NOT flag when the title just adds specificity (material/size/capacity). Be CONSERVATIVE — only clear, obvious mismatches. Evaluate Hindi/regional titles semantically.
+Return JSON only: {"mismatch": 0 or 1, "is_irrelevant": 0 or 1}`;
+
+export async function checkTitleMcatMismatch(title: string, mcatName: string, route: 'form' | 'card' = 'form', model?: string): Promise<{ mismatch: boolean; isIrrelevant: boolean }> {
+  if (!title.trim() || !mcatName.trim()) return { mismatch: false, isIrrelevant: false };
+  try {
+    const text = await callLLM(
+      [{ role: 'system', content: TITLE_MCAT_MISMATCH_SYSTEM },
+       { role: 'user', content: `requirement_title: ${title}\nmcat_name: ${mcatName}` }],
+      { jsonMode: true, temperature: 0, maxTokens: 60, reasoningEffort: 'none', model: model || MODEL_FAST, route, label: 'title-mcat-mismatch' });
+    const r = JSON.parse(text) as { mismatch?: unknown; is_irrelevant?: unknown };
+    return { mismatch: Number(r.mismatch) === 1, isIrrelevant: Number(r.is_irrelevant) === 1 };
+  } catch { return { mismatch: false, isIrrelevant: false }; }
+}
+
+// ── RETAIL-INTENT gate (owner 2026-08-14, task #75): after the buyer commits a quantity on a qty-collecting category,
+// judge whether THIS product at THIS order size is a small personal/one-off RETAIL buy (the kind an individual would just
+// get on Amazon/Flipkart) versus a genuine B2B/bulk requirement. The judgement is CATEGORY-RELATIVE — "2 t-shirts" is
+// retail, "2 CNC machines" is not — which is exactly why it needs the LLM rather than a fixed number. A cheap deterministic
+// pre-filter (isRetailCandidate in quantity.ts) gates this so we only spend the call on small-discrete-order candidates.
+// Conservative by construction: when unsure it returns retail:false, so a real business buyer is never pushed out of the flow.
+const RETAIL_INTENT_SYSTEM = `${INDIA_CTX}
+You decide whether a buyer's requirement is a RETAIL / personal-scale purchase — the kind an individual would simply buy on a consumer marketplace like Amazon or Flipkart — versus a genuine B2B / bulk / business requirement that belongs on a wholesale sourcing platform.
+
+You are given a PRODUCT, a QUANTITY and a UNIT (and sometimes a category). At THIS order size, for THIS product, is this a small personal / one-off retail buy?
+
+Judge CATEGORY-RELATIVELY — the same count means different things for different products:
+- "2 t-shirts", "1 mobile cover", "3 kg atta", "1 office chair", "5 notebooks" => RETAIL (a consumer buys these on Amazon/Flipkart).
+- "2 CNC machines", "1 industrial boiler", "1 diesel generator", "1 tonne TMT steel", "500 fasteners" => NOT retail (business / capital / bulk / raw-material buy, even at a tiny count).
+
+HARD RULES:
+- A bulk unit (tonne, MT, quintal, truck, container, wagon, drum, barrel, roll, bundle, gross) at ANY count is NEVER retail.
+- Industrial, capital, machinery, raw-material or B2B-only goods are NEVER retail, however small the count.
+- Only a SMALL count of an everyday, consumer-buyable good is retail.
+- When unsure, answer 0 (NOT retail). Never push a genuine business buyer out of the flow.
+
+Reply with ONLY a JSON object: {"retail": 0 or 1, "reason": "<=12 words"}. No prose, no code fences.`;
+
+export async function checkRetailIntent(
+  product: string,
+  quantity: string,
+  unit: string,
+  category = '',
+  route: 'form' | 'card' = 'form',
+  model?: string,
+): Promise<{ retail: boolean; reason: string }> {
+  if (!product.trim() || !quantity.trim()) return { retail: false, reason: '' };
+  try {
+    const text = await callLLM(
+      [{ role: 'system', content: RETAIL_INTENT_SYSTEM },
+       { role: 'user', content: `product: ${product}\nquantity: ${quantity}\nunit: ${unit || '(none)'}${category ? `\ncategory: ${category}` : ''}` }],
+      // timeoutMs is TIGHT (7s): this is the ONE call that hard-blocks the landing→specs advance (Continue/Enter go dead
+      // behind the 'Checking…' spinner while it runs), so it must NEVER inherit callLLM's 240s default. On timeout the
+      // catch below returns retail:false and the caller falls through to setStage('specs') — the advance proceeds.
+      { jsonMode: true, temperature: 0, maxTokens: 60, reasoningEffort: 'none', timeoutMs: 7000, model: model || MODEL_FAST, route, label: 'retail-intent' });
+    const r = JSON.parse(text) as { retail?: unknown; reason?: unknown };
+    return { retail: Number(r.retail) === 1, reason: typeof r.reason === 'string' ? r.reason : '' };
+  } catch { return { retail: false, reason: '' }; }
+}
+
+// ── Assist CHAT (owner 2026-08-13): a warm back-and-forth helper. The buyer chats (text/mic/photo) and can ask
+// questions; on "Fill my form" the WHOLE conversation is handed to inferSpecsFromApplication (+ analyzeImage for any
+// photos) — the same fill pipeline as the one-shot use-case box, just a friendlier front door. This call returns ONLY
+// the assistant's next reply; it never fills specs and never invents one.
+export async function assistChat(
+  history: { role: 'user' | 'assistant'; text: string }[],
+  product: string,
+  neededSpecs: string[] = [],
+  route: 'form' | 'card' = 'form',
+  model?: string,
+): Promise<string> {
+  const sys = `${INDIA_CTX}
+You are a warm, plain-spoken buying assistant on IndiaMART, helping a B2B buyer describe what he wants to buy${product ? `: "${product}"` : ''}.
+- CRITICAL: reply in PLAIN, natural sentences ONLY. NEVER output JSON, braces { }, quoted keys, "ready_to_fill", "requirement":, code, or any structured/data format. Just talk like a helpful person. If you break this rule the buyer sees gibberish.
+- Ask ONE short, simple question at a time about the PRODUCT and its details — brand, size, material, quantity, what it is for${neededSpecs.length ? ` (especially: ${neededSpecs.slice(0, 6).join(', ')})` : ''}.
+- Do NOT ask about the buyer's company, job role, payment terms, or delivery — those are handled elsewhere, not here.
+- If the buyer asks YOU something, answer briefly, then gently steer back to his requirement.
+- No jargon, no bullet lists. ONE friendly message, at most 2 short sentences.
+- When you have enough, say he can tap "Fill my form" — in a normal sentence, never as data.
+- NEVER invent a specification — only reflect what he actually tells you.`;
+  const convo = history.map((m) => ({ role: m.role, content: m.text }));
+  const FALLBACK = 'Got it — anything else, or tap "Fill my form" when you\'re ready?';
+  try {
+    const text = await callLLM([{ role: 'system', content: sys }, ...convo], { temperature: 0.4, maxTokens: 160, reasoningEffort: 'none', model: model || MODEL_FAST, route, label: 'assist-chat' });
+    // DEFENSIVE SANITIZER (owner-reported hallucination): flash-lite sometimes emits its internal JSON
+    // ({"requirement":…,"ready_to_fill":true}). Strip any leaked JSON/code so the buyer never sees it; if nothing
+    // human-readable is left, fall back to a neutral prompt. The buyer must only ever get plain conversation.
+    let clean = text.trim()
+      .replace(/```[\s\S]*?```/g, ' ')                                  // fenced code blocks
+      .replace(/\{[^{}]*"(?:ready_to_fill|requirement|specs?)"[\s\S]*?\}/gi, ' ') // an embedded requirement-JSON object
+      .trim();
+    if (/^\s*[{[]/.test(clean)) clean = '';   // still starts with a brace/bracket → a pure JSON leak → drop it
+    return clean || FALLBACK;
+  } catch { return FALLBACK; }
+}
+
+// Extract the STRUCTURED essentials from an assist-chat transcript (owner #74 follow-up): the product, the ORDER
+// quantity, and the unit. Specs are filled separately by inferSpecsFromApplication against the loaded schema. The
+// quantity is context-aware — a rating/size/model ("60 HP", "14.9-28", "24V", a pincode, a year, a price) is NOT an
+// order quantity. Returns empty fields when a thing was never stated.
+export async function extractFromChat(
+  transcript: string,
+  currentProduct: string,
+  unitOptions: string[] = [],
+  route: 'form' | 'card' = 'form',
+  model?: string,
+): Promise<{ productName: string; quantity: string; unit: string }> {
+  if (!transcript.trim()) return { productName: currentProduct, quantity: '', unit: '' };
+  const sys = `${INDIA_CTX}
+From a buyer's chat, extract ONLY these three and return JSON: {"productName":"...","quantity":"...","unit":"..."}.
+- productName: the ONE product he wants to buy, clean and short (2-5 words like "Tractor Tyre", never a whole sentence).${currentProduct ? ` We already believe it is "${currentProduct}" — keep that unless he clearly wants a different product.` : ''}
+- quantity: HOW MANY he wants to buy, as digits only (e.g. "100"). CRITICAL: a rating, size, model, voltage, HP, pincode, year or PRICE is NOT a quantity — "60 HP", "14.9-28", "24V", "560001", "2024", "₹500" are all NOT the quantity. If he never says how many to buy, return "".
+- unit: the order unit if he states one${unitOptions.length ? ` (choose from: ${unitOptions.join(', ')})` : ''}, else "".
+Return JSON only, no prose.`;
+  try {
+    const text = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: transcript }], { jsonMode: true, temperature: 0, maxTokens: 80, reasoningEffort: 'none', model: model || MODEL_FAST, route, label: 'chat-extract' });
+    const r = JSON.parse(text) as { productName?: string; quantity?: string; unit?: string };
+    return { productName: String(r.productName ?? currentProduct ?? '').trim(), quantity: String(r.quantity ?? '').replace(/[^\d]/g, ''), unit: String(r.unit ?? '').trim() };
+  } catch { return { productName: currentProduct, quantity: '', unit: '' }; }
 }
 
 // ── Cold-mode: generate the non-spec questions to ask, by segment ─────
@@ -1597,7 +1781,7 @@ What that example demonstrates: "trial_first" and "catalog_driven" are ABSENT be
       ['historical_categories', (args.historicalCategories || []).join('; ') || null],
       ['intent_history', Object.keys(args.intentHistory || {}).length ? args.intentHistory : null],
       ['signals', pool],
-    ]) }], { model: MODEL_FAST, maxTokens: 8000, temperature: 0, reasoningEffort: 'medium', label: 'deriveBuyerTwin' });
+    ]) }], { model: MODEL_FAST, maxTokens: 8000, temperature: 0, reasoningEffort: 'medium', label: 'deriveBuyerTwin', captureRaw: true });
     base.twin_generation_time_ms = Date.now() - t0;
     const p = JSON.parse(text) as Record<string, Record<string, unknown>>;
     const s = (v: unknown) => {
@@ -2118,6 +2302,11 @@ export interface AiSpecQuestion {
   kind?: 'spec' | 'intent' | 'context';
   prefill?: string;       // evidence-backed pre-answer: the buyer already SAID this (mic/photo/typed) — preselected, never re-asked blank
   engineRef?: string;     // the <engine_decisions> id this question IS — set when the ENGINE decided to ask it (the planner only phrased it)
+  /** The planner's RANK for this question (0 = its best), carried so the form can render the questions in the
+   *  order the planner ranked them. Without it the form had no way to put an identity/persona ask — which it
+   *  has to pull out of the ranked list to wire to real state — back at the position it was ranked into.
+   *  Absent ⇒ not ranked (an engine ASK the planner never scored, appended after the ranked ones). */
+  rank?: number;
 }
 
 // PAGE-2 "AI specs": the best few questions BEYOND the buyer's own ISQ that a SELLER needs to quote.
@@ -2165,7 +2354,11 @@ export interface CuratedUnderstanding {
 export interface CuratedPreAnswer {
   q: string;                                                  // the question we would otherwise have asked
   value: string;                                              // the answer we already hold
-  source: string;                                             // buyer-facing provenance ("from your call with a seller")
+  /** Provenance. BUYER-SAFE by contract (privacy P0, owner 2026-07-28): it may cite what he typed, what he
+   *  posted or his IndiaMART profile/account, and NEVER a phone call — he must not learn we read his calls.
+   *  The form no longer prints it either (the chip carries an AI mark instead); it travels to the decision
+   *  routing ledger, which is where our own team reads it. */
+  source: string;
   kind?: 'non_spec' | 'spec' | 'identity' | 'persona';
   options?: string[];                                         // alternatives, so correcting it is one tap
   why?: string;                                               // ≤4-word caption, same rule as a gap
@@ -2177,6 +2370,24 @@ export interface CuratedPlacement {
   field: string;
   placement: 'keep_last_page' | 'promote_to_spec_page' | 'drop';
   reason: string;
+}
+// ── THE LAST PAGE'S THREE FACTS ABOUT HIM (2026-07-28) ──────────────────────────────────────────────────
+// `placements` decided WHERE the last page's person questions render; nothing ever decided WHAT THEY SAY.
+// So the form asked business type and industry from scratch on every requirement, and the buyer's PERSONA —
+// which the engine already reads off his own calls — reached the form and rendered nowhere. Worse, the
+// logged-in path filled those fields with hard-coded literals, so a notebook-paper buyer submitted as
+// "Construction Equipment".
+// These are FIELD VALUES, not reasoning: they render on the page he submits from and they ship to sellers
+// under his name. Every one is therefore grounded against a named input and OMITTED when it cannot be —
+// absent beats wrong. `understanding.business_persona` / `.buyer_persona` stay what they always were: the
+// planner's prose read, debug-only. This is the short, field-shaped answer.
+export interface CuratedPerson {
+  persona?: string;         // his business in HIS words, short enough for a field ("Sweet-shop owner")
+  business_type?: string;   // the ROLE he buys in (Manufacturer / Wholesaler / Retailer …)
+  industry?: string;        // the trade his business is in ("Food processing")
+  /** ONE provenance line. Same buyer-safe rule as CuratedPreAnswer.source — never a phone call — and it is no
+   *  longer rendered next to the fields; it reaches the decision routing ledger only. */
+  source?: string;
 }
 // The question-competition ledger (audit §2.1 · P2-18): every candidate the planner weighed, winners AND
 // losers, so the debug panel can answer "why was this question asked and what competed with it".
@@ -2203,6 +2414,9 @@ export interface CuratedPlan {
   pre_answered?: CuratedPreAnswer[];
   /** ITEM 3 — proposed placement for the relocatable last-page fields. Optional for the same reason. */
   placements?: CuratedPlacement[];
+  /** The last page's person FIELDS, filled from truth. Optional: an older response, or a buyer we hold
+   *  nothing about, simply has none — and then the buyer fills them himself, which is the correct outcome. */
+  person?: CuratedPerson;
   gaps: { q: string; kind: 'non_spec' | 'spec' | 'identity' | 'persona'; why: string; options?: string[]; helperText?: string; engine_ref?: string }[];
   __raw?: { system: string; user: string; output: string };
 }
@@ -2250,7 +2464,7 @@ export async function runCuratedPlanner(input: {
   categoryCorpus?: unknown;                         // raw category corpus (n8n parse_rows or legacy intelligence obj), passed WHOLE — soft context, may be noisy
   buyerFacts?: Record<string, unknown>;
   basket?: string[];
-  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[]; whatsapp_specs?: { name: string; value: string }[]; objections?: string[]; business_intent?: string[] };
+  buyerSignals?: { whatsapp_products?: string[]; call_queries?: string[]; call_application?: string; call_specs?: { name: string; value: string }[]; whatsapp_specs?: { name: string; value: string }[]; objections?: string[]; business_intent?: string[]; viewed_products?: string[]; search_keywords?: string[]; isq_filters?: string[] };
   /** ITEM 1 — his BUSINESS truth (node_raw.profile): turnover, what the business does, how it is
    *  incorporated, how old it is, and whether he runs a paid IndiaMART seller account of his own. */
   buyerProfile?: { company?: string; turnover?: string; nature_of_business?: string; legal_status?: string; registration_year?: string; also_a_paid_seller?: string };
@@ -2296,7 +2510,7 @@ Your input arrives after these instructions as XML-tagged blocks. A block readin
   · ASK — a genuine gap the engine wants closed. It has ALREADY decided this is worth the buyer's effort.
   · SUGGEST — a likely value from the category norm, NOT from this buyer. It is offered unselected; it is never a fact and never a prefill.
   · RESOLVE_CONFLICT — two of the buyer's OWN signals disagree on one field. "conflict" holds each value with the SOURCE it came from. The buyer picks. This is the highest-value item in the whole list: it is the one interaction that stops us shipping a value the buyer never said.
-  · OFFER — something extra we can do for him (e.g. he is buying several related items, so we can raise them as one project). Not a question.
+  · OFFER — something extra we can do for him (e.g. he is buying several related items, so we can raise them as one project). Not a question, and NOT rendered: the form deliberately shows the buyer no cross-sell offer at all. You still have to account for it in "considered".
 - <page1_buyer_specs> — names of the spec fields already on screen on page 1, each followed by its tap options in [square brackets]. The buyer answers these on the form itself, so they are never gap questions.
 - <seller_flagged_specs> — spec names that sellers in this category marked as ones they need. A supplementary hint only.
 - <seller_top_questions> — what sellers ACTUALLY ask on real calls in this category. Each entry: "q" = the question or spec name; "pct" = the share of analysed calls in which sellers asked it (0-100 — higher means more decisive, so rank by it); "vals" = real answers real buyers gave, which are your best source of option chips.
@@ -2305,7 +2519,7 @@ Your input arrives after these instructions as XML-tagged blocks. A block readin
 - <category_corpus> — the raw, unedited pile of analysed seller calls for this category. Noisy, possibly large, often empty. Mine it for real phrasing and real option values. Soft context — it never outranks the buyer.
 - <buyer_facts> — profile facts we hold: member_since, has_gst, gst_verified, city, state, business_type, total_requirements, total_calls. These are facts, not guesses.
 - <also_sourcing> — other products this buyer is sourcing right now. Read his SITUATION from the COMBINATION (machine + raw material + transport ⇒ setting up a unit). Items unrelated to this requirement are noise — name them in understanding.useless.
-- <buyer_signals> — this buyer's OWN words from other channels. "whatsapp_products" = products he enquired about on WhatsApp. "whatsapp_specs" = spec values HE TYPED there. "call_queries" = what he asked sellers on a call. "call_application" = the use-case he SAID out loud. "call_specs" = spec values he SAID on a call. "objections" = his past complaints ("too far", "high price", "no response"). "business_intent" = reselling / wholesale / distribution.
+- <buyer_signals> — this buyer's OWN words + browsing from other channels. "whatsapp_products" = products he enquired about on WhatsApp. "whatsapp_specs" = spec values HE TYPED there. "call_queries" = what he asked sellers on a call. "call_application" = the use-case he SAID out loud. "call_specs" = spec values he SAID on a call. "objections" = his past complaints ("too far", "high price", "no response"). "business_intent" = reselling / wholesale / distribution. "viewed_products" = product/supplier pages he BROWSED on site. "search_keywords" = what he SEARCHED. "isq_filters" = spec filters he APPLIED while browsing (e.g. "Phase: 3-Phase"). These three are the WEAKEST signals (browsing ≠ stating), so never PREFILL from them — but DO use them to sharpen a question or its options (if he filtered "Phase: 3-Phase" while browsing generators, that spec is clearly relevant to ask), and to inform intent.
 - <buyer_business> — HIS BUSINESS, from his IndiaMART profile. "company" = its name. "turnover" = declared annual turnover band. "nature_of_business" = what the business does (Manufacturer, Wholesaler…). "legal_status" = how it is incorporated (Proprietorship, Pvt Ltd, LLP…). "registration_year" = when it was registered, so you can tell a new business from an old one. "also_a_paid_seller" = HE RUNS A PAID SELLER ACCOUNT ON INDIAMART HIMSELF — a material fact: he knows exactly how quoting works, so pitch him like a trade buyer, not a first-timer.
 - <buyer_persona> — the persona and B2B/B2C read our engine already took FROM HIS OWN CALLS. This is about HIM, not about the category. If "persona" is present we HOLD his persona: prefill or confirm it, never ask for it.
 - <context_facts> — requirement-level facts the engine holds but does not show on any field. "order_value" = roughly what this order is worth. "requirement_type" = the kind of requirement. "purchase_frequency" = a cadence he already stated. "buyer_context" = the USE-CASE he stated on a call or chat. All of these are ALREADY KNOWN — they are pre-answer material, never gap questions.
@@ -2313,7 +2527,7 @@ Your input arrives after these instructions as XML-tagged blocks. A block readin
 - <relocatable_last_page_fields> — the ONLY last-page fields you may place. Each carries "renders_by_default" (whether the buyer sees it today) and "held" (a value we already have). Every other last-page field — consent, contact details, delivery location — is contractual and is not yours to move; asking to move one is ignored in code and logged as a defect against you.
 
 # WHAT YOU RETURN — ONLY this JSON, keys in exactly this order
-{"understanding":{"what_they_want":"...","buyer_situation":"...","business_persona":"...","buyer_persona":"...","already_known":["..."],"contradictions":[{"field":"...","values":["...","..."],"picked":"...","why":"..."}],"stale":[{"field":"...","value":"...","why":"..."}],"worth_confirming":["..."],"useless":["..."]},"considered":[{"q":"...","rank":1,"from_source":"...","engine_ref":"(only when from_source is engine_decision)","why_ranked":"...","score":0,"outcome":"asked"|"dropped","dropped_because":"(only when dropped)"}],"pre_answered":[{"q":"...","value":"...","source":"your call with a seller|your WhatsApp chat|your last requirement|your IndiaMART profile|what you typed","kind":"non_spec"|"spec"|"identity"|"persona","options":["..."],"why":"≤4 words"}],"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|your call with a seller|your WhatsApp chat|what you typed|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"extras":{"fact not matching any page-1 field name":"value"},"field_hints":{"a page-1 field name":"≤4-word why it matters"},"placements":[{"field":"(one of the relocatable last-page field names)","placement":"keep_last_page"|"promote_to_spec_page"|"drop","reason":"..."}],"gaps":[{"q":"...","kind":"non_spec"|"spec"|"identity"|"persona","why":"...","options":["..."],"engine_ref":"(only when this gap IS an engine decision)"}]}
+{"understanding":{"what_they_want":"...","buyer_situation":"...","business_persona":"...","buyer_persona":"...","already_known":["..."],"contradictions":[{"field":"...","values":["...","..."],"picked":"...","why":"..."}],"stale":[{"field":"...","value":"...","why":"..."}],"worth_confirming":["..."],"useless":["..."]},"considered":[{"q":"...","rank":1,"from_source":"...","from_ref":"(the EXACT candidate string this question was built from — a seller_flagged_specs / seller_top_questions / page1_buyer_specs entry copied VERBATIM — or null when invented from own_product_knowledge or drawn from a non-list source like requirement_text/buyer_facts)","engine_ref":"(only when from_source is engine_decision)","why_ranked":"...","score":0,"outcome":"asked"|"dropped","dropped_because":"(only when dropped)"}],"pre_answered":[{"q":"...","value":"...","source":"what you typed|your last requirement|your WhatsApp chat|your IndiaMART profile|already on your IndiaMART account","kind":"non_spec"|"spec"|"identity"|"persona","options":["..."],"why":"≤4 words"}],"opening":{"q":"...","why":"...","options":["..."]},"prefills":[{"field":"...","value":"...","source":"your last requirement|buyer_signals.call_specs|your WhatsApp chat|what you typed|what you're also sourcing","corrected_from":"(only if this overrides a different known value)"}],"extras":{"fact not matching any page-1 field name":"value"},"field_hints":{"a page-1 field name":"≤4-word why it matters"},"placements":[{"field":"(one of the relocatable last-page field names)","placement":"keep_last_page"|"promote_to_spec_page"|"drop","reason":"..."}],"person":{"persona":"...","business_type":"...","industry":"...","source":"from your IndiaMART profile|from your last requirement|already on your IndiaMART account"},"gaps":[{"q":"...","kind":"non_spec"|"spec"|"identity"|"persona","why":"...","options":["..."],"engine_ref":"(only when this gap IS an engine decision)"}]}
 
 REASON BEFORE YOU LABEL — the writing order IS part of the task. Emit the keys in exactly the skeleton's order: "understanding" first, "considered" second, and only then opening / prefills / extras / field_hints / gaps. Inside every "considered" entry, write "from_source" and "why_ranked" BEFORE "score". You are working the answer out as you write it, so never put a number down before the sentence that justifies it. A question you cannot justify in one plain sentence is a question you must not ask.
 
@@ -2321,8 +2535,8 @@ REASON BEFORE YOU LABEL — the writing order IS part of the task. Emit the keys
 Read <engine_decisions> before you think of a single question of your own. It is the output of a system that has already read this buyer's requirements, orders, browsing, WhatsApp and calls. For every entry in it:
 1. It is a CANDIDATE THAT ALREADY EARNED ITS PLACE. Give it a "considered" entry with from_source "engine_decision" and engine_ref set to its id. Do not paraphrase the id.
 2. Your work on it is: (a) rank it against everything else, (b) REWRITE the engine's "field" into a real question a shop owner would say out loud, and (c) give it 3-8 concrete tap options — from its own "options"/"conflict" values first, then from real values in <seller_top_questions>/<category_corpus>. The engine names fields; you write English.
-3. A RESOLVE_CONFLICT is the highest-value entry in the list — it is the one interaction that stops us shipping a value the buyer never said. Rank it at or near the top and NEVER drop it for cap reasons. Phrase it as a straight choice between the two values, and say where each came from in plain words ("you said 6 on a call" vs "a tray page you looked at").
-4. An OFFER is not a question — put it in "considered" with outcome "dropped" and dropped_because "offer, not a question — shown as a strip". The form renders it separately.
+3. A RESOLVE_CONFLICT is the highest-value entry in the list — it is the one interaction that stops us shipping a value the buyer never said. Rank it at or near the top and NEVER drop it for cap reasons. Phrase it as one ordinary question about that field, and give it the two conflicting values FIRST plus 1-3 more values a buyer of this product might genuinely want, so it reads as a normal choice and not as an interrogation. NEVER say where either value came from — not in the question, not in the "why", not in an option label. See the PRIVACY rule below: he must not be told which channel we read.
+4. An OFFER is not a question, and the form shows NOTHING for it — the buyer never sees a cross-sell strip. Still account for it: put it in "considered" with outcome "dropped" and dropped_because "offer, not a question — the buyer UI does not show offers". Never promote one into "gaps" to get it on screen.
 5. A SUGGEST is never a prefill and never a question — it is an unselected chip. Record it the same way: outcome "dropped", dropped_because "category suggestion — shown as an unselected chip".
 6. You MAY still add candidates of your own. They compete in the SAME "considered" ledger on the same scale, with their own honest from_source. But an engine ASK must not lose to a question of yours unless you can say, in one plain sentence, what makes yours worth more to THIS buyer — write that sentence in dropped_because.
 7. If you drop an engine ASK, dropped_because is MANDATORY and must be a real reason (already known · covered by a page-1 field · a sibling question already settles it · lower value than the questions that won). "Not needed" is not a reason.
@@ -2344,7 +2558,8 @@ This is your read of the buyer. A human reviewer reads it to check your work, so
 List EVERY candidate question you weighed — the winners AND the ones you rejected. A ledger containing only winners is a failed ledger. Aim for 6-12 entries and include AT LEAST 3 you rejected.
 - q — the candidate, written exactly as you would show it to the buyer.
 - rank — 1 is your best candidate; list them best-first.
-- from_source — which INPUT produced this candidate. Use one of: engine_decision · requirement_text · already_known · page1_buyer_specs · seller_flagged_specs · seller_top_questions · category_corpus · category_personas · category_b2b_b2c · buyer_facts · also_sourcing · buyer_signals.whatsapp_products · buyer_signals.whatsapp_specs · buyer_signals.call_queries · buyer_signals.call_application · buyer_signals.call_specs · buyer_signals.objections · buyer_signals.business_intent · own_product_knowledge (only when it came from your own knowledge of the product, not from an input).
+- from_source — which INPUT produced this candidate. Use one of: engine_decision · requirement_text · already_known · page1_buyer_specs · seller_flagged_specs · seller_top_questions · category_corpus · category_personas · category_b2b_b2c · buyer_facts · also_sourcing · buyer_signals.whatsapp_products · buyer_signals.whatsapp_specs · buyer_signals.call_queries · buyer_signals.call_application · buyer_signals.call_specs · buyer_signals.objections · buyer_signals.business_intent · buyer_signals.viewed_products · buyer_signals.search_keywords · buyer_signals.isq_filters · own_product_knowledge (only when it came from your own knowledge of the product, not from an input).
+- from_ref — when from_source is a LIST you were handed (seller_flagged_specs, seller_top_questions, page1_buyer_specs), copy the EXACT candidate string you built this question from, VERBATIM (e.g. from_source "seller_flagged_specs", from_ref "Cavity Count"; from_source "seller_top_questions", from_ref the exact q string). This is how a reviewer maps your re-phrased question ("How many compartments?") back to the raw candidate ("Cavity Count") it came from. Use null when the question was invented from own_product_knowledge or drawn from a non-list source (requirement_text, buyer_facts, buyer_signals.*, engine_decision — those already have from_source/engine_ref). Never paraphrase from_ref; it must be a character-for-character copy of a candidate we gave you, or null.
 - engine_ref — the <engine_decisions> id, REQUIRED whenever from_source is "engine_decision" and forbidden otherwise. This is how the form ties your wording back to the engine's decision; without it the decision counts as dropped.
 - why_ranked — ONE plain sentence about THIS buyer: what makes the answer worth a slot, or what makes it worthless. Talk about him and his quote, never about rule numbers.
 - score — 0-100: how much this answer would improve the quotes he receives, MINUS the effort of answering it. It must follow from what you just wrote in why_ranked.
@@ -2369,7 +2584,7 @@ CONSISTENCY (this is checked): every question in the final gaps array, and the o
 # STEP 4b — PRE-ANSWER the question instead of asking it (this is not only for spec fields)
 A prefill fills a FIELD. A pre-answer answers a QUESTION — the opening intent question, or any non-spec gap — using something the buyer already told us. Until now every one of those was asked from scratch even when the answer was sitting in his own words: <buyer_signals>.call_application says "Food Packaging Business" and we still ask him what it is for. That is the exact failure this key exists to end.
 - BEFORE you put a question in "gaps" or in "opening", check whether we already hold its answer in <buyer_signals> (call_application, business_intent, whatsapp/call specs), <context_facts> (buyer_context, purchase_frequency, requirement_type, order_value), <buyer_persona>, <buyer_business> or <buyer_facts>. If we do, it belongs in "pre_answered" and NOT in "gaps"/"opening". Never both — a question that is pre-answered and also asked is asked twice.
-- q — the question exactly as you would have asked it. value — the answer we hold, written the way HE would say it. source — plain buyer-facing provenance, because he will see it word for word next to the answer: "from your call with a seller", "from your WhatsApp chat", "from your last requirement", "from your IndiaMART profile", "what you typed". options — 2-5 alternatives so correcting us costs one tap.
+- q — the question exactly as you would have asked it. value — the answer we hold, written the way HE would say it. source — a BUYER-SAFE provenance label, one of exactly these: "what you typed", "your last requirement", "your WhatsApp chat", "your IndiaMART profile", "already on your IndiaMART account". When the only thing that grounds the answer is something he said on a PHONE CALL, use "already on your IndiaMART account" and nothing more — see the PRIVACY rule below. options — 2-5 alternatives so correcting us costs one tap.
 - The value must be grounded in a real input, exactly like a prefill. A pre-answer you reasoned your way to is a fabrication with a provenance label on it, which is worse than asking.
 - This does NOT hide the question. He sees it with our answer already in it and can change it. That is the whole point: it turns something we merely observed into something he confirmed.
 - Give every pre-answer a "considered" entry too, with outcome "asked" and a from_source naming the truth it came from. It competed for the slot and won it outright — by not costing him anything.
@@ -2395,6 +2610,12 @@ A caption is read at a glance beside the field label. If it needs a comma, it is
 # LANGUAGE — how everything must be worded
 Write every buyer-facing string (opening.q, gaps[].q, every option chip, every "why", every field_hint) the way a shop owner would say it out loud to a supplier: everyday spoken words, the name of the thing itself, no abbreviations or system names the buyer would not use about his own business. If a phrase would make him ask "what does that mean?", rewrite it. "understanding", "considered" and "prefills[].source" are INTERNAL debug fields read by our own team — keep them plain English too, but there you SHOULD name our data sources (that is exactly what from_source is for).
 
+# PRIVACY — WHAT THE BUYER MAY BE TOLD ABOUT HOW WE KNOW SOMETHING (hard rule, no exceptions, owner-locked)
+The buyer must NEVER learn that we read, listen to, transcribe or analyse his phone calls. Every string he can see — opening.q · gaps[].q · every option chip · every "why" · every field_hint · pre_answered[].q · pre_answered[].value · pre_answered[].source · person.source — may cite ONLY what he TYPED, what he POSTED, or his IndiaMART profile/account. Never a call, a recording, a conversation with a seller, "you said", "you told a seller", "we heard", "you mentioned", or any wording that implies somebody was listening. Two things follow, and both matter:
+1. STILL USE THE FACT. A call is our best signal and nothing here weakens it: prefill it, pre-answer with it, rank on it. Only the ATTRIBUTION changes — write "already on your IndiaMART account", or say nothing at all about where it came from. Dropping a good answer to avoid the attribution problem is the wrong fix.
+2. THE INTERNAL FIELDS ARE UNAFFECTED. "understanding", "considered[].from_source", "considered[].why_ranked", "considered[].dropped_because" and "prefills[].source" are read only by our own team, never by the buyer — there you must keep naming the real source, calls included (buyer_signals.call_specs, buyer_signals.call_application, buyer_signals.call_queries), or the decision stops being auditable. Full provenance internally, no call anywhere he can see it.
+One sentence naming the call undoes every bit of trust the rest of this form earns, and it is the fastest way to lose the buyer entirely.
+
 IDENTITY gap (kind:"identity") — there is no separate identity ask; it competes for a slot in the SAME ranked gaps list as any spec or non-spec gap, same chip UI, no special treatment:
 - Include AT MOST ONE, and only if the category is clearly B2B/bulk AND buyer_facts shows no GST on file (no gst_verified/has_gst) AND it would genuinely rank among your top gaps for this buyer.
 - q:"Are you GST registered?", options exactly ["Yes, registered","Not yet"], why = a buyer-benefit phrase (e.g. "faster verified quotes").
@@ -2403,7 +2624,7 @@ IDENTITY gap (kind:"identity") — there is no separate identity ask; it compete
 
 PERSONA gap (kind:"persona") — the same mechanism, one step further. There is NO persona screen and no persona wizard: a persona question competes for a slot in the SAME ranked gaps list as any spec, with the same chip UI:
 - AT MOST ONE, and ONLY when <bulk_b2b_gate>.is_bulk_b2b is true. If it is false, or "vetoed_by" is set, you may not include one at any rank — a small or one-off buyer must never be asked what kind of business he runs. This is enforced in code as well as here, so a persona gap on a vetoed buyer is simply deleted and logged against you.
-- NEVER include one if <bulk_b2b_gate>.persona_on_file is set or <buyer_persona>.persona is present. We hold it: PRE-ANSWER it (STEP 4b) with source "from your call with a seller" and let him correct it in a tap. Asking a man to describe himself when he has already told us is the purest form of the failure this engine exists to remove.
+- NEVER include one if <bulk_b2b_gate>.persona_on_file is set or <buyer_persona>.persona is present. We hold it: PRE-ANSWER it (STEP 4b) with source "already on your IndiaMART account" — that read came off his own calls, and the PRIVACY rule forbids saying so to him — and let him correct it in a tap. Asking a man to describe himself when he has already told us is the purest form of the failure this engine exists to remove.
 - It must EARN its rank against the spec questions on the same 0-100 scale. A persona answer is only worth a slot when it would visibly change the quotes — bulk pricing versus retail pricing, trade terms, packaging format, who the seller routes it to. If it would only make our data prettier, drop it and say so in dropped_because.
 - Phrase it as HIS business, in his words, with concrete options — "Are these for your own production or for resale?" ["For my own production","For resale to my customers","Both"]. Never "what is your buyer persona".
 - What you learn about the persona still belongs in understanding.business_persona / buyer_persona whether or not you ask anything. The reasoning is always required; the question almost never is.
@@ -2415,10 +2636,19 @@ The form's final step ends with a few questions that are the same for every buye
 - "drop" — do not show it at all, because we ALREADY hold the answer. Only propose this when "held" is present for that field; a drop on a field we cannot answer ourselves is refused in code and the buyer gets asked anyway.
 Rules: return at most one entry per field. Every "reason" is one plain sentence about THIS buyer. Say nothing about consent, contact details or delivery location — they are contractual, they always render, and naming them here is recorded as a defect. GST is not yours to place either; it already moves through the identity gap above.
 
+# STEP 6b — PERSON · the three facts the last page asks about HIM, answered instead of asked
+STEP 6 decided WHERE those questions render. This decides WHAT THEY ALREADY SAY. The final step asks three things about the BUYER rather than about the product — what kind of business he runs, the role he buys in, and his trade — and every one of them has been asked from scratch on every requirement even when our own inputs already answered it. Return "person" and the form pre-fills the field with your answer, shows him the source you name, and lets him change it in one tap. This is the same bargain as a pre-answer, on a different screen.
+- "persona" — HIS business in HIS words, short enough to sit inside a form field: "Sweet-shop owner", "Notebook manufacturer", "Packaging trader". Take <buyer_persona>.persona VERBATIM when we hold it: that is our read of his own calls and it outranks anything you would infer from a category. Otherwise build it from <buyer_business>.nature_of_business, <buyer_facts>.business_type or <also_sourcing>.
+- "business_type" — the ROLE he buys in, one or two words: Manufacturer · Wholesaler · Retailer · Exporter · Service Provider · Online Business · Individual Buyer. Source it from <buyer_business>.nature_of_business or <buyer_facts>.business_type.
+- "industry" — the trade the business is in ("Food processing", "Stationery", "Construction"). We hold this for almost nobody, so LEAVING IT OUT is the normal and correct answer.
+- "source" — ONE line covering whichever of the three you filled, worded exactly like a pre-answer's source and obeying the PRIVACY rule (never a phone call). The form no longer prints it beside the fields — the field shows the value with an AI mark and nothing else — so treat it as the provenance our own team reads in the decision ledger, and keep it accurate.
+- OMIT any of the three you cannot trace to a named input, and omit "person" entirely when that is all of them. These are not reasoning: they render on the page he SUBMITS from and they travel to sellers as facts about him. A plausible-sounding industry he never told us is the single worst thing you can put on this call — it is a fabricated identity with a provenance label on it. Never copy any of the three out of the CATEGORY: the category's average buyer is not this man.
+- Your prose read of him still belongs in understanding.business_persona / .buyer_persona. That is the paragraph; this is the field.
+
 # COLD BUYER — the most common case, so plan for it deliberately
 When buyer_signals, buyer_facts, also_sourcing, category_corpus and seller_top_questions are ALL "(none)" and already_known holds little or nothing beyond the product itself:
 - understanding is still mandatory — a cold buyer is not an excuse to skip the read. Write what_they_want from the requirement text alone. Write buyer_situation as what the PRODUCT itself implies about who buys it, and say plainly that it is inferred from the product because we hold no history. Set contradictions, stale, worth_confirming and useless to empty arrays — with no signals there is genuinely nothing to contradict, age, confirm or discard, and inventing entries here is a fabrication.
-- Emit NO prefills, NO extras and NO pre_answered entries. There is no buyer signal to ground them; making one up is the single worst thing you can do on this call. Write business_persona and buyer_persona as what the PRODUCT implies about who buys it, and say plainly that you inferred it from the product because we hold no profile. Never a persona GAP here — a cold buyer has not earned the bulk gate.
+- Emit NO prefills, NO extras, NO pre_answered entries and NO "person" — omit that key altogether. There is no buyer signal to ground any of them; making one up is the single worst thing you can do on this call, and an invented persona or industry is a fabricated identity the buyer then has to notice and delete. Write business_persona and buyer_persona as what the PRODUCT implies about who buys it, and say plainly that you inferred it from the product because we hold no profile. Never a persona GAP here — a cold buyer has not earned the bulk gate.
 - placements are still expected: with nothing held, every relocatable field is "keep_last_page" unless one is genuinely decisive for this product.
 - Build considered and gaps from your own B2B knowledge of this product, and set from_source to "requirement_text" or "own_product_knowledge" so the ledger stays honest about where the questions came from.
 - Ask MORE here, not fewer — go to 4-5 gaps. This is the one situation where a fuller questionnaire is the LOW-effort choice: we know nothing, and a useless quote costs him far more than four taps. Cover the decisive axes for the product (use-case, size/capacity, material/grade, timeline).
@@ -2426,9 +2656,10 @@ When buyer_signals, buyer_facts, also_sourcing, category_corpus and seller_top_q
 
 # WORKED EXAMPLE — a complete, filled output (imitate this shape and this level of specificity)
 For a buyer who typed "Laddu packaging tray", where we hold Material=Plastic, Capacity=1 kg, Application=Ladoo packaging, Quantity=500 Piece, city=Ghaziabad, a WhatsApp line asking for them in white and bundled 50 to a bundle, an old 200-piece order, a CCTV camera also in his basket, a past "too far" complaint, <buyer_business> saying Manufacturer / turnover 40 L - 1.5 Cr / Proprietorship / registered 2019 and no seller account, <buyer_facts> GST verified with 138 earlier requirements, <buyer_persona> persona "Sweet-shop owner" and b2b_b2c "B2B", <context_facts> buyer_context "Packing laddu boxes for the festive rush", <bulk_b2b_gate> is_bulk_b2b true with persona_on_file "Sweet-shop owner", <relocatable_last_page_fields> business_type (held "Manufacturer") · industry · purchase_frequency · delivery_timeline · payment_terms, and <engine_decisions> holding e1 RESOLVE_CONFLICT on "No of Compartment" (6 from a seller call vs 4 from a tray page he only browsed), e2 ASK "Lid Required", e3 SUGGEST "Material = Food-grade PP", e4 OFFER "project" (he is also sourcing boxes and labels):
-{"understanding":{"what_they_want":"Plastic trays to pack 1 kg boxes of laddu — 500 pieces, delivered in Ghaziabad.","buyer_situation":"A running sweet shop restocking packaging ahead of the festive season, not a new setup — buyer_facts shows 138 earlier requirements and a repeat of this same product, and nothing in also_sourcing suggests a plant being built.","business_persona":"A small proprietor-run sweet manufacturing business — buyer_business gives Manufacturer, a 40 L - 1.5 Cr turnover band and a proprietorship registered in 2019, so this is an owner-run kitchen with a shop attached rather than a plant. A business this size buys packaging in a few hundred pieces at a time, several times a year, and it buys hardest just before a festival.","buyer_persona":"The owner himself, not a purchase department — buyer_persona already reads him as a Sweet-shop owner on his own seller calls, and the proprietorship backs that up. He knows exactly what a laddu tray has to do and is optimising for per-piece price and a supplier close enough to deliver before the festival, which is also what his \\"too far\\" complaint is about.","already_known":["Material — Plastic","Capacity — 1 kg per tray","Application — Ladoo packaging","Quantity — 500 pieces","Delivery city — Ghaziabad"],"contradictions":[{"field":"No of Compartment","values":["4","6"],"picked":"6","why":"He said 6 himself on a seller call this week; the 4 came off a tray page he only browsed. I lean to 6, but the engine raised this as a conflict, so he settles it in one tap instead of us guessing for him."}],"stale":[{"field":"Quantity","value":"200 Piece","why":"That was an order 11 months ago; everything from this year is 500 or more, so the old figure must not be prefilled over what he typed today."}],"worth_confirming":["No of Compartment — neither value is settled truth, so it goes to him as a choice, not as a prefill."],"useless":["The CCTV camera in his basket — a separate sourcing job with no bearing on trays.","His member-since date — it changes no answer a tray seller needs."]},"considered":[{"q":"Six compartments or four?","rank":1,"from_source":"engine_decision","engine_ref":"e1","why_ranked":"He said six on a call and four came off a page he only browsed, so sending either one unasked risks quoting him a tray he never asked for.","score":96,"outcome":"asked"},{"q":"Are these for daily shop packing or a festive order?","rank":2,"from_source":"context_facts.buyer_context","why_ranked":"Order size and deadline hang on this — but he already told a seller these are for the festive rush, so he sees our answer and corrects it if we got it wrong instead of typing it out again.","score":92,"outcome":"asked"},{"q":"Do you need a lid with the tray?","rank":3,"from_source":"engine_decision","engine_ref":"e2","why_ranked":"Sellers price lid and tray separately, so it changes his per-piece rate and we hold no answer for it.","score":85,"outcome":"asked"},{"q":"How soon do you need them?","rank":4,"from_source":"buyer_signals.objections","why_ranked":"His past complaint was that sellers were too far away, and a tight date is exactly what filters those sellers out for him.","score":78,"outcome":"dropped","dropped_because":"the form owns delivery timeline on its last page — promoted onto the spec page through placements instead of asked twice."},{"q":"Plain trays or printed with your logo?","rank":5,"from_source":"category_corpus","why_ranked":"Printing keeps coming up in this category's calls and it moves both price and delivery time, and he has never told us either way.","score":66,"outcome":"asked"},{"q":"How often will you order these?","rank":6,"from_source":"buyer_facts","why_ranked":"He buys this repeatedly, so a standing order would get him a better rate than a one-off quote.","score":55,"outcome":"dropped","dropped_because":"cadence is a last-page field — kept there through placements rather than spending a spec-page slot on it."},{"q":"Is food-grade PP the material you want?","rank":7,"from_source":"engine_decision","engine_ref":"e3","why_ranked":"It is what this category usually uses, but he never said it, so it can be offered to him and never filled in for him.","score":40,"outcome":"dropped","dropped_because":"category suggestion — shown as an unselected chip"},{"q":"Raise your trays, boxes and labels as one project?","rank":8,"from_source":"engine_decision","engine_ref":"e4","why_ranked":"Worth putting in front of him, but it is about how we handle the enquiry, not something he has to answer to get quoted.","score":35,"outcome":"dropped","dropped_because":"offer, not a question — shown as a strip"},{"q":"What material do you want?","rank":9,"from_source":"seller_top_questions","why_ranked":"A leading seller question in this category, but he has already typed Plastic himself.","score":20,"outcome":"dropped","dropped_because":"Already known — asking it again is pure re-work for him."},{"q":"What will you pack in these?","rank":10,"from_source":"requirement_text","why_ranked":"Usually the strongest opening question here, except his own requirement line already says laddu.","score":15,"outcome":"dropped","dropped_because":"Already known from the requirement text."},{"q":"Which brand of tray do you prefer?","rank":11,"from_source":"seller_flagged_specs","why_ranked":"Sellers flag it, but a brand ask would cut out most of the sellers who could quote him a good price.","score":10,"outcome":"dropped","dropped_because":"A brand ask narrows the seller pool and is never asked openly."},{"q":"Are you GST registered?","rank":12,"from_source":"buyer_facts","why_ranked":"Would normally compete for a slot on a bulk business order.","score":5,"outcome":"dropped","dropped_because":"buyer_facts already shows gst_verified — we hold it, so it is not a gap."},{"q":"Are these for your own production or for resale?","rank":13,"from_source":"buyer_persona","why_ranked":"The gate says he is a genuine bulk business buyer, so a persona question is allowed here — but we already know he is a sweet-shop owner packing his own product, so asking would only make him repeat himself.","score":30,"outcome":"dropped","dropped_because":"persona already on file from his own calls — pre-answered, not asked."}],"pre_answered":[{"q":"Are these for daily shop packing or a festive order?","value":"Festive order — packing laddu boxes for the festive rush","source":"from your call with a seller","kind":"non_spec","options":["Festive or bulk order","Daily shop packing","Both"],"why":"Order size and deadline"},{"q":"Are these for your own production or for resale?","value":"For my own production","source":"from your call with a seller","kind":"persona","options":["For my own production","For resale to my customers","Both"],"why":"Bulk or retail pricing"}],"prefills":[{"field":"Color","value":"White","source":"your WhatsApp chat"}],"extras":{"Bundling":"50 trays per bundle"},"field_hints":{"Capacity (Weight)":"Tray depth and price","Application":"Food-grade varies by sweet"},"placements":[{"field":"business_type","placement":"drop","reason":"His profile already says Manufacturer and we hold it, so the question only asks him to retype what we know."},{"field":"delivery_timeline","placement":"promote_to_spec_page","reason":"He is packing for a festival and his one past complaint was that sellers were too far — the date is what filters the seller list, so it belongs with the product, not three screens later."},{"field":"purchase_frequency","placement":"keep_last_page","reason":"He reorders this every season, but it does not change what a seller quotes today, so it stays where it is."},{"field":"industry","placement":"keep_last_page","reason":"We hold nothing for it and it is one tap on a page he is already on."},{"field":"payment_terms","placement":"keep_last_page","reason":"A few hundred trays is a small ticket — payment terms will not decide this quote."}],"gaps":[{"q":"Six compartments or four?","kind":"spec","why":"You told us both","options":["Six compartments","Four compartments"],"engine_ref":"e1"},{"q":"Do you need a lid with the tray?","kind":"spec","why":"Lid is priced separately","options":["Yes, with lid","No, tray only","Show me both"],"engine_ref":"e2"},{"q":"Plain trays or printed with your logo?","kind":"spec","why":"Changes price and timeline","options":["Plain","Printed with my logo","Either is fine"]}]}
-Note what the example does: all FOUR engine ids (e1-e4) appear in "considered" — none is silently ignored; the two the buyer must answer become gaps carrying engine_ref, the suggestion and the offer are dropped with the exact reason that says where they DO render; the conflict is ranked first and is asked, never prefilled with corrected_from, because neither value is settled truth; the planner's own candidates compete on the same scale; every caption is four words or fewer; the ONLY prefill is Color=White, a fact we did not already hold — Material=Plastic is in already_known and is therefore NOT restated as a prefill; and the two unused signals are named in "useless" instead of being silently ignored.
-Note also what it does with the three newer keys. There is NO "opening" — not because the opening slot is unimportant (it is usually your most valuable one), but because his own call already answered it, so it moved into "pre_answered" where he confirms it in a glance instead of typing it again. The persona question is ALLOWED here (the gate passed) and is still not asked, because we hold his persona from his own calls — so it is pre-answered too, and both personas are written up in "understanding" as reasoning, which is where they belong; a persona is our reading of his behaviour and it is never presented to him or to a seller as something he said. And "placements" moves exactly one field and drops exactly one: the delivery date is promoted because his own past complaint makes it decisive, business_type is dropped because his profile already answers it, and the three fields that would change nothing are left where they are with a one-line reason each. The two questions those placements now cover — "How soon do you need them?" and "How often will you order these?" — are recorded in the ledger as dropped WITH that reason, so nothing disappears without an account of where it went.`;
+{"understanding":{"what_they_want":"Plastic trays to pack 1 kg boxes of laddu — 500 pieces, delivered in Ghaziabad.","buyer_situation":"A running sweet shop restocking packaging ahead of the festive season, not a new setup — buyer_facts shows 138 earlier requirements and a repeat of this same product, and nothing in also_sourcing suggests a plant being built.","business_persona":"A small proprietor-run sweet manufacturing business — buyer_business gives Manufacturer, a 40 L - 1.5 Cr turnover band and a proprietorship registered in 2019, so this is an owner-run kitchen with a shop attached rather than a plant. A business this size buys packaging in a few hundred pieces at a time, several times a year, and it buys hardest just before a festival.","buyer_persona":"The owner himself, not a purchase department — buyer_persona already reads him as a Sweet-shop owner on his own seller calls, and the proprietorship backs that up. He knows exactly what a laddu tray has to do and is optimising for per-piece price and a supplier close enough to deliver before the festival, which is also what his \\"too far\\" complaint is about.","already_known":["Material — Plastic","Capacity — 1 kg per tray","Application — Ladoo packaging","Quantity — 500 pieces","Delivery city — Ghaziabad"],"contradictions":[{"field":"No of Compartment","values":["4","6"],"picked":"6","why":"He said 6 himself on a seller call this week; the 4 came off a tray page he only browsed. I lean to 6, but the engine raised this as a conflict, so he settles it in one tap instead of us guessing for him."}],"stale":[{"field":"Quantity","value":"200 Piece","why":"That was an order 11 months ago; everything from this year is 500 or more, so the old figure must not be prefilled over what he typed today."}],"worth_confirming":["No of Compartment — neither value is settled truth, so it goes to him as a choice, not as a prefill."],"useless":["The CCTV camera in his basket — a separate sourcing job with no bearing on trays.","His member-since date — it changes no answer a tray seller needs."]},"considered":[{"q":"How many compartments in each tray?","rank":1,"from_source":"engine_decision","engine_ref":"e1","why_ranked":"He said six on a call and four came off a page he only browsed, so sending either one unasked risks quoting him a tray he never asked for.","score":96,"outcome":"asked"},{"q":"Are these for daily shop packing or a festive order?","rank":2,"from_source":"context_facts.buyer_context","why_ranked":"Order size and deadline hang on this — but he already told a seller these are for the festive rush, so he sees our answer and corrects it if we got it wrong instead of typing it out again.","score":92,"outcome":"asked"},{"q":"Do you need a lid with the tray?","rank":3,"from_source":"engine_decision","engine_ref":"e2","why_ranked":"Sellers price lid and tray separately, so it changes his per-piece rate and we hold no answer for it.","score":85,"outcome":"asked"},{"q":"How soon do you need them?","rank":4,"from_source":"buyer_signals.objections","why_ranked":"His past complaint was that sellers were too far away, and a tight date is exactly what filters those sellers out for him.","score":78,"outcome":"dropped","dropped_because":"the form owns delivery timeline on its last page — promoted onto the spec page through placements instead of asked twice."},{"q":"Plain trays or printed with your logo?","rank":5,"from_source":"category_corpus","why_ranked":"Printing keeps coming up in this category's calls and it moves both price and delivery time, and he has never told us either way.","score":66,"outcome":"asked"},{"q":"How often will you order these?","rank":6,"from_source":"buyer_facts","why_ranked":"He buys this repeatedly, so a standing order would get him a better rate than a one-off quote.","score":55,"outcome":"dropped","dropped_because":"cadence is a last-page field — kept there through placements rather than spending a spec-page slot on it."},{"q":"Is food-grade PP the material you want?","rank":7,"from_source":"engine_decision","engine_ref":"e3","why_ranked":"It is what this category usually uses, but he never said it, so it can be offered to him and never filled in for him.","score":40,"outcome":"dropped","dropped_because":"category suggestion — shown as an unselected chip"},{"q":"Raise your trays, boxes and labels as one project?","rank":8,"from_source":"engine_decision","engine_ref":"e4","why_ranked":"Worth putting in front of him, but it is about how we handle the enquiry, not something he has to answer to get quoted.","score":35,"outcome":"dropped","dropped_because":"offer, not a question — the buyer UI does not show offers"},{"q":"What material do you want?","rank":9,"from_source":"seller_top_questions","from_ref":"Material","why_ranked":"A leading seller question in this category, but he has already typed Plastic himself.","score":20,"outcome":"dropped","dropped_because":"Already known — asking it again is pure re-work for him."},{"q":"What will you pack in these?","rank":10,"from_source":"requirement_text","why_ranked":"Usually the strongest opening question here, except his own requirement line already says laddu.","score":15,"outcome":"dropped","dropped_because":"Already known from the requirement text."},{"q":"Which brand of tray do you prefer?","rank":11,"from_source":"seller_flagged_specs","from_ref":"Brand","why_ranked":"Sellers flag it, but a brand ask would cut out most of the sellers who could quote him a good price.","score":10,"outcome":"dropped","dropped_because":"A brand ask narrows the seller pool and is never asked openly."},{"q":"Are you GST registered?","rank":12,"from_source":"buyer_facts","why_ranked":"Would normally compete for a slot on a bulk business order.","score":5,"outcome":"dropped","dropped_because":"buyer_facts already shows gst_verified — we hold it, so it is not a gap."},{"q":"Are these for your own production or for resale?","rank":13,"from_source":"buyer_persona","why_ranked":"The gate says he is a genuine bulk business buyer, so a persona question is allowed here — but we already know he is a sweet-shop owner packing his own product, so asking would only make him repeat himself.","score":30,"outcome":"dropped","dropped_because":"persona already on file from his own calls — pre-answered, not asked."}],"pre_answered":[{"q":"Are these for daily shop packing or a festive order?","value":"Festive order — packing laddu boxes for the festive rush","source":"already on your IndiaMART account","kind":"non_spec","options":["Festive or bulk order","Daily shop packing","Both"],"why":"Order size and deadline"},{"q":"Are these for your own production or for resale?","value":"For my own production","source":"already on your IndiaMART account","kind":"persona","options":["For my own production","For resale to my customers","Both"],"why":"Bulk or retail pricing"}],"prefills":[{"field":"Color","value":"White","source":"your WhatsApp chat"}],"extras":{"Bundling":"50 trays per bundle"},"field_hints":{"Capacity (Weight)":"Tray depth and price","Application":"Food-grade varies by sweet"},"placements":[{"field":"business_type","placement":"drop","reason":"His profile already says Manufacturer and we hold it, so the question only asks him to retype what we know."},{"field":"delivery_timeline","placement":"promote_to_spec_page","reason":"He is packing for a festival and his one past complaint was that sellers were too far — the date is what filters the seller list, so it belongs with the product, not three screens later."},{"field":"purchase_frequency","placement":"keep_last_page","reason":"He reorders this every season, but it does not change what a seller quotes today, so it stays where it is."},{"field":"industry","placement":"keep_last_page","reason":"We hold nothing for it and it is one tap on a page he is already on."},{"field":"payment_terms","placement":"keep_last_page","reason":"A few hundred trays is a small ticket — payment terms will not decide this quote."}],"person":{"persona":"Sweet-shop owner","business_type":"Manufacturer","source":"already on your IndiaMART account"},"gaps":[{"q":"How many compartments in each tray?","kind":"spec","why":"Changes tray size","options":["Six compartments","Four compartments","Eight compartments","Twelve compartments"],"engine_ref":"e1"},{"q":"Do you need a lid with the tray?","kind":"spec","why":"Lid is priced separately","options":["Yes, with lid","No, tray only","Show me both"],"engine_ref":"e2"},{"q":"Plain trays or printed with your logo?","kind":"spec","why":"Changes price and timeline","options":["Plain","Printed with my logo","Either is fine"]}]}
+Note what the example does: all FOUR engine ids (e1-e4) appear in "considered" — none is silently ignored; the two the buyer must answer become gaps carrying engine_ref, the suggestion is dropped with the reason that says where it DOES render and the offer with the reason that it renders NOWHERE (the buyer UI shows no offers, and that is deliberate, not a loss); the conflict is ranked first and is asked, never prefilled with corrected_from, because neither value is settled truth; the planner's own candidates compete on the same scale; every caption is four words or fewer; the ONLY prefill is Color=White, a fact we did not already hold — Material=Plastic is in already_known and is therefore NOT restated as a prefill; and the two unused signals are named in "useless" instead of being silently ignored.
+Note also what it does with the three newer keys. There is NO "opening" — not because the opening slot is unimportant (it is usually your most valuable one), but because his own call already answered it, so it moved into "pre_answered" where he confirms it in a glance instead of typing it again. The persona question is ALLOWED here (the gate passed) and is still not asked, because we hold his persona from his own calls — so it is pre-answered too, and both personas are written up in "understanding" as reasoning, which is where they belong; a persona is our reading of his behaviour and it is never presented to him or to a seller as something he said. And "placements" moves exactly one field and drops exactly one: the delivery date is promoted because his own past complaint makes it decisive, business_type is dropped because his profile already answers it, and the three fields that would change nothing are left where they are with a one-line reason each. The two questions those placements now cover — "How soon do you need them?" and "How often will you order these?" — are recorded in the ledger as dropped WITH that reason, so nothing disappears without an account of where it went. And "person" fills exactly TWO of its three fields: persona is copied verbatim from <buyer_persona>.persona and business_type from his profile, while "industry" is OMITTED ENTIRELY because no input names his trade — writing "Sweets and namkeen" there would have been a guess about his own business, printed on the page he submits from.
+And note where the CALL shows up and where it does not. Internally it is named plainly: "considered" says "He said six on a call", "understanding.contradictions" says he said 6 on a seller call this week, and the persona ledger entry says the persona came off his own calls — that is the audit trail and it must stay. In everything he can READ it is gone: both pre-answers say "already on your IndiaMART account", "person".source says the same, the conflict question is asked as an ordinary "How many compartments in each tray?" with four options and no word about where 6 and 4 came from, and no "why" mentions a call, a conversation or "you said". Same facts, same decisions, and he is never told we were listening.`;
   // DATA FENCING (audit §3 defect 1 — the highest-leverage fix for flash-lite): every input arrives inside its
   // own XML tag instead of one anonymous JSON.stringify blob, each tag name matching a GLOSSARY entry above, and
   // the (up to 200k-char) category_corpus is placed LAST so no instruction is ever buried behind it. Absent inputs
@@ -2480,7 +2711,12 @@ Note also what it does with the three newer keys. There is NO "opening" — not 
     // every engine id — so it is exactly what a thinking budget is for. But reasoning tokens count against
     // max_tokens on Gemini 2.5, and one truncated JSON here throws away the whole plan (the catch below returns
     // an empty plan the form reads as success), so the ceiling has to move with the effort.
-    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 14000, temperature: 0, reasoningEffort: 'high' });
+    // reasoningEffort 'medium' (owner 2026-07-29, latency #6): at 'high' the single (post-collapse) call generated
+    // ~7.7k thinking+completion tokens → ~42s wall-clock — the generation, not the ~13k prompt, is the whole cost.
+    // 'medium' cuts the thinking budget, which is the biggest wall-clock lever left. WATCH QUALITY: this needs a
+    // considered[]-ledger A/B across the fidelity buyers before it is locked — if question ranking degrades,
+    // revert to 'high'. temp stays 0 so re-fires are deterministic.
+    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }], { label: 'curated-planner', model: input.model || MODEL_FAST, maxTokens: 14000, temperature: 0, reasoningEffort: 'medium' });
     const j = JSON.parse(raw) as CuratedPlan;
     recordParse('curated-planner', true);
     // Grounding guard: a prefill/extra VALUE must be backed by a real buyer signal or the requirement text (never a fabricated fill).
@@ -2523,6 +2759,25 @@ Note also what it does with the three newer keys. There is NO "opening" — not 
         why: shortHint(p.why),
       }));
     const preKeys = new Set(pre_answered.map((p) => p.q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
+    // ── PERSON · the last page's three facts about HIM, grounded like a prefill but against a WIDER set.
+    // `signalText` above is deliberately narrow — it exists to keep SPEC prefills to the buyer's own stated
+    // words — and a persona / business type lives in <buyer_persona>, <buyer_business>, <buyer_facts> and
+    // <context_facts>, none of which is in it. So this gets its own token set rather than loosening that one,
+    // which would have quietly weakened the spec firewall to fix an unrelated field.
+    // The rule itself does not change: a value we cannot trace to a named input is DROPPED. This one renders
+    // on the page the buyer submits from and travels to sellers as a fact about him, so absent beats wrong.
+    const personToks = new Set([signalText, JSON.stringify(input.buyerPersona || {}), JSON.stringify(input.buyerProfile || {}), JSON.stringify(input.buyerFacts || {}), JSON.stringify(input.contextFacts || {})].join(' ').toLowerCase().match(/[a-z0-9]+/g) || []);
+    const backedPerson = (v: unknown) => { const t = (String(v ?? '').toLowerCase().match(/[a-z0-9]+/g) || []).filter((x) => x.length >= 3 || /\d/.test(x)); return t.length ? t.some((x) => personToks.has(x)) : false; };
+    // 60 chars: these fill a one-line form field, so a paragraph in `persona` is a formatting failure, not a
+    // long answer — and truncating it would invent a value nobody wrote. Dropped, and the buyer fills it.
+    const personField = (v: unknown) => { const s = String(v ?? '').replace(/\s+/g, ' ').trim(); return s && s.length <= 60 && backedPerson(s) ? s : undefined; };
+    const pj = j.person && typeof j.person === 'object' ? j.person : undefined;
+    const personVals: CuratedPerson = pj
+      ? { persona: personField(pj.persona), business_type: personField(pj.business_type), industry: personField(pj.industry) }
+      : {};
+    const person: CuratedPerson | undefined = personVals.persona || personVals.business_type || personVals.industry
+      ? { ...personVals, source: String(pj?.source ?? '').trim() || undefined }
+      : undefined;
     // ── ITEM 3 · PLACEMENTS — shape only. The ALLOW-LIST lives in formAdapter.resolvePlacements(), because
     // "consent, contact and delivery location always render" is a contract, and a contract belongs where the
     // form can enforce it, not in a normaliser that a future caller might bypass.
@@ -2535,8 +2790,15 @@ Note also what it does with the three newer keys. There is NO "opening" — not 
     // Decision Object it came from, and the form's routing ledger fails open (logs a defect) without it.
     // A question the planner ALSO pre-answered is not a gap: emitting both asks the buyer the same thing
     // twice, once blank and once filled in. The pre-answer wins — it costs him nothing.
+    // QUANTITY IS NEVER A GAP (owner 2026-07-28: "planner need not give quantity, we anyway ask quantity in all
+    // cases"). Quantity+unit are collected on the landing for EVERY product via the qty gate, so a planner
+    // quantity question is always a duplicate. Scoped to quantity ALONE on purpose — delivery / timeline / GST /
+    // payment are last-page fields with their own `placements` promote/keep logic, so the broad FORM_COVERED_RE
+    // would wrongly drop a deliberately-promoted "how soon?" question; only quantity is unconditionally covered.
+    const asksQuantity = (s: string) => /(\bquantit|\bqty\b|how many|order\s*size|order\s*quantit|pieces?\s*required|number of (pieces|units)|\bmoq\b|minimum order)/i.test(s || '');
     const gaps = (Array.isArray(j.gaps) ? j.gaps.slice(0, 6) : [])
       .filter((g) => !preKeys.has(String(g?.q ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()))
+      .filter((g) => !asksQuantity(String(g?.q ?? '')))
       .map((g) => ({
         ...g,
         why: shortHint(g?.why) ?? '',
@@ -2608,7 +2870,7 @@ Note also what it does with the three newer keys. There is NO "opening" — not 
         dropped_because: pre || asked ? undefined : (typeof c.dropped_because === 'string' && c.dropped_because.trim() ? c.dropped_because.trim() : 'Not in the final question list.'),
       };
     }) : undefined;
-    return { understanding, considered, opening, prefills, extras, field_hints, pre_answered, placements, gaps: cappedGaps, __raw: { system: sys, user: usr, output: raw } };
+    return { understanding, considered, opening, prefills, extras, field_hints, pre_answered, placements, person, gaps: cappedGaps, __raw: { system: sys, user: usr, output: raw } };
   } catch (e) {
     // RPS-1 §4.7 / R13 — THE SILENT-SUCCESS PATH. This returns a structurally valid empty plan, and
     // `BrainRFQForm.tsx` then calls `setAiSpecsError(false)` on it, so a total parse failure renders as a

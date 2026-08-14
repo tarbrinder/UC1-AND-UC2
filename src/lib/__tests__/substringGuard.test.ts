@@ -151,10 +151,8 @@ const REGEX_BASELINE: Record<string, string> = {
 };
 
 const INCLUDES_BASELINE: Record<string, string> = {
-  'src/components/BrainFormGate.tsx :: m.label.toLowerCase().includes(q.toLowerCase())':
-    'INTENDED — search-as-you-type filter on the product suggest dropdown; substring matching is the feature. Kept in the ledger so the judgement is recorded, not re-litigated.',
-  'src/components/BrainRFQForm.tsx :: k.includes(decisionKey(d.field))':
-    'de-dupes engine ASK questions against already-asked keys by containment. This is the incident-1 shape: a short key ("use") suppresses a longer unrelated question ("house wiring"). TODO: compare normalised token sets, not substrings.',
+  'src/components/BrainRFQForm.tsx :: m.label.toLowerCase().includes(q.toLowerCase())':
+    'INTENDED — search-as-you-type filter on the product suggest dropdown; substring matching is the feature. Kept in the ledger so the judgement is recorded, not re-litigated. (Moved 2026-07-28 from BrainFormGate.tsx: the chooser page was collapsed into the form\'s landing, so the suggester moved with it — same expression, same judgement, new file.)',
   'src/lib/inspectorData.ts :: norm(x.name).includes(norm(key))':
     'spec lookup by containment — "Capacity" would find "Load Capacity" and vice versa. TODO: exact match on normalised names, then a token-overlap fallback.',
   'src/lib/inspectorData.ts :: norm(k).includes(norm(key))':

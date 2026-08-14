@@ -1,6 +1,7 @@
 import MainApp from './MainApp';
 import BuyerProfileStandalone from './components/BuyerProfileStandalone';
 import BrainFormGate from './components/BrainFormGate';
+import DynamicRFQ from './components/rfq/DynamicRFQ';
 import OfflineDashboard from './components/OfflineDashboard';
 import SimpleRFQForm from './components/SimpleRFQForm';
 import StandardRFQForm from './components/StandardRFQForm';
@@ -28,6 +29,8 @@ export default function App() {
   if (profileGlid) return <BuyerProfileStandalone glid={profileGlid} />;
   // ?rfq=brain[&glid=] — GLID gate → PNS-speed → repost/enrich/new chooser → the seeded duplicated Simple form.
   if (rfqMode === 'brain') { const q = new URLSearchParams(window.location.search); return <BrainFormGate glid={q.get('glid') || sidParam || ''} />; }
+  // ?rfq=brain2[&glid=] — the NEW Dynamic RFQ (3-LLM: Requirement Brain + Commercial + Persona). Additive; brain untouched.
+  if (rfqMode === 'brain2') { const q = new URLSearchParams(window.location.search); return <DynamicRFQ glid={q.get('glid') || sidParam || ''} />; }
   // Standalone full-page RFQ routes: ?rfq=simple (no category corpus) · ?rfq=category (corpus-driven, needs v51 n8n).
   // ?login=1 flips the logged-in scenario. onClose returns to the dashboard.
   if (rfqMode === 'simple' || rfqMode === 'category') {
