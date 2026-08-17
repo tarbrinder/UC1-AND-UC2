@@ -105,7 +105,7 @@ export function stripQuantityPrefix(query: string): string {
 // now REQUIRED — a bare number, or a number with a spec/rating/dimension unit ("5 kVA", "6 mm", "230 V"), is NOT
 // treated as an order quantity (that's a spec value, mapped by the LLM). Fixes "5 kVA diesel generator" → qty 5.
 const LEADING_QTY_CAPTURE =
-  /^\s*(\d+(?:[.,]\d+)?)\s*(pieces?|pcs|pc|nos\b|units?|sets?|rolls?|bags?|boxes?|box|pairs?|pair|dozen|dz|kgs?|quintal|tonnes?|tons?|\bmt\b|litres?|liters?|ltr|meters?|metres?|feet|ft|km)\b/i;
+  /^\s*(\d+(?:[.,]\d+)?)\s*(pieces?|pcs|pc|nos\b|units?|sets?|rolls?|bags?|boxes?|box|pack(?:et)?s?|pkt|pairs?|pair|dozen|dz|kgs?|quintal|tonnes?|tons?|\bmt\b|litres?|liters?|ltr|meters?|metres?|feet|ft|km)\b/i;
 
 export function parseQuantityFromName(name: string): { quantity: string; unit: string } | null {
   const m = name.match(LEADING_QTY_CAPTURE);

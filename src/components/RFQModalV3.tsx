@@ -9,6 +9,7 @@ import { resolveExtractTwin, lastSignalAt, EXTRACT_TWIN_ON } from '../lib/twinCu
 import { createCoverageRegistry, type FactSource } from '../lib/coverage';
 import type { SpecGuide } from '../lib/gemini';
 import { stripPII } from '../utils/pii';
+import { isQtyUnitField, sanitizeUnitOptions } from '../lib/specHygiene';
 import { classifySegment } from '../lib/questions/segment';
 import { DEPTH_BY_SEGMENT } from '../lib/questions/types';
 import type { DynQuestion, RequirementPlan, RequirementIntent } from '../lib/questions/types';
@@ -2552,13 +2553,18 @@ export default function RFQModalV3({ onClose, variantLabel, initialGlid, autoPul
             // DATA[0] is itself an array of specs; flatten one level
             const raw: (ISQSpec | ISQSpec[])[] = isqJson?.DATA ?? [];
             const flat = raw.flatMap((s) => (Array.isArray(s) ? s : [s])).filter((s) => s && s.IM_SPEC_MASTER_DESC);
-            const qtySpecs = flat.filter((s) => /quantity|qty|unit/i.test(s.IM_SPEC_MASTER_DESC));
-            const unitOpts: string[] = [];
+            // isQtyUnitField, NOT the old /quantity|qty|unit/i substring test: that matched real specs like
+            // "Unit Weight" and harvested their options as ORDER UNITS, which is how "1 kg" shipped to
+            // sellers. sanitizeUnitOptions then drops the input-TYPE tokens ("Text") that leak out of
+            // IM_SPEC_OPTIONS_DESC and dedupes case-insensitively ("Kg" vs "kg").
+            const qtySpecs = flat.filter((s) => isQtyUnitField(s.IM_SPEC_MASTER_DESC));
+            const harvested: string[] = [];
             for (const qs of qtySpecs) {
               if (qs.IM_SPEC_OPTIONS_DESC) {
-                qs.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter((o) => Boolean(o) && o.toLowerCase() !== 'none').forEach((o) => { if (!unitOpts.includes(o)) unitOpts.push(o); });
+                qs.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean).forEach((o) => harvested.push(o));
               }
             }
+            const unitOpts = sanitizeUnitOptions(harvested);
             setUnitOptions(unitOpts);
             if (unitOpts.length > 0) {
               const typedUnit = parsedQty?.unit;

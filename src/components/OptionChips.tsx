@@ -57,7 +57,7 @@ export default function OptionChips({ options, value, onChange, className = '', 
           aria-checked={value === opt && !customMode}
           onClick={() => selectOption(opt)}
           className={[
-            'px-3.5 py-2.5 min-h-[44px] rounded-full text-sm font-medium border transition-all',
+            'px-3.5 py-2.5 min-h-[40px] rounded-full text-[13px] font-medium border transition-all',
             poppingKey === opt ? 'animate-chip-pop' : '',
             value === opt && !customMode
               ? 'bg-teal-700 text-white border-teal-700 shadow-sm'
@@ -69,7 +69,7 @@ export default function OptionChips({ options, value, onChange, className = '', 
       ))}
 
       {collapsed && (
-        <button type="button" onClick={() => setExpanded(true)} className="px-3.5 py-2.5 min-h-[44px] rounded-full text-sm font-medium border border-gray-200 bg-gray-50 text-gray-500 hover:border-teal-300 hover:text-teal-600 transition-all">
+        <button type="button" onClick={() => setExpanded(true)} className="px-3.5 py-2.5 min-h-[40px] rounded-full text-[13px] font-medium border border-gray-200 bg-gray-50 text-gray-500 hover:border-teal-300 hover:text-teal-600 transition-all">
           +{hiddenCount} more
         </button>
       )}
@@ -82,7 +82,7 @@ export default function OptionChips({ options, value, onChange, className = '', 
           role="radio"
           onClick={openCustom}
           className={[
-            'px-3.5 py-2.5 min-h-[44px] rounded-full text-sm font-medium border transition-all',
+            'px-3.5 py-2.5 min-h-[40px] rounded-full text-[13px] font-medium border transition-all',
             isCustomSelected
               ? 'bg-teal-700 text-white border-teal-700'
               : 'bg-white text-gray-500 border-gray-200 border-dashed hover:border-teal-300 hover:text-teal-600',
@@ -110,7 +110,9 @@ export default function OptionChips({ options, value, onChange, className = '', 
             }
           }}
           placeholder="Type your answer…"
-          className="px-3.5 py-2.5 min-h-[44px] rounded-full text-sm border border-teal-400 bg-white outline-none focus:ring-2 focus:ring-teal-100 w-44 max-w-full text-gray-700 placeholder:text-gray-400"
+          // focus ring was teal-100 — a 1.26:1 contrast against white, i.e. an effectively INVISIBLE keyboard focus
+          // indicator on the custom-value input (design audit 2026-07-28). teal-500 reads at a glance.
+          className="px-3.5 py-2.5 min-h-[40px] rounded-full text-[13px] border border-teal-400 bg-white outline-none focus:ring-2 focus:ring-teal-500 w-44 max-w-full text-gray-700 placeholder:text-gray-400"
         />
       )}
     </div>

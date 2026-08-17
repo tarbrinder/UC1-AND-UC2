@@ -9,6 +9,7 @@
     "build": "vite build",
     "build:offline": "vite build --mode offline && node scripts/build-offline-shell.mjs",
     "build:checked": "tsc -b && vite build",
+    "test": "node --test src/lib/__tests__/*.test.ts",
     "typecheck": "tsc -b",
     "lint": "eslint .",
     "preview": "vite preview"

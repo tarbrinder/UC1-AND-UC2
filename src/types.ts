@@ -3,6 +3,8 @@ export interface ISQSpec {
   IM_SPEC_MASTER_TYPE: string; // "1"=number, "2"=text, "3"=select
   IM_SPEC_OPTIONS_DESC: string; // "##" separated options
   IM_CAT_SPECIFICATION_SORTORDER: string;
+  IM_MANDATORY?: string;                // "1" = mandatory ISQ — must always render on Page 1 (deep-audit 2026-08-12)
+  IM_SPEC_MASTER_BUYER_SELLER?: string; // "2" = seller-flagged; carried so a MANDATORY seller-flagged spec still renders
 }
 
 export interface AIMissingSpec {

@@ -48,3 +48,13 @@ export function classifyOrderScale(qty?: number | string, unit?: string): OrderS
   if (n <= 500) return { band: 'bulk', label, implication: 'sizeable order → an established business buy; cadence, commercial terms and a likely internal approver matter', bulkUnit };
   return { band: 'wholesale', label, implication: 'large order → reseller / distributor / project scale; bulk pricing, credit, and a planned/approved purchase', bulkUnit };
 }
+
+// Cheap, deterministic PRE-FILTER for the retail-intent gate (task #75). A retail purchase is, by definition, a small
+// count of a discrete-unit good — so a bulk unit (tonne/truck/kg…) or a sizeable/wholesale count is NEVER a candidate and
+// the gate skips the LLM for it entirely. Only single/small discrete orders are worth the category-relative LLM check
+// (checkRetailIntent), which alone can tell "2 t-shirts" (retail) from "2 CNC machines" (business). Mirrors mcatSanity's
+// pattern: obvious-not-retail short-circuits for free; the ambiguous small order spends one flash-lite call.
+export function isRetailCandidate(qty?: number | string, unit?: string): boolean {
+  const s = classifyOrderScale(qty, unit);
+  return !s.bulkUnit && (s.band === 'single' || s.band === 'small');
+}

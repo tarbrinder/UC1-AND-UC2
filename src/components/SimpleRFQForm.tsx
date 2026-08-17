@@ -18,6 +18,7 @@ import { searchSellers, type SellerResult } from '../lib/sellerSearch';
 import { analyzeImage, voiceToSpecs, hasGeminiKey, getSpecHints, getMissingSpecs, inferSpecsFromApplication, RFQ_LLM_ENABLED, type AiSpecQuestion } from '../lib/gemini';
 import { fetchCategoryCorpus, fetchProductImages, upsizeImimg } from '../lib/enrichment';
 import { matchUnit } from '../lib/quantity';
+import { sanitizeUnitOptions } from '../lib/specHygiene';
 import { emit, EV, emitApiError } from '../lib/emit';
 import { useToast, type ToastType } from './Toast';
 import { useFocusTrap } from '../lib/useFocusTrap';
@@ -665,8 +666,12 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     // Pull unit options ONLY from a field that IS a dedicated quantity/unit field (same token test that hides it
     // from the spec list) — a substring /unit|quantity/ wrongly matched real specs like "Unit Weight" and shipped
     // a bogus order unit (e.g. "1 kg") to sellers (audit).
-    for (const qs of flat.filter((s) => isQtyUnitField(s.IM_SPEC_MASTER_DESC))) if (qs.IM_SPEC_OPTIONS_DESC) qs.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter((o) => o && o.toLowerCase() !== 'none').forEach((o) => { if (!u.includes(o)) u.push(o); });
-    return u;
+    for (const qs of flat.filter((s) => isQtyUnitField(s.IM_SPEC_MASTER_DESC))) if (qs.IM_SPEC_OPTIONS_DESC) qs.IM_SPEC_OPTIONS_DESC.split('##').map((o) => o.trim()).filter(Boolean).forEach((o) => u.push(o));
+    // Sanitise the WHOLE list, not row-by-row: it drops the input-TYPE tokens that leak out of
+    // IM_SPEC_OPTIONS_DESC (a buyer was offered "Unit ▾ [Text, kg]" for a quantity of 100000, because
+    // free-text rows carry the literal "Text" in that column), and its dedupe is case-INSENSITIVE,
+    // where the `!u.includes(o)` it replaces let "Kg" and "kg" both through from the same vocabulary.
+    return sanitizeUnitOptions(u);
   };
   const commitProduct = useCallback(async (name: string) => {
     const myGen = ++commitGen.current; // supersede any in-flight prior commit
@@ -1057,7 +1062,7 @@ export default function SimpleRFQForm({ onClose, surface, categoryMode = 'simple
     if (blEligible && !blToastShownRef.current) {
       blToastShownRef.current = true;
       emit(EV.BL_ELIGIBLE, { surface: surfaceName });
-      showFeedback('Great — your requirement is ready. You’ll get quotes from verified suppliers.', 'success');
+      // Toast removed (owner 2026-08-12): the "requirement is ready" confirmation was noise mid-flow; BL_ELIGIBLE still fires for analytics.
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blEligible]);

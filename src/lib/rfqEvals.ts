@@ -6,6 +6,8 @@
 //
 //   Question Quality · Category Quality · Fusion Quality · Planner Quality → overall RFQ eval.
 
+import { isProductInterestField } from './specHygiene';
+
 export interface EvalDimension { name: string; score: number; max: number; note: string }
 export interface RFQEval { score: number; max: number; pct: number; grade: 'A' | 'B' | 'C' | 'D'; dimensions: EvalDimension[]; issues: string[] }
 
@@ -19,13 +21,19 @@ export interface QQInput {
   maxCards?: number;     // the panel cap (default 3)
 }
 export function questionQualityEval(i: QQInput): EvalDimension {
-  const qs = i.questions || [];
+  // SPEC HYGIENE (2026-07-28): a product-CHOOSER row ("I am interested in", whose options are sibling MCAT
+  // products) is suppressed from the form, so it must leave BOTH sides of this eval together — the question
+  // list AND the spec set it is checked for redundancy against. Filtering only one side would move the ratio
+  // for a reason that has nothing to do with question quality: drop it from `specNames` alone and a real
+  // question stops looking redundant; drop it from `questions` alone and the redundancy rate jumps. The rule
+  // is simply "score what the buyer actually sees".
+  const qs = (i.questions || []).filter((q) => !isProductInterestField(q.label));
   const cap = i.maxCards ?? 3;
   // A known buyer with ZERO planner questions is a GOOD outcome (fast-track), not a failure.
   if (qs.length === 0) return { name: 'Question Quality', score: 100, max: 100, note: '0 planner cards (known buyer / off-profile lead) — nothing to fault' };
   const grounded = qs.filter((q) => q.grounded).length;
   const chipped = qs.filter((q) => q.optionCount >= 2).length;
-  const specSet = new Set((i.specNames || []).map(norm));
+  const specSet = new Set((i.specNames || []).filter((n) => !isProductInterestField(n)).map(norm));
   const redundant = qs.filter((q) => specSet.has(norm(q.label.replace(/\?$/, '')))).length;
   const groundedScore = (grounded / qs.length) * 40;
   const chipScore = (chipped / qs.length) * 25;

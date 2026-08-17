@@ -18,6 +18,7 @@ import {
   dependencyImpact, deterministicVsAI, sourceROI, costPerUse, topImpact, impactDiff,
 } from './observatory';
 import { detectPII, extractGSTIN, looksLikeSeller, productNameQuality, absurdQuantity, orderValue } from './qualityGates';
+import { isProductInterestField } from './specHygiene';
 import { allLineage } from './lineage';
 import { diffRuns, type RunSnapshot } from './replay';
 import { deepSections, type TwinLike, type RequirementLike, type OutcomeLike } from './observatoryDeep';
@@ -215,8 +216,20 @@ export function observatoryReport(input: ObservatoryInput): InspectorPayload {
       rows.push(row('Category brain → Specs/Planner', '✗ not available', 'muted', cat.status === 'building' ? 'still building (cold cache)' : 'no category resolved (new/unmapped)'));
     }
     // (c) Each critical spec → mapped to an asked spec/question, or the real reason it wasn't
-    const askedNames = new Set([...(state.specs || []).map((s) => nrm(s.name)), ...(state.planner?.questions || []).map((q) => nrm(q.label))]);
-    for (const crit of (cat?.criticals || []).slice(0, 6)) {
+    // SPEC HYGIENE (2026-07-28): a product-CHOOSER critical ("I am interested in", options = sibling MCAT
+    // products) leaves BOTH sides of this mapping together — the criticals DENOMINATOR and the asked set.
+    // Removing it from the asked set alone would make it read as an unmet critical with a wrong reason ("no
+    // ISQ mapping in this MCAT"), i.e. a spec-coverage regression that is really a deliberate suppression.
+    // And per this section's own rule, nothing is dropped SILENTLY: each one gets a row saying why.
+    const isChooser = (n: string) => isProductInterestField(n);
+    const askedNames = new Set([
+      ...(state.specs || []).filter((s) => !isChooser(s.name)).map((s) => nrm(s.name)),
+      ...(state.planner?.questions || []).filter((q) => !isChooser(q.label)).map((q) => nrm(q.label)),
+    ]);
+    for (const crit of (cat?.criticals || []).filter((c) => isChooser(c.maps_to_isq || c.name))) {
+      rows.push(row(`  ${crit.name}`, '— suppressed', 'muted', 'a product chooser, not a spec: its options are sibling products, so the form never renders it and it is not counted as an unasked critical (specHygiene.isProductInterestField)'));
+    }
+    for (const crit of (cat?.criticals || []).filter((c) => !isChooser(c.maps_to_isq || c.name)).slice(0, 6)) {
       const key = nrm(crit.maps_to_isq || crit.name);
       const consumed = askedNames.has(key) || [...askedNames].some((a) => a.includes(key) || key.includes(a));
       const m = nonConsumptionMatrix(crit.name, [

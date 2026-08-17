@@ -943,6 +943,34 @@ export async function fetchCategoryBuild(mcatId: string, opts?: { fresh?: boolea
 // object if the workflow hasn't been redeployed yet, so the form works across the migration.
 export interface CategoryCorpusResult { status: 'hit' | 'building' | 'error'; corpus: unknown | null; count: number; mcatId: string }
 
+/** Distilled per-mcat category brain (the seller-call top questions), fetched for whatever product the buyer
+ *  ACTUALLY selected. The requirement-brain payload carries this only for its auto-chosen PRIMARY mcat, so
+ *  switching cards or typing a new product left the planner advised by the wrong category (owner, 2026-07-28).
+ *  Shape-tolerant: the brain emits {question, asked_pct, top_values}; the planner wants {q, pct, vals}.
+ *  asked_pct is clamped to 100 — the corpus generator double-counts and 39% of files exceed it. */
+export async function fetchCategoryTopSpecs(mcatId: string): Promise<{ q: string; pct?: number; vals?: string[] }[]> {
+  const id = String(mcatId || '').trim();
+  if (!id) return [];
+  try {
+    const res = await fetch(api(`/api/imworkflow/webhook/bi-category-brain?mcat_id=${encodeURIComponent(id)}`), { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) return [];
+    const raw = await res.json();
+    const item = Array.isArray(raw) ? raw[0] : raw;
+    const rows = (item && (item.top_specs ?? item.topSpecs)) as unknown;
+    if (!Array.isArray(rows)) return [];
+    return rows.map((s) => {
+      const o = s as Record<string, unknown>;
+      const pct = typeof o.asked_pct === 'number' ? o.asked_pct : typeof o.pct === 'number' ? o.pct : undefined;
+      const vals = (o.top_values ?? o.vals) as unknown;
+      return {
+        q: String(o.question ?? o.q ?? ''),
+        ...(pct != null ? { pct: Math.min(100, Math.round(pct)) } : {}),
+        vals: Array.isArray(vals) ? vals.map((v) => (v && typeof v === 'object' && 'value' in (v as object) ? String((v as { value: unknown }).value) : String(v))) : undefined,
+      };
+    }).filter((s) => s.q);
+  } catch { return []; }
+}
+
 export async function fetchCategoryCorpus(mcatId: string, opts?: { fresh?: boolean }): Promise<CategoryCorpusResult> {
   const id = String(mcatId || '').trim();
   if (!id) return { status: 'error', corpus: null, count: 0, mcatId: id };
