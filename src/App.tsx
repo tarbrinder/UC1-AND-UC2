@@ -7,6 +7,7 @@ import SimpleRFQForm from './components/SimpleRFQForm';
 import StandardRFQForm from './components/StandardRFQForm';
 import AsyncPrototypePage from './components/AsyncPrototypePage';
 import AsyncBuyerProfilePage from './components/AsyncBuyerProfilePage';
+import Persona360Page from './components/persona360/Persona360Page';
 import { getStandardProduct } from './lib/standardProducts';
 import { getOfflineSnapshot } from './lib/offlineSnapshot';
 
@@ -53,6 +54,7 @@ export default function App() {
   }
   // Any OTHER non-empty ?rfq value is a bad/stale link → explicit not-found, not a silent MainApp mount (P2-234).
   if (rfqMode) return <RouteNotFound detail={`"${rfqMode}" is not a valid form.`} />;
+  if (new URLSearchParams(window.location.search).get('persona360') === '1') return <Persona360Page />; // NEW additive Buyer-Persona 360, fixture-first
   return <MainApp />;
 }
 
