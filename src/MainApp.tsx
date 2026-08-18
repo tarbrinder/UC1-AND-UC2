@@ -38,7 +38,7 @@ export default function MainApp() {
   // Step-0 debug staging: the GLID/Pull CTA now lives HERE (on the landing). It stages a GLID and
   // opens Smart with autoPull → the modal runs its existing pull on mount, so the product screen
   // stays clean. ?debug-gated (demo prefill). Opening any card directly = a clean cold run.
-  const debug = isDebug(); // sticky within the tab — survives the dep-reopt reload that drops ?debug
+  void isDebug();
   // Simple RFQ — the plain, no-AI/no-n8n flow (mcat-resolve → GetIsq/getISQs → qty+specs only).
   // Always visible on the landing (not ?debug-gated) since it needs no enrichment pull to run.
   const [simpleFormOpen, setSimpleFormOpen] = useState(false);

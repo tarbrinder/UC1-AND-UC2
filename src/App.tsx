@@ -5,6 +5,8 @@ import DynamicRFQ from './components/rfq/DynamicRFQ';
 import OfflineDashboard from './components/OfflineDashboard';
 import SimpleRFQForm from './components/SimpleRFQForm';
 import StandardRFQForm from './components/StandardRFQForm';
+import AsyncPrototypePage from './components/AsyncPrototypePage';
+import AsyncBuyerProfilePage from './components/AsyncBuyerProfilePage';
 import { getStandardProduct } from './lib/standardProducts';
 import { getOfflineSnapshot } from './lib/offlineSnapshot';
 
@@ -19,13 +21,19 @@ export default function App() {
   let rfqMode = '';
   let loginParam = false;
   let sidParam = '';
+  let asyncParam = false;
+  let asyncProfile = false;
   try {
     const q = new URLSearchParams(window.location.search);
     profileGlid = q.get('profile') || '';
     rfqMode = (q.get('rfq') || '').toLowerCase();
     loginParam = q.get('login') === '1';
     sidParam = q.get('sid') || '';
+    asyncParam = q.get('async') === '1';
+    asyncProfile = q.get('async-profile') === '1';
   } catch { /* noop */ }
+  if (asyncProfile) return <AsyncBuyerProfilePage />;
+  if (asyncParam) return <AsyncPrototypePage />;
   if (profileGlid) return <BuyerProfileStandalone glid={profileGlid} />;
   // ?rfq=brain[&glid=] — GLID gate → PNS-speed → repost/enrich/new chooser → the seeded duplicated Simple form.
   if (rfqMode === 'brain') { const q = new URLSearchParams(window.location.search); return <BrainFormGate glid={q.get('glid') || sidParam || ''} />; }

@@ -615,6 +615,7 @@ export function getEnrichmentRaw(): unknown { return lastRaw; }
 // extract path, which reads the per-source summaries. null when on the legacy -advanced endpoint.
 let lastRich: unknown = null;
 export function getEnrichmentRich(): unknown { return lastRich; }
+export function seedEnrichmentRich(data: unknown): void { lastRich = data; }
 let lastUnified: unknown = null;                                    // bi-buyer-unified response (last pull) — the buyer{} superset source of truth
 export function getBuyerUnified(): unknown { return lastUnified; }
 
@@ -649,20 +650,88 @@ export function isqOffersToLegacy(isqSummary: unknown): Array<Record<string, unk
 // buildLedger does asArr() (silently empties). Both want the INNER array, so we unwrap pns.raw.data /
 // rfq.raw.RESPONSE.DATA.Listing / wa.raw.data.records. profile/whatsapp_inbound/befisc/sign3 are already the right
 // shape. Verified against deriveEnrichment + ledger.buildLedger field reads. NOTE: the EXTRACT path does NOT use this.
+//
+// UNIFIED-SHAPE FALLBACKS (bi-buyer-unified / buyer-persona-async): the unified workflow emits DIFFERENT source keys
+// than v10x — identity (not profile), requirement (not rfq/isq), whatsapp (not whatsapp_conversations/
+// whatsapp_inbound), external (not befisc/sign3), and tenure rides inside identity.raw.usersince (no top-level
+// usersince). Every legacy read below keeps its v10x key FIRST and only falls back to the unified key when the v10x
+// key is absent — so the sync dashboard path is byte-for-byte unchanged and the async payload now yields the FULL
+// legacy facts layer (profile-api · glusr · prev-bl · prev-isq · wa-out · wa-in · befisc · sign3) instead of csl+pns
+// alone. NOTE: the EXTRACT path does NOT use this.
+// requirement.summary.requirements[] → the legacy {title, isq:[{IM_SPEC_MASTER_DESC, ISQ_RESPONSE}]} rows both
+// deriveEnrichment AND ledger.extractAllFacts read.
+function requirementsToLegacy(reqSum: unknown): Array<Record<string, unknown>> {
+  return _arr(_obj(reqSum).requirements).map((r) => {
+    const rr = _obj(r); const specs = _obj(rr.specs);
+    return {
+      title: rr.title ?? rr.category ?? '',
+      post_date: rr.posted ?? '',
+      requirement_type: rr.requirement_type ?? null,
+      probable_order_value: rr.order_value ?? null,
+      isq: Object.keys(specs).map((desc) => ({ IM_SPEC_MASTER_DESC: desc, ISQ_RESPONSE: String(specs[desc] ?? '') })),
+    };
+  });
+}
+// csl-to-llm drops the raw CSL rows (raw:null) — reconstruct legacy CSL ROWS from the parsed summary so
+// extractAllFacts still gets csl.title / csl.url / csl.city / csl.searchTerm facts. Evidence entries carry
+// {type,value,count,sample}; opaque numeric ids are skipped; typed search terms get a synthetic ?s= URL so the
+// legacy ?s= parser (csl.searchTerm — the live-intent signal) picks them up.
+function cslFromSummary(cslSum: unknown): Array<Record<string, unknown>> {
+  const rows: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+  const pushRow = (row: Record<string, unknown>) => {
+    const key = String(row.fk_display_title ?? row.glb_city ?? row.request_url ?? '');
+    if (!key || seen.has(key)) return; seen.add(key); rows.push(row);
+  };
+  for (const e of _arr(_obj(cslSum).evidence)) {
+    const ee = _obj(e); const v = ee.value; if (v == null) continue;
+    const vs = String(v).trim(); if (!vs || /^[0-9]+$/.test(vs)) continue;          // opaque ids (mcat/city) — names live in the rich layer
+    const type = String(ee.type ?? '');
+    const sample = typeof ee.sample === 'string' && ee.sample ? ee.sample : undefined;
+    const row: Record<string, unknown> = {};
+    if (type === 'city_filter' || type === 'city') row.glb_city = vs;
+    else if (type === 'supplier_profile_visit' || type === 'inquiry_form_opened') row.request_url = vs;
+    else {
+      row.fk_display_title = vs;
+      if (type === 'search' && !sample) row.request_url = `?s=${encodeURIComponent(vs)}`;
+      else if (sample) row.request_url = sample;
+    }
+    pushRow(row);
+  }
+  const loc = _obj(_obj(cslSum).browse_location);
+  if (loc.city) pushRow({ glb_city: loc.city });
+  return rows;
+}
 export function normalizeNewUserInsights(raw: unknown): unknown {
   if (!isNewUserInsightsShape(raw)) return raw;            // old shape → identity passthrough
   const s = raw.sources as Record<string, { summary?: unknown; raw?: unknown } | undefined>;
   const rawOf = (k: string) => { const v = s[k]; return v && typeof v === 'object' && 'raw' in v ? (v as { raw?: unknown }).raw : v; };
   const sumOf = (k: string) => { const v = s[k]; return v && typeof v === 'object' && 'summary' in v ? (v as { summary?: unknown }).summary : undefined; };
-  const pnsCalls = _arr(_obj(rawOf('pns')).data);                                                  // pns.raw = {Code,data:[calls]}
+  const pnsCalls = _arr(_obj(rawOf('pns')).data);                                                  // pns.raw = {Code,data:[calls]} (same key on both shapes)
+  // v10x keys (unchanged reads — sync dashboard path)
   const blListing = _arr(_obj(_obj(_obj(rawOf('rfq')).RESPONSE).DATA).Listing);                    // rfq.raw.RESPONSE.DATA.Listing
   const waRecords = _arr(_obj(_obj(rawOf('whatsapp_conversations')).data).records);                // wa.raw.data.records
   const usRaw = _obj(rawOf('usersince')); const usrx = _obj(usRaw.glusr_extra).glusr_usr_id ? usRaw.glusr_extra : rawOf('usersince'); // unwrap nested glusr_extra
+  // unified-key fallbacks (bi-buyer-unified / buyer-persona-async)
+  const idRaw = _obj(rawOf('identity'));                                                           // identity.raw = {profile, usersince}
+  const profile = rawOf('profile') ?? (idRaw.profile ?? sumOf('identity'));                        // raw BL profile (glusr_usr_company_desc…) → parsed summary
+  const usr = usrx ?? (() => { const u = _obj(idRaw.usersince); const gx = _obj(u.glusr_extra); return gx.glusr_usr_id ? u.glusr_extra : idRaw.usersince; })();
+  const reqRaw = _obj(rawOf('requirement'));                                                       // requirement.raw = {rfq, isq}
+  const rfqListing = blListing.length ? blListing : _arr(_obj(_obj(_obj(reqRaw.rfq).RESPONSE).DATA).Listing);
+  const isqLegacy = isqOffersToLegacy(sumOf('isq'));
+  const isqRows = isqLegacy.length ? isqLegacy : requirementsToLegacy(sumOf('requirement'));
+  const waRaw = _obj(rawOf('whatsapp')); const waTimeline = _arr(waRaw.timeline);                  // whatsapp.raw.timeline = [{ts,sender,kind,text,channel}]
+  const waOut = waRecords.length ? waRecords : waTimeline.filter((t) => _obj(t).channel === 'outbound').map((t) => ({ message: _obj(t).text ?? '', sender: _obj(t).sender === 'buyer' ? 'user' : 'our' }));
+  const waIn = rawOf('whatsapp_inbound') ?? { data: { recent_messages: waTimeline.filter((t) => _obj(t).channel === 'inbound').map((t) => ({ content: _obj(t).text ?? '', sender: _obj(t).sender === 'buyer' ? 'user' : 'bot' })) } };
+  const exRaw = _obj(rawOf('external'));                                                           // external.raw = {befisc, sign3}
+  const bef = rawOf('befisc') ?? exRaw.befisc;
+  const s3 = rawOf('sign3') ?? exRaw.sign3;
+  const csl = rawOf('csl') ?? cslFromSummary(sumOf('csl'));                                        // csl.raw is null on the unified path
   const legacy: Array<Record<string, unknown>> = [
-    { csl_data: rawOf('csl') }, { pns_data: pnsCalls }, { buyer_profile: rawOf('profile') },
-    { prev_bl_data: blListing }, { prev_isq_data: isqOffersToLegacy(sumOf('isq')) },
-    { whatsapp_data: waRecords }, { whatsapp_inbound: rawOf('whatsapp_inbound') },
-    { befisc: rawOf('befisc') }, { sign3: rawOf('sign3') }, { glusr_extra: usrx },
+    { csl_data: csl }, { pns_data: pnsCalls }, { buyer_profile: profile },
+    { prev_bl_data: rfqListing }, { prev_isq_data: isqRows },
+    { whatsapp_data: waOut }, { whatsapp_inbound: waIn },
+    { befisc: bef }, { sign3: s3 }, { glusr_extra: usr },
   ].filter((o) => { const v = Object.values(o)[0]; return v != null && !(Array.isArray(v) && v.length === 0); });
   // P7 · if the v9 node now carries a top-level requirement_brain (BUYER side), append it so UC2/L7 works
   // WITHOUT the dual-fetch. It's a FALLBACK: the parallel -advanced requirement_brain (which also has category

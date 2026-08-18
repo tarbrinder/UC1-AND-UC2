@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "vite",
+    "callback:receiver": "node scripts/callback-receiver.mjs",
+    "callback:tunnel": "cloudflared tunnel --url http://localhost:3457 --no-autoupdate",
     "build": "vite build",
     "build:offline": "vite build --mode offline && node scripts/build-offline-shell.mjs",
     "build:checked": "tsc -b && vite build",

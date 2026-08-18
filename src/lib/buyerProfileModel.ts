@@ -237,7 +237,14 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   // is the ENQUIRIES count per the owner mapping — NOT used here.)
   const _bpAct0 = obj(bpSum.activity);
   const _bpCn = (Number(_bpAct0.pns_call_cnt) || 0) + (Number(_bpAct0.call_back_cnt) || 0);
-  const callCount = _cn > 0 ? _cn : (_bpCn > 0 ? _bpCn : null);
+  // DISCREPANCY FIX (2026-08-18): when call RECORDS exist but extraction FAILED (call_count 0 with failed_count>0 —
+  // e.g. the Go-schema audio outage), do NOT silently substitute the buyerprofile lifetime aggregate (pns_call_cnt +
+  // call_back_cnt). Swapping metrics made the tile read 10 (connected calls, transcripts working) on one pull and 27
+  // (lifetime masked-calls + callbacks) on the next for the SAME buyer — users see it as wrong data. Withhold (null)
+  // + an honest note instead. The owner's tier fallback (no call nodes at all → bp aggregate) still applies — a
+  // transcript-less tier has failed_count 0 by construction, so it keeps populating the tile as designed.
+  const _extractFailed = (Number(_cs.failed_count) || 0) + (Number(_ps.failed_count) || 0);
+  const callCount = _cn > 0 ? _cn : (_extractFailed > 0 ? null : (_bpCn > 0 ? _bpCn : null));
   // OVERALL ACTIVITY tiles (owner 2026-07-14, mockup parity): Sellers Connected · Enquiries Posted · BuyLeads Posted.
   // "Sellers Connected" has NO field in the pull → owner substitutes Total Calls. Enquiries Posted ← activity.enq_count,
   // BuyLeads Posted ← activity.total_requirement (fallback: this-pull requirement count).
@@ -248,7 +255,9 @@ export function parseBuyerProfile(rich: unknown): BuyerProfileModel {
   void buyerMsgs;   // retained (WhatsApp buyer-message count) — no longer a top tile; referenced to keep the binding
   const blCount = Number(_act.total_requirement) > 0 ? Number(_act.total_requirement) : (reqs.length || null);
   const tiles: StatTile[] = [
-    { label: 'Total Calls', value: callCount, sourceNote: 'calls/pns_calls summary · total connected calls (shown in place of Sellers Connected, which the pull does not provide)' },
+    { label: 'Total Calls', value: callCount, sourceNote: callCount == null && _extractFailed > 0
+        ? 'call extraction failed this pull (recordings found, 0 transcribed) — count withheld rather than swapped for the lifetime PNS aggregate'
+        : 'calls/pns_calls summary · total connected calls (shown in place of Sellers Connected, which the pull does not provide)' },
     { label: 'Enquiries Posted', value: enqCount, sourceNote: 'buyerprofile.activity.total_calls (this field holds the enquiries-posted count)' },
     { label: 'BuyLeads Posted', value: blCount, sourceNote: 'buyerprofile.activity.total_requirement (fallback: this-pull requirement count)' },
   ];

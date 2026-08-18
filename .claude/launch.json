@@ -2,26 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "rfq-dev",
-      "runtimeExecutable": "/Users/tarbrinder/Desktop/rfq-form/node_modules/.bin/vite",
-      "runtimeArgs": ["--port", "5173"],
-      "cwd": "/Users/tarbrinder/Desktop/rfq-form",
-      "port": 5173,
-      "autoPort": false
-    },
-    {
-      "name": "rfq-preview",
-      "runtimeExecutable": "/Users/tarbrinder/Desktop/rfq-form/node_modules/.bin/vite",
-      "runtimeArgs": ["--port", "5185", "--strictPort"],
-      "cwd": "/Users/tarbrinder/Desktop/rfq-form",
-      "port": 5185
-    },
-    {
-      "name": "demo-snapshot",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8899"],
-      "cwd": "/private/tmp/claude-501/-Users-tarbrinder/631d80b8-cf91-415d-8a9b-943d90d0fdbf/scratchpad/demo",
-      "port": 8899
+      "name": "dev",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "5173"],
+      "port": 5173
     }
   ]
 }

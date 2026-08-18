@@ -15,7 +15,7 @@ GET  {API_BASE}/api/imworkflow/webhook/bi-buyer-unified?glid=<GLID>&fast=1
 | Param | Req | Notes |
 |---|---|---|
 | `glid` | yes | IndiaMART buyer GLID, e.g. `268590579` |
-| `fast` | rec | `1` = fast tier (Web-OSINT + Udyam gated off). The standalone card uses **fast-only**. Same keys as full; fast just grounds fewer when web/Udyam are absent. |
+| `fast` | rec | `1` = fast tier (Web-OSINT gated to the `normal` tier; Udyam still runs). The standalone card uses **fast-only**. Same keys as full; fast just grounds fewer when web is absent. |
 
 - **Latency:** fast tier ≈ 2–3 min (live multi-source pull + the server LLM). Single blocking response.
 - **Webhook path is stable** (`bi-buyer-unified`) across versions.

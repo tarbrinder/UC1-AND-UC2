@@ -23,7 +23,7 @@ const list = (o: Record<string, unknown>, ...keys: string[]): string[] => {
 };
 
 export interface MergedIdentity { name?: string; company?: string; city?: string; state?: string; address?: string; memberSince?: string; designation?: string; emails: string[]; mobiles: string[]; pan?: string; gst?: string }
-export interface MergedExternal { verifiedName?: string; verifiedNameConfidence?: number; verifiedNameSource?: string; befiscName?: string; nameCrossSourceMatch?: boolean; pan?: string; pans: string[]; gender?: string; dob?: string; city?: string; state?: string; location?: string; incomeBand?: string; age?: string; socialPlatforms: string[]; socialPresenceCount?: number; emails: string[]; mobiles: string[] }
+export interface MergedExternal { verifiedName?: string; verifiedNameConfidence?: number; verifiedNameSource?: string; befiscName?: string; nameCrossSourceMatch?: boolean; pan?: string; pans: string[]; gender?: string; dob?: string; city?: string; state?: string; location?: string; incomeBand?: string; age?: string; socialPlatforms: string[]; socialPresenceCount?: number; emails: string[]; mobiles: string[]; fraudSellerDetectionScore?: number | 'unknown' }
 export interface AvailabilityRow { key: 'mobile' | 'email' | 'address' | 'pan' | 'gst' | 'company'; label: string; present: boolean; verified: boolean; isNew: boolean; value: string; externalValue?: string; source: string; note: string }
 
 function richSources(rich: unknown): Record<string, unknown> {
@@ -91,6 +91,13 @@ export function externalFromMerged(rich: unknown): MergedExternal | null {
     socialPresenceCount: isNaN(cnt) ? undefined : cnt,
     emails: list(s, 'emails', 'email', 'email_id'),
     mobiles: list(s, 'mobiles', 'mobile', 'phone'),
+    // Sign3 fraud-seller-detection score (root-level intelligence_data.score, raw 0-1). DETERMINISTIC
+    // passthrough — missing MUST read 'unknown', never 0/low-risk (old cache payloads lack the field).
+    fraudSellerDetectionScore: (() => {
+      const s3s = obj(s.sign3_scores);
+      const fsd = s3s.fraud_seller_detection_score;
+      return typeof fsd === 'number' && isFinite(fsd) ? fsd : 'unknown';
+    })(),
   };
 }
 

@@ -24,7 +24,7 @@ import { buildOfferSkeleton, buildOfferEnrichPrompt, mergeOfferLLM, type OfferLL
 import { buildPrunePrompt, applyPrune, synthEval, type FinalAttr } from '../lib/synthesisEngine';
 import { bundleFromResponse, buildExtractPrompt, extractedToFinals, finalsToBuyerBlock, extractNeedsInput, EXTRACT_PROMPT_VERSION, type RichResponse } from '../lib/buyerProfileExtract';
 import { bucketPlatforms } from '../lib/buyerProfileModel';   // audit BPC-84: shared footprint bucket map (same set on both cards)
-import { fetchEnrichment, getEnrichmentRich, getServerTrace, getEnrichmentHealth, hasCachedTier } from '../lib/enrichment';
+import { fetchEnrichment, getEnrichmentRich, getServerTrace, getEnrichmentHealth, hasCachedTier, seedEnrichmentRich, normalizeNewUserInsights } from '../lib/enrichment';
 import { runExternal } from '../lib/externalRun';
 import { getLLMRaw, getLLMHealth } from '../lib/gemini';
 import { getEvalRuns, evalTrend } from '../lib/evalLog';
@@ -143,7 +143,7 @@ function withObservedExternal(raw: unknown, glid: string): unknown {
   return already ? raw : [...raw, { observed_external: obs }];
 }
 
-export default function BuyerLedgerView({ glid, onClose, presetLedger, title, onOpenForm }: { glid: string; onClose: () => void; presetLedger?: Ledger; title?: string; onOpenForm?: (variant: 'v3' | 'v4', glid: string) => void }) {
+export default function BuyerLedgerView({ glid, onClose, presetLedger, title, onOpenForm, externalRich }: { glid: string; onClose: () => void; presetLedger?: Ledger; title?: string; onOpenForm?: (variant: 'v3' | 'v4', glid: string) => void; externalRich?: unknown }) {
   const [raw, setRaw] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
   const [openNode, setOpenNode] = useState<SourceNode | null>(null);
@@ -189,6 +189,14 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   const freshRef = useRef(false);
 
   useEffect(() => {
+    if (externalRich !== undefined) {
+      seedEnrichmentRich(externalRich);
+      if (externalRich && typeof externalRich === 'object' && 'sources' in (externalRich as Record<string, unknown>)) {
+        const legacy = normalizeNewUserInsights(externalRich);
+        setRaw(legacy); setWebEpoch((e) => e + 1); setLoading(false);
+      }
+      return;
+    }
     if (presetLedger) return; // a pre-built ledger (e.g. RFQ ledger) — no pull needed
     const demo = (window as unknown as { __ledgerDemoRaw?: unknown }).__ledgerDemoRaw;
     if (demo) { setRaw(demo); return; }
@@ -209,7 +217,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
     const fresh = freshRef.current; freshRef.current = false;   // consume the one-shot fresh flag set by the Fresh-pull button
     fetchEnrichment(glid, { tier, fresh }).then(({ raw }) => { if (alive && raw) { setRaw(raw); setWebEpoch((e) => e + 1); } }).catch(() => undefined).finally(() => { if (alive) { setLoading(false); } });
     return () => { alive = false; };
-  }, [glid, tier, refreshKey]);
+  }, [glid, tier, refreshKey, externalRich]);
 
   // HOD UI-2 (2026-07-13): PRE-WARM the CHEAP tiers in the BACKGROUND so switching tabs is INSTANT (served from the
   // per-tier cache, zero reload — the tier chip shows ✓ the moment it's warm). Fired on a short delay so it never slows
@@ -810,7 +818,7 @@ export default function BuyerLedgerView({ glid, onClose, presetLedger, title, on
   //    reasoning → output → diff → confidence → counterfactuals → verification, per what the stage actually has) ──
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 text-[13px] text-gray-700">
+    <div className={externalRich !== undefined ? 'flex flex-col bg-gray-50 text-[13px] text-gray-700 rounded-xl border border-gray-200 overflow-hidden' : 'fixed inset-0 z-50 flex flex-col bg-gray-50 text-[13px] text-gray-700'}>
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 bg-white shrink-0">
         <div className="flex items-center gap-3">

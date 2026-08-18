@@ -315,6 +315,15 @@ function composeExternal(summary: unknown, src: string, push: (src: string, tag:
   // P3 (#12): Sign3 email-linked Google-Maps contributor profile — a real digital-footprint signal (was dropped upstream).
   const gmb = _obj(s.google_business); if (_s(gmb.name) || _s(gmb.url) || _s(gmb.ratings) || _s(gmb.reviews)) push(src, 'google_maps', `Google Maps profile: ${[_s(gmb.name) && `"${_s(gmb.name)}"`, _s(gmb.level) && `level ${_s(gmb.level)}`, _s(gmb.ratings) && `${_s(gmb.ratings)} ratings`, _s(gmb.reviews) && `${_s(gmb.reviews)} reviews`, _s(gmb.url)].filter(Boolean).join(' · ')} [Sign3 — digital footprint, not the buyer's location]`);
   if (s.identity_verified === true) push(src, 'identity_verified', 'External identity verified — Befisc & Sign3 records both found');
+  // Sign3 fraud-seller-detection score (root-level intelligence_data.score, raw 0-1). DETERMINISTIC passthrough
+  // (same family as is_fraud/fraud_reason — the prompt bans LLM re-emission). Missing (old cache payloads / no
+  // score) reads 'unknown', NEVER 0 or low-risk.
+  {
+    const s3s = _obj(s.sign3_scores);
+    const fsd = s3s.fraud_seller_detection_score;
+    if (typeof fsd === 'number' && isFinite(fsd)) push(src, 'sign3_fraud_seller_score', `Sign3 fraud-seller-detection score: ${fsd} (0-1 raw, deterministic). Buyer-as-seller signal — pair with conflict_tickets.as_respondent. No banding yet (Sign3 to provide).`);
+    else push(src, 'sign3_fraud_seller_score', 'Sign3 fraud-seller-detection score: UNKNOWN this pull (old cache payload or no score) — NEVER read as 0 or low-risk.');
+  }
   return true;
 }
 
