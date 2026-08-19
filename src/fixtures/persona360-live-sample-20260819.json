@@ -1,0 +1,789 @@
+{
+    "glid": "268590579",
+    "fetched_at": "2026-08-19T14:10:57.001Z",
+    "identity": {
+        "name": "Jaiveer",
+        "city": "Auraiya",
+        "state": "Uttar Pradesh",
+        "mobile_masked": "63****52",
+        "email_masked": "ja***@gmail.com",
+        "sources": [
+            "IDENTITY",
+            "EXTERNAL",
+            "BUYER PROFILE"
+        ]
+    },
+    "persona": {
+        "industry": {
+            "value": "Paper & Paper Products",
+            "confidence": 80,
+            "basis": "derived",
+            "reason": "Consistent inquiries and PNS discussions revolving around notebook production and paper conversion.",
+            "sources": [
+                "PNS",
+                "REQUIREMENT",
+                "BUYERPROFILE"
+            ]
+        },
+        "business_stage": {
+            "value": "Early-stage business",
+            "confidence": 85,
+            "basis": "derived",
+            "reason": "PNS records show questions regarding machine installation for a new village setup, machine rates, and initial raw material batches.",
+            "sources": [
+                "PNS",
+                "REQUIREMENT"
+            ]
+        },
+        "scale": {
+            "value": "Micro",
+            "confidence": 90,
+            "basis": "observed",
+            "reason": "Registered as a Micro enterprise in Udyam records.",
+            "sources": [
+                "UDYAM"
+            ]
+        },
+        "annual_turnover": {
+            "value": null,
+            "confidence": 0,
+            "basis": null,
+            "reason": "Insufficient evidence",
+            "sources": []
+        },
+        "business_persona": {
+            "value": "Manufacturer who sources notebook making machinery and raw paper material for notebook production",
+            "confidence": 85,
+            "basis": "derived",
+            "reason": "Repeated procurement inquiries and call discussions focused on notebook manufacturing machinery and paper raw materials.",
+            "sources": [
+                "PNS",
+                "REQUIREMENT",
+                "BUYERPROFILE"
+            ]
+        },
+        "business_type": {
+            "value": "Manufacturer",
+            "confidence": 80,
+            "basis": "derived",
+            "reason": "Procuring manufacturing machinery such as cutting, stitching, and edge squaring machines along with raw paper reels/sheets.",
+            "sources": [
+                "PNS",
+                "REQUIREMENT"
+            ]
+        },
+        "buyer_maturity": {
+            "value": "Developing",
+            "confidence": 75,
+            "basis": "derived",
+            "reason": "Understands specific GSM grades and machine dimensions, but is seeking guidance on setup, service, and installation.",
+            "sources": [
+                "PNS",
+                "REQUIREMENT"
+            ]
+        }
+    },
+    "sourcing": {
+        "price_vs_quality": {
+            "value": "Balanced",
+            "confidence": 70,
+            "basis": "derived",
+            "reason": "Buyer compares machine rates and transport expenses while accepting fair standard raw material rates.",
+            "sources": [
+                "PNS"
+            ]
+        },
+        "annual_procurements": {
+            "value": null,
+            "confidence": 0,
+            "basis": null,
+            "reason": "Insufficient evidence",
+            "sources": []
+        },
+        "sourcing_channel": {
+            "value": "IndiaMART",
+            "confidence": 80,
+            "basis": "observed",
+            "reason": "Active sourcing via IndiaMART RFQs and PNS call engagements.",
+            "sources": [
+                "BUYERPROFILE",
+                "PNS",
+                "REQUIREMENT"
+            ]
+        },
+        "preferred_suppliers": {
+            "value": "Regional manufacturers and suppliers providing machinery installation and raw material support",
+            "confidence": 75,
+            "basis": "derived",
+            "reason": "Prefers regional suppliers near Kanpur to control transport costs and requires setup/installation guidance.",
+            "sources": [
+                "PNS",
+                "REQUIREMENT"
+            ]
+        },
+        "procurement_approach": {
+            "value": "Specification-led",
+            "confidence": 75,
+            "basis": "derived",
+            "reason": "Inquiries specify cutting machine sizes and exact GSM grades (48 GSM, 54 GSM, 80 GSM).",
+            "sources": [
+                "PNS",
+                "REQUIREMENT"
+            ]
+        },
+        "procurement_model": {
+            "value": "Spot",
+            "confidence": 70,
+            "basis": "derived",
+            "reason": "Purchasing machinery and trial material on immediate spot requirements.",
+            "sources": [
+                "PNS"
+            ]
+        },
+        "purchase_frequency": {
+            "value": "Ad-hoc",
+            "confidence": 70,
+            "basis": "derived",
+            "reason": "Initial procurement phase for machinery setup and trial raw material batches.",
+            "sources": [
+                "PNS",
+                "REQUIREMENT"
+            ]
+        },
+        "location_sourcing_preference": {
+            "value": "Operates in Auraiya · Sources from Kanpur, Delhi",
+            "confidence": 85,
+            "basis": "derived",
+            "reason": "Operating location verified in Auraiya; explicit sourcing preferences indicated for Kanpur and Delhi in requirements and call discussions.",
+            "sources": [
+                "IDENTITY",
+                "UDYAM",
+                "REQUIREMENT",
+                "PNS"
+            ]
+        }
+    },
+    "risk": {
+        "is_fraud": {
+            "value": false,
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "verification_status": {
+            "value": "1",
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "verification_flags": {
+            "value": {
+                "email": false,
+                "alt_email": false,
+                "alt_mobile": false,
+                "whatsapp_active": true,
+                "verified_business_buyer_flag": 0
+            },
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "identity_confidence": {
+            "value": "High",
+            "confidence": 90,
+            "basis": "derived",
+            "reason": "Strong alignment across Udyam registration, bank-verified external identity, PAN, mobile anchor, and profile details.",
+            "sources": [
+                "UDYAM",
+                "EXTERNAL",
+                "BUYERPROFILE",
+                "IDENTITY",
+                "PAN_UNION"
+            ]
+        },
+        "digital_footprint": {
+            "value": "Limited",
+            "confidence": 75,
+            "basis": "derived",
+            "reason": "Individual digital footprints present on social platforms, but no dedicated commercial website or verified online business listings.",
+            "sources": [
+                "EXTERNAL"
+            ]
+        },
+        "is_also_seller": {
+            "value": false,
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "gst_verified": {
+            "value": false,
+            "sources": [
+                "GST"
+            ]
+        },
+        "udyam_registered": {
+            "value": true,
+            "sources": [
+                "UDYAM"
+            ]
+        },
+        "pan_present": {
+            "value": true,
+            "sources": [
+                "PAN"
+            ]
+        },
+        "conflict_tickets": {
+            "as_respondent": {
+                "count": 0,
+                "window": "365d",
+                "type": "BS_Conflict (181)"
+            },
+            "note": "Genuine dispute-history count from iil_customer_tickets. NOT a risk score or grade.",
+            "sources": [
+                "REDASH iil_customer_tickets QID 12023"
+            ]
+        },
+        "fraud_seller_detection_score": {
+            "value": "unknown",
+            "sources": [
+                "SIGN3"
+            ],
+            "note": "Absent this pull (cache hit / no score) — read as UNKNOWN, never 0 or low-risk."
+        }
+    },
+    "internet_profile": {
+        "gst": {
+            "value": {
+                "count": 0,
+                "_meta": {
+                    "source": "gst_detail_union",
+                    "api": "consensus(sign3+idfy+befisc)",
+                    "status": "no_data",
+                    "returned": 0,
+                    "vendors": [
+                        "sign3",
+                        "idfy",
+                        "befisc"
+                    ],
+                    "fetched_at": "2026-08-19T14:10:56.903Z"
+                }
+            },
+            "sources": [
+                "GST"
+            ]
+        },
+        "pns_profiling": {
+            "value": {
+                "call_count": 7,
+                "intent_level": "High",
+                "intent_narrative": "Buyer is looking for raw paper material and lives near the seller's location in Kanpur.",
+                "deal_readiness": "Hot",
+                "deal_readiness_reason": "Buyer lives in the same locality as the seller and is actively checking rates for immediate requirement.",
+                "deal_blockers": [
+                    "Availability: Stock confirmation pending until tomorrow",
+                    "Location: High transport cost from Vadodara to Kanpur",
+                    "Product: Seller deals in copier paper, not specific notebook raw material"
+                ],
+                "persona": "Manufacturer",
+                "order_type": "Commercial",
+                "quantity_scale": "High",
+                "repeat_buyer": true,
+                "b2b_or_b2c": "B2B",
+                "call_purpose": "requirement",
+                "intended_application": "Notebook Manufacturing",
+                "intended_applications": [
+                    "Notebook Manufacturing",
+                    "Paper Manufacturing",
+                    "Paper Plate Production",
+                    "Business Startup"
+                ],
+                "primary_language": "Hindi",
+                "languages": [
+                    "Hindi",
+                    "English"
+                ],
+                "callback_urgency": "In 1 hour",
+                "buyer_locations": [
+                    "Delhi",
+                    "Kanpur"
+                ],
+                "seller_locations": [
+                    "Kanpur",
+                    "Delhi",
+                    "New Delhi",
+                    "Vadodara"
+                ],
+                "seller_questions": [
+                    "How much quantity do you need?",
+                    "Where is your shop located?",
+                    "Are you setting up a manufacturing unit or already working?",
+                    "Have you installed the machines?",
+                    "What business did you do before this?",
+                    "From where are you calling?"
+                ],
+                "order_types": [
+                    "Bulk",
+                    "Recurring",
+                    "Commercial",
+                    "Trial"
+                ],
+                "products": [
+                    {
+                        "name": "Notebook Raw Material Paper",
+                        "category": "Writing Paper"
+                    },
+                    {
+                        "name": "Raw Paper (Kaccha Kagaz) - 54 GSM",
+                        "price": "INR 45",
+                        "quantity": "0.5 ton",
+                        "specs": [
+                            "GSM: 54"
+                        ]
+                    },
+                    {
+                        "name": "Notebook Raw Material",
+                        "category": "Raw Paper Material"
+                    },
+                    {
+                        "name": "Notebook Raw Material (Sample Product)",
+                        "category": "Raw Paper Material",
+                        "specs": [
+                            "Application: Notebook manufacturing"
+                        ]
+                    },
+                    {
+                        "name": "Finished Notebook (Sample Product)",
+                        "category": "Paper Wood",
+                        "specs": [
+                            "Type: Finished Product"
+                        ]
+                    },
+                    {
+                        "name": "Raw Paper Material",
+                        "category": "Raw Paper Material",
+                        "price": "INR 52",
+                        "price_reaction": "Accepted: (Theek hai rate)",
+                        "specs": [
+                            "GSM: 80"
+                        ]
+                    },
+                    {
+                        "name": "Cutting Machine",
+                        "price": "INR 160000",
+                        "specs": [
+                            "Size: 32"
+                        ]
+                    },
+                    {
+                        "name": "Stitching Machine",
+                        "price": "INR 50000"
+                    },
+                    {
+                        "name": "Edge Square Machine",
+                        "price": "INR 175000",
+                        "specs": [
+                            "Size: 51"
+                        ]
+                    },
+                    {
+                        "name": "Dab Press [Manual]",
+                        "price": "INR 30000",
+                        "specs": [
+                            "Operation Mode: Manual"
+                        ]
+                    },
+                    {
+                        "name": "Notebook Raw Material Paper (48 GSM)",
+                        "quantity": "1 quintal",
+                        "specs": [
+                            "Substance: 48",
+                            "Application: Notebook making"
+                        ]
+                    },
+                    {
+                        "name": "Notebook Raw Material Paper (54 GSM)",
+                        "quantity": "1 quintal",
+                        "specs": [
+                            "Substance: 54"
+                        ]
+                    },
+                    {
+                        "name": "Copier Paper",
+                        "specs": [
+                            "Product Category: Office Stationery"
+                        ]
+                    }
+                ],
+                "buyer_queries": [
+                    "Looking for raw material for making notebooks.",
+                    "What is the rate for 54 GSM paper?",
+                    "Can I get material according to my sample?",
+                    "Is raw material for making notebooks available?",
+                    "What is the rate for finished products?",
+                    "What is the current rate? (Rate kya chal raha hai?)",
+                    "What is the rate of the machines?",
+                    "Which machine is best for a village-based setup?",
+                    "Where is the office located in Uttam Nagar?",
+                    "Will you provide raw materials?",
+                    "What about service and installation?",
+                    "What is the rate for the paper?",
+                    "Do you have 48 GSM or 54 GSM paper for notebook making?"
+                ],
+                "conclusion": "Seller will call the buyer back from their location (Abhi hum aapko apne idhar se call kar rahe)",
+                "calls": [
+                    {
+                        "file_id": 984525,
+                        "deal_readiness": "Warm",
+                        "intent_level": "High",
+                        "intended_application": "Notebook Manufacturing",
+                        "products": [
+                            "Notebook Raw Material Paper"
+                        ]
+                    },
+                    {
+                        "file_id": 867708,
+                        "deal_readiness": "Warm",
+                        "intent_level": "High",
+                        "intended_application": "Paper Manufacturing",
+                        "products": [
+                            "Raw Paper (Kaccha Kagaz) - 54 GSM"
+                        ]
+                    },
+                    {
+                        "file_id": 819674,
+                        "deal_readiness": "Warm",
+                        "intent_level": "Medium",
+                        "intended_application": "Notebook Manufacturing",
+                        "products": [
+                            "Notebook Raw Material"
+                        ]
+                    },
+                    {
+                        "file_id": 809281,
+                        "deal_readiness": "Warm",
+                        "intent_level": "Medium",
+                        "intended_application": "Notebook Manufacturing",
+                        "products": [
+                            "Notebook Raw Material (Sample Product)",
+                            "Finished Notebook (Sample Product)"
+                        ]
+                    },
+                    {
+                        "file_id": 808603,
+                        "deal_readiness": "Hot",
+                        "intent_level": "High",
+                        "intended_application": "Paper Plate Production",
+                        "products": [
+                            "Raw Paper Material"
+                        ]
+                    },
+                    {
+                        "file_id": 798153,
+                        "deal_readiness": "Hot",
+                        "intent_level": "High",
+                        "intended_application": "Business Startup",
+                        "products": [
+                            "Cutting Machine",
+                            "Stitching Machine",
+                            "Edge Square Machine",
+                            "Dab Press [Manual]"
+                        ]
+                    },
+                    {
+                        "file_id": 793208,
+                        "deal_readiness": "Cold",
+                        "intent_level": "Medium",
+                        "intended_application": "Notebook Manufacturing",
+                        "products": [
+                            "Notebook Raw Material Paper (48 GSM)",
+                            "Notebook Raw Material Paper (54 GSM)",
+                            "Copier Paper"
+                        ]
+                    }
+                ]
+            },
+            "sources": [
+                "PNS"
+            ]
+        },
+        "company_previous": {
+            "value": {
+                "member_since": "3 Months",
+                "historical_activity": {
+                    "total_requirement": 27,
+                    "past_requirement_count": 0,
+                    "total_calls": 20,
+                    "pns_call_cnt": 11,
+                    "call_back_cnt": 16,
+                    "enq_count": 16,
+                    "enq_reply": 7,
+                    "buy_reply": 5
+                }
+            },
+            "sources": [
+                "BUYER PROFILE",
+                "COMPANY / KYB"
+            ]
+        }
+    },
+    "needs_input": [
+        {
+            "attribute": "annual_turnover",
+            "missing_reason": "No financial records or turnover statements available.",
+            "best_next_question": "What is your anticipated or current annual business turnover?"
+        },
+        {
+            "attribute": "target_customers",
+            "missing_reason": "Distribution channels and target buyer base are not specified in the current setup phase.",
+            "best_next_question": "Do you plan to supply finished notebooks to local schools, wholesalers, or retail stationery shops?"
+        }
+    ],
+    "__health": [
+        {
+            "node": "aadhaar-fact",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "conflict_tickets",
+            "ok": true,
+            "status": "success",
+            "count": 0,
+            "error_msg": null,
+            "retryable": null,
+            "version": "redash/12023"
+        },
+        {
+            "node": "calls",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "pns_calls",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "csl",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "requirement",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "whatsapp",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "identity",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "pns",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "external",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "mobiles",
+            "ok": true,
+            "status": "success",
+            "count": 1,
+            "error_msg": null,
+            "retryable": null,
+            "version": "compile"
+        },
+        {
+            "node": "pan_union",
+            "ok": true,
+            "status": "success",
+            "count": 2,
+            "error_msg": null,
+            "retryable": null,
+            "version": "compile"
+        },
+        {
+            "node": "gst_compile",
+            "ok": true,
+            "status": "ok",
+            "count": 0,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "gst_detail_union",
+            "ok": true,
+            "status": "no_data",
+            "count": 0,
+            "error_msg": null,
+            "retryable": null,
+            "version": "consensus/v1"
+        },
+        {
+            "node": "web_osint",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "udyam",
+            "ok": true,
+            "status": "success",
+            "count": 1,
+            "error_msg": null,
+            "retryable": null,
+            "version": "sign3/pan_to_udyam·enterprise_data (verify not used)"
+        },
+        {
+            "node": "buyerprofile",
+            "ok": true,
+            "status": "success",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "otherdetail",
+            "ok": true,
+            "status": "no_data",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "pan_gst_idfy",
+            "ok": false,
+            "status": "error",
+            "count": 0,
+            "error_msg": "422 - {\"action\":\"verify_with_source\",\"completed_at\":\"2026-08-19T19:40:48+05:30\",\"created_at\":\"2026-08-19T19:40:48+05:30\",\"error\":\"INSUFFICIENT_CREDITS\",\"group_id\":\"268590579\",\"mess",
+            "retryable": false,
+            "version": "idfy/v3/pan_gst_link"
+        },
+        {
+            "node": "gst_cert_idfy",
+            "ok": true,
+            "status": "skipped",
+            "count": 0,
+            "error_msg": null,
+            "retryable": null,
+            "version": "idfy/v3/ind_gst_certificate"
+        },
+        {
+            "node": "gst",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        }
+    ],
+    "__source_priority": {
+        "persona": [
+            "pns",
+            "identity",
+            "external",
+            "csl"
+        ],
+        "intent": [
+            "pns",
+            "whatsapp",
+            "requirement",
+            "csl"
+        ],
+        "requirement": [
+            "requirement",
+            "pns"
+        ],
+        "trust": [
+            "identity",
+            "external",
+            "pns"
+        ],
+        "location": [
+            "pns",
+            "identity",
+            "external",
+            "whatsapp",
+            "csl"
+        ]
+    },
+    "__sources_present": [
+        "conflict_tickets",
+        "requirement",
+        "whatsapp",
+        "identity",
+        "pns",
+        "external",
+        "mobiles",
+        "pan_union",
+        "udyam",
+        "buyerprofile"
+    ],
+    "__sources_absent": [
+        "aadhaar",
+        "calls",
+        "pns_calls",
+        "csl",
+        "gstin_union",
+        "gst_detail_union",
+        "web_osint",
+        "company_reg",
+        "pan_gst_idfy",
+        "gst_cert_idfy",
+        "gst"
+    ]
+}

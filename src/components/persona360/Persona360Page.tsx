@@ -33,7 +33,7 @@ export default function Persona360Page({ data: propData, mode = 'fixture', onRet
           <RiskColumn risk={data.risk} mode={mode} state={columnStates?.risk ?? 'ready'} onRetry={onRetry} />
           <InternetColumn internet={data.internet} mode={mode} state={columnStates?.internet ?? 'ready'} onRetry={onRetry} />
         </div>
-        <EngagementBand engagement={data.engagement} mode={mode} />
+        <EngagementBand engagement={data.engagement} mode={mode} monthlyAvailable={data.engagement.monthly.length > 0} />
       </div>
       {/* glid read for future live fetch: buyer-intelligence webhook targets this glid */}
       <span className="hidden" aria-hidden="true" data-persona360-glid={glid} />

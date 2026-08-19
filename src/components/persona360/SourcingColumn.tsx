@@ -4,14 +4,16 @@ import { navy } from './tokens';
 import { ColumnEmpty, ColumnError, ColumnLoading, FieldRow, SectionTitle } from './ui';
 
 function PriceQualitySlider({ label, position, evidence, mode = 'fixture' }: { label: string; position: number; evidence?: string; mode?: 'fixture' | 'live' }) {
-  // Live mode: price-vs-quality is an LLM/audit-gap field the final-assemble payload does not
-  // carry a numeric for. Never render a fabricated slider position — show a pending chip.
+  // Live mode: the label is a real LLM value (Balanced / Price-focused / Quality-focused) but the
+  // workflow emits no numeric position — render the label on the track, never a marker.
   if (mode === 'live') {
     return (
       <div className="mb-4">
         <div className="flex items-baseline justify-between">
           <span className="text-[10px] font-bold uppercase tracking-wide text-gray-600">Price vs quality</span>
-          <span className="text-[12px] text-gray-400">pending</span>
+          {label
+            ? <span className="text-[12px] font-bold" style={{ color: navy }}>{label}</span>
+            : <span className="text-[12px] text-gray-400">pending</span>}
         </div>
         <div className="mt-2 h-1.5 rounded-full" style={{ background: 'linear-gradient(90deg,#F59E0B,#E5E7EB 45%,#2563EB)' }} />
         {evidence && <div className="mt-1 text-[10px] italic text-gray-500">{evidence}</div>}

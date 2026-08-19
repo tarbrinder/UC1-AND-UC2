@@ -1,0 +1,780 @@
+{
+    "glid": "9775738",
+    "fetched_at": "2026-08-19T13:20:25.196Z",
+    "identity": {
+        "name": "Sanjay Pali",
+        "designation": "Owner",
+        "company": "9 M Plastomed Private Limited",
+        "city": "Gurugram",
+        "state": "Haryana",
+        "mobile_masked": "98****33",
+        "email_masked": "pa***@gmail.com",
+        "sources": [
+            "IDENTITY",
+            "EXTERNAL",
+            "BUYER PROFILE"
+        ]
+    },
+    "persona": {
+        "industry": {
+            "value": "Medical Equipment & Plastic Manufacturing",
+            "confidence": 95,
+            "reason": "CIN, GST manufacturing classification, and product catalog align with medical devices and plastic molding.",
+            "sources": [
+                "GST",
+                "COMPANY_REG",
+                "BUYERPROFILE"
+            ]
+        },
+        "business_stage": {
+            "value": "Established business",
+            "confidence": 90,
+            "reason": "Platform membership of 12 years with active private limited corporate registration.",
+            "sources": [
+                "BUYERPROFILE",
+                "COMPANY_REG",
+                "GST"
+            ]
+        },
+        "scale": {
+            "value": "Micro",
+            "confidence": 85,
+            "reason": "Declared turnover band of ₹40 L–1.5 Cr with up to 10 employees.",
+            "sources": [
+                "COMPANY_REG",
+                "BUYERPROFILE"
+            ]
+        },
+        "annual_turnover": {
+            "value": "₹40 Lakh – ₹1.5 Cr",
+            "confidence": 90,
+            "reason": "Declared company turnover band in verified company records.",
+            "sources": [
+                "COMPANY_REG"
+            ]
+        },
+        "business_persona": {
+            "value": "Medical equipment manufacturer sourcing mesh nebulizers, plastic molding machinery, and raw components",
+            "confidence": 92,
+            "reason": "GST and company registration confirm manufacturing setup in medical and plastic products, supported by active selling and procurement history.",
+            "sources": [
+                "GST",
+                "COMPANY_REG",
+                "BUYERPROFILE"
+            ]
+        },
+        "business_type": {
+            "value": "Manufacturer",
+            "confidence": 95,
+            "reason": "GST registration and company master records classify nature of business as factory/manufacturing.",
+            "sources": [
+                "GST",
+                "COMPANY_REG"
+            ]
+        }
+    },
+    "sourcing": {
+        "procurement_approach": {
+            "value": "Specification-led",
+            "confidence": 75,
+            "reason": "Requirements detail specific parameters including power source, warranty, origin, and unit volumes.",
+            "sources": [
+                "REQUIREMENT"
+            ]
+        }
+    },
+    "risk": {
+        "is_fraud": {
+            "value": false,
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "verification_status": {
+            "value": "1",
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "verification_flags": {
+            "value": {
+                "email": true,
+                "alt_email": false,
+                "alt_mobile": true,
+                "whatsapp_active": true,
+                "verified_business_buyer_flag": 0
+            },
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "is_also_seller": {
+            "value": true,
+            "sources": [
+                "BUYER PROFILE"
+            ]
+        },
+        "gst_verified": {
+            "value": true,
+            "sources": [
+                "GST"
+            ]
+        },
+        "udyam_registered": {
+            "value": true,
+            "sources": [
+                "UDYAM"
+            ]
+        },
+        "pan_present": {
+            "value": true,
+            "sources": [
+                "PAN"
+            ]
+        },
+        "conflict_tickets": {
+            "as_respondent": {
+                "count": 0,
+                "window": "365d",
+                "type": "BS_Conflict (181)"
+            },
+            "note": "Genuine dispute-history count from iil_customer_tickets. NOT a risk score or grade.",
+            "sources": [
+                "REDASH iil_customer_tickets QID 12023"
+            ]
+        },
+        "fraud_seller_detection_score": {
+            "value": "unknown",
+            "sources": [
+                "SIGN3"
+            ],
+            "note": "Absent this pull (cache hit / no score) — read as UNKNOWN, never 0 or low-risk."
+        }
+    },
+    "internet_profile": {
+        "gst": {
+            "value": {
+                "gst_details": [
+                    {
+                        "gstin": "06AABCZ9723F1Z6",
+                        "found_by_detail": [
+                            "sign3"
+                        ],
+                        "fields": {
+                            "legal_name": {
+                                "canonical": "9 M Plastomed Private Limited",
+                                "values_by_vendor": {
+                                    "sign3": "9 M Plastomed Private Limited"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "constitution_of_business": {
+                                "canonical": "Private Limited Company",
+                                "values_by_vendor": {
+                                    "sign3": "Private Limited Company"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "taxpayer_type": {
+                                "canonical": "Regular",
+                                "values_by_vendor": {
+                                    "sign3": "Regular"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "gstin_status": {
+                                "canonical": "Active",
+                                "values_by_vendor": {
+                                    "sign3": "Active"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "date_of_registration": {
+                                "canonical": "06/07/2022",
+                                "values_by_vendor": {
+                                    "sign3": "06/07/2022"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "nature_of_business_activity": {
+                                "canonical": [
+                                    "Factory / Manufacturing"
+                                ],
+                                "values_by_vendor": {
+                                    "sign3": [
+                                        "Factory / Manufacturing"
+                                    ]
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "address": {
+                                "canonical": "Near Umang Bhardwaj Chowk Kadipur Industrial Area, Main Pataudi Road, Umang Bhardwaj Chowk, Sarswati Enclave, Gurugram, Gurugram, Haryana, 122004",
+                                "values_by_vendor": {
+                                    "sign3": "Near Umang Bhardwaj Chowk Kadipur Industrial Area, Main Pataudi Road, Umang Bhardwaj Chowk, Sarswati Enclave, Gurugram, Gurugram, Haryana, 122004"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "state": {
+                                "found_by": [],
+                                "agreement_count": 0,
+                                "all_agree": false,
+                                "disagreement": false
+                            }
+                        }
+                    },
+                    {
+                        "gstin": "06AABCJ7704Q1Z6",
+                        "found_by_detail": [
+                            "sign3"
+                        ],
+                        "fields": {
+                            "legal_name": {
+                                "canonical": "JNJ ELECTRONICS LIMITED",
+                                "values_by_vendor": {
+                                    "sign3": "JNJ ELECTRONICS LIMITED"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "constitution_of_business": {
+                                "canonical": "Public Limited Company",
+                                "values_by_vendor": {
+                                    "sign3": "Public Limited Company"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "taxpayer_type": {
+                                "canonical": "Regular",
+                                "values_by_vendor": {
+                                    "sign3": "Regular"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "gstin_status": {
+                                "canonical": "Active",
+                                "values_by_vendor": {
+                                    "sign3": "Active"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "date_of_registration": {
+                                "canonical": "01/07/2017",
+                                "values_by_vendor": {
+                                    "sign3": "01/07/2017"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "nature_of_business_activity": {
+                                "canonical": [
+                                    "Factory / Manufacturing",
+                                    "Leasing Business",
+                                    "Supplier of Services"
+                                ],
+                                "values_by_vendor": {
+                                    "sign3": [
+                                        "Factory / Manufacturing",
+                                        "Leasing Business",
+                                        "Supplier of Services"
+                                    ]
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "address": {
+                                "canonical": "1st floor, Khasra No. 1031/1/5/2, Khandsa Road, Khandsa, Gurugram, Haryana, 122004",
+                                "values_by_vendor": {
+                                    "sign3": "1st floor, Khasra No. 1031/1/5/2, Khandsa Road, Khandsa, Gurugram, Haryana, 122004"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "state": {
+                                "found_by": [],
+                                "agreement_count": 0,
+                                "all_agree": false,
+                                "disagreement": false
+                            }
+                        }
+                    },
+                    {
+                        "gstin": "06BKTPR7059A1ZS",
+                        "found_by_detail": [
+                            "sign3"
+                        ],
+                        "fields": {
+                            "legal_name": {
+                                "canonical": "Rekha",
+                                "values_by_vendor": {
+                                    "sign3": "Rekha"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "constitution_of_business": {
+                                "canonical": "Proprietorship",
+                                "values_by_vendor": {
+                                    "sign3": "Proprietorship"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "taxpayer_type": {
+                                "canonical": "Regular",
+                                "values_by_vendor": {
+                                    "sign3": "Regular"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "gstin_status": {
+                                "canonical": "Active",
+                                "values_by_vendor": {
+                                    "sign3": "Active"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "date_of_registration": {
+                                "canonical": "30/10/2021",
+                                "values_by_vendor": {
+                                    "sign3": "30/10/2021"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "nature_of_business_activity": {
+                                "canonical": [
+                                    "Retail Business"
+                                ],
+                                "values_by_vendor": {
+                                    "sign3": [
+                                        "Retail Business"
+                                    ]
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "address": {
+                                "canonical": "H. No. 25 Block-N, Street No. 4A, Om Vihar Palam Vihar Extension, Gurugram, Haryana, 122017",
+                                "values_by_vendor": {
+                                    "sign3": "H. No. 25 Block-N, Street No. 4A, Om Vihar Palam Vihar Extension, Gurugram, Haryana, 122017"
+                                },
+                                "found_by": [
+                                    "sign3"
+                                ],
+                                "agreement_count": 1,
+                                "all_agree": true,
+                                "disagreement": false
+                            },
+                            "state": {
+                                "found_by": [],
+                                "agreement_count": 0,
+                                "all_agree": false,
+                                "disagreement": false
+                            }
+                        }
+                    }
+                ],
+                "count": 3,
+                "_meta": {
+                    "source": "gst_detail_union",
+                    "api": "consensus(sign3+idfy+befisc)",
+                    "status": "success",
+                    "returned": 3,
+                    "vendors": [
+                        "sign3",
+                        "idfy",
+                        "befisc"
+                    ],
+                    "fetched_at": "2026-08-19T13:20:25.111Z"
+                }
+            },
+            "sources": [
+                "GST"
+            ]
+        },
+        "pns_profiling": {
+            "value": {
+                "call_count": 0
+            },
+            "sources": [
+                "PNS"
+            ]
+        },
+        "company_previous": {
+            "value": {
+                "member_since": "12 Years",
+                "company": "9 M Plastomed Private Limited",
+                "constitution": "Limited Company",
+                "partner_names": [
+                    "REKHA PALI",
+                    "Sanjay Kumar Pali"
+                ],
+                "gst_declared_turnover_band": "40 L - 1.5 Cr",
+                "historical_activity": {
+                    "total_requirement": 20,
+                    "past_requirement_count": 3,
+                    "total_calls": 44,
+                    "pns_call_cnt": 11,
+                    "call_back_cnt": 34,
+                    "enq_count": 6,
+                    "enq_reply": 69,
+                    "buy_reply": 0
+                }
+            },
+            "sources": [
+                "BUYER PROFILE",
+                "COMPANY / KYB"
+            ]
+        }
+    },
+    "needs_input": [
+        {
+            "attribute": "price_vs_quality",
+            "missing_reason": "No direct call or negotiation transcripts available to evaluate pricing posture.",
+            "best_next_question": "Do you prioritize brand/grade specifications or competitive pricing for your components?"
+        },
+        {
+            "attribute": "procurement_cities",
+            "missing_reason": "No clear preferred sourcing cities identified outside operating base in Gurugram.",
+            "best_next_question": "Which regions or supplier hubs do you prefer to source machinery and components from?"
+        }
+    ],
+    "__health": [
+        {
+            "node": "aadhaar-fact",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "conflict_tickets",
+            "ok": true,
+            "status": "success",
+            "count": 0,
+            "error_msg": null,
+            "retryable": null,
+            "version": "redash/12023"
+        },
+        {
+            "node": "calls",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "pns_calls",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "csl",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "requirement",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "whatsapp",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "identity",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "pns",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "external",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "mobiles",
+            "ok": true,
+            "status": "success",
+            "count": 2,
+            "error_msg": null,
+            "retryable": null,
+            "version": "compile"
+        },
+        {
+            "node": "pan_union",
+            "ok": true,
+            "status": "success",
+            "count": 3,
+            "error_msg": null,
+            "retryable": null,
+            "version": "compile"
+        },
+        {
+            "node": "gst_compile",
+            "ok": true,
+            "status": "ok",
+            "count": 3,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "gst_detail_union",
+            "ok": true,
+            "status": "success",
+            "count": 3,
+            "error_msg": null,
+            "retryable": null,
+            "version": "consensus/v1"
+        },
+        {
+            "node": "web_osint",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "udyam",
+            "ok": true,
+            "status": "success",
+            "count": 1,
+            "error_msg": null,
+            "retryable": null,
+            "version": "sign3/pan_to_udyam·enterprise_data (verify not used)"
+        },
+        {
+            "node": "buyerprofile",
+            "ok": true,
+            "status": "success",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "otherdetail",
+            "ok": true,
+            "status": "success",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        },
+        {
+            "node": "pan_gst_idfy",
+            "ok": false,
+            "status": "error",
+            "count": 0,
+            "error_msg": "422 - {\"action\":\"verify_with_source\",\"completed_at\":\"2026-08-19T18:50:12+05:30\",\"created_at\":\"2026-08-19T18:50:12+05:30\",\"error\":\"INSUFFICIENT_CREDITS\",\"group_id\":\"9775738\",\"messag",
+            "retryable": false,
+            "version": "idfy/v3/pan_gst_link"
+        },
+        {
+            "node": "gst_cert_idfy",
+            "ok": true,
+            "status": "timeout",
+            "count": 0,
+            "error_msg": null,
+            "retryable": null,
+            "version": "idfy/v3/ind_gst_certificate"
+        },
+        {
+            "node": "gst",
+            "ok": true,
+            "status": "ok",
+            "count": null,
+            "error_msg": null,
+            "retryable": null,
+            "version": null
+        }
+    ],
+    "__source_priority": {
+        "persona": [
+            "pns",
+            "identity",
+            "external",
+            "csl"
+        ],
+        "intent": [
+            "pns",
+            "whatsapp",
+            "requirement",
+            "csl"
+        ],
+        "requirement": [
+            "requirement",
+            "pns"
+        ],
+        "trust": [
+            "identity",
+            "external",
+            "pns"
+        ],
+        "location": [
+            "pns",
+            "identity",
+            "external",
+            "whatsapp",
+            "csl"
+        ]
+    },
+    "__sources_present": [
+        "conflict_tickets",
+        "csl",
+        "requirement",
+        "whatsapp",
+        "identity",
+        "external",
+        "mobiles",
+        "pan_union",
+        "gstin_union",
+        "gst_detail_union",
+        "udyam",
+        "buyerprofile",
+        "company_reg",
+        "gst"
+    ],
+    "__sources_absent": [
+        "aadhaar",
+        "calls",
+        "pns_calls",
+        "pns",
+        "web_osint",
+        "pan_gst_idfy",
+        "gst_cert_idfy"
+    ]
+}

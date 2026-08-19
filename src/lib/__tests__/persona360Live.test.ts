@@ -565,3 +565,90 @@ describe('mapFinalToPersona360 — sync buyer-intelligence (08-parser) shape', (
     assert.deepEqual(out.risk.fraudRead, { verdict: 'FLAGGED', detail: 'Payment dispute history' });
   });
 });
+
+// ── ENRICHED 08-PARSER WIRE SHAPES (2026-08-19 deployed workflow) ──────────────────────
+// persona360-live-sample-20260819.json (glid 268590579): pns_profiling carries the FULL
+// enriched PNS summary (products[], buyer_locations, …); attributes are
+// {value, confidence, basis, reason} objects with value:null for honest gaps.
+// persona360-live-sample-9775738.json (glid 9775738): capture with GST detail rows and
+// verification_flags {email:true, alt_mobile:true} — pins the chip fallback + GST row sub.
+const NEW_0819 = JSON.parse(
+  readFileSync(new URL('../../fixtures/persona360-live-sample-20260819.json', import.meta.url), 'utf8'),
+);
+const OLD_9775 = JSON.parse(
+  readFileSync(new URL('../../fixtures/persona360-live-sample-9775738.json', import.meta.url), 'utf8'),
+);
+
+describe('mapFinalToPersona360 — enriched 08-parser wire shapes (2026-08-19)', () => {
+  test('glid 268590579: pns products + buyer_locations fill sourcing slots', () => {
+    const out = asPersona360(mapFinalToPersona360(NEW_0819));
+    assertPersona360Shape(out, 'new-0819');
+    assert.equal(out.glid, '268590579');
+    // products: spoken product names from pns_profiling.value.products[].name
+    assert.ok(out.sourcing.products.includes('Cutting Machine'), 'pns product names must flow into sourcing.products');
+    assert.equal(new Set(out.sourcing.products).size, out.sourcing.products.length, 'products union must be deduped');
+    // cities: pns buyer_locations; operating city (Auraiya) excluded
+    assert.deepEqual(out.sourcing.cities.map((c) => c.name).sort(), ['Delhi', 'Kanpur']);
+    // sourcing text slots from the enriched LLM attributes
+    assert.equal(out.sourcing.priceQuality.label, 'Balanced');
+    assert.equal(out.sourcing.orderPattern.display, 'Ad-hoc');
+    assert.equal(out.sourcing.orderPattern.note, 'Spot');
+    assert.equal(out.sourcing.deliveryNote, 'IndiaMART · Operates in Auraiya · Sources from Kanpur, Delhi');
+    // annual_turnover is value:null and the wire carries no GST band → honest empty
+    assert.equal(out.persona.turnover.display, '');
+    assert.equal(out.persona.turnover.declared, false);
+    assert.equal(out.persona.alternate, 'Developing', 'buyer_maturity fills the alternate persona');
+    // PNS row + engagement metrics from the enriched summary
+    assert.equal(out.internet.rows.find((r) => r.label === 'PNS profiling')!.sub, '7 calls');
+    const metrics = Object.fromEntries(out.engagement.metrics.map((m): [string, number] => [m.label, m.value]));
+    assert.equal(metrics['Requirements posted'], 27);
+    assert.equal(metrics['Calls made'], 20);
+    // udyam_registered=true with no sources.udyam on the wire → row good, chip green
+    const udyRow = out.internet.rows.find((r) => r.label === 'Udyam registration')!;
+    assert.equal(udyRow.state, 'good');
+    assert.equal(udyRow.sub, 'Registered');
+    assert.ok(out.internet.verifiedTags.find((t) => t.name === 'Udyam')!.verified);
+    // verification_flags alt_mobile/email are FALSE on this wire → chips stay gray (honest)
+    assert.equal(out.internet.verifiedTags.find((t) => t.name === 'Mobile')!.verified, false);
+    assert.equal(out.internet.verifiedTags.find((t) => t.name === 'Email')!.verified, false);
+    assert.ok(out.internet.verifiedTags.find((t) => t.name === 'PAN')!.verified);
+    // identity block is on the wire → real name + member_since from company_previous
+    assert.equal(out.identity.name, 'Jaiveer');
+    assert.equal(out.identity.memberSince, '3 Months');
+    // gst is genuinely no_data → caution row, GST chip gray
+    assert.equal(out.internet.rows.find((r) => r.label === 'GST registration')!.state, 'caution');
+    assert.equal(out.internet.verifiedTags.find((t) => t.name === 'GST')!.verified, false);
+  });
+
+  test('glid 9775738: verification_flags fallback greens Mobile/Email chips', () => {
+    const out = asPersona360(mapFinalToPersona360(OLD_9775));
+    assertPersona360Shape(out, 'old-9775');
+    assert.equal(out.glid, '9775738');
+    assert.ok(out.internet.verifiedTags.find((t) => t.name === 'Mobile')!.verified, 'verification_flags.alt_mobile=true must green the Mobile chip');
+    assert.ok(out.internet.verifiedTags.find((t) => t.name === 'Email')!.verified, 'verification_flags.email=true must green the Email chip');
+    // persona annual_turnover wins over the GST-declared band; declared stays false
+    assert.equal(out.persona.turnover.display, '₹40 Lakh – ₹1.5 Cr');
+    assert.equal(out.persona.turnover.declared, false);
+    // GST detail row 0 feeds the sub label
+    const gstRow = out.internet.rows.find((r) => r.label === 'GST registration')!;
+    assert.equal(gstRow.state, 'good');
+    assert.ok(gstRow.sub!.includes('9 M Plastomed Private Limited'));
+    assert.equal(out.identity.memberSince, '12 Years');
+    const metrics = Object.fromEntries(out.engagement.metrics.map((m): [string, number] => [m.label, m.value]));
+    assert.equal(metrics['Requirements posted'], 20);
+    assert.equal(metrics['BuyLeads replied'], 0);
+  });
+
+  test('turnover fallback: GST-declared band fills a null annual_turnover, flagged declared', () => {
+    const payload = sync08Payload() as Record<string, unknown>;
+    (payload.persona as Record<string, unknown>).annual_turnover = { value: null, confidence: 0, reason: 'Insufficient evidence', sources: [] };
+    const ip = payload.internet_profile as Record<string, unknown>;
+    (ip.company_previous as Record<string, unknown>).value = {
+      member_since: '2026-05-20',
+      gst_declared_turnover_band: '40 L - 1.5 Cr',
+    };
+    const out = asPersona360(mapFinalToPersona360(payload));
+    assert.equal(out.persona.turnover.display, '40 L - 1.5 Cr', 'gst_declared_turnover_band fills empty annual_turnover');
+    assert.equal(out.persona.turnover.declared, true, 'GST-declared band is a declared figure');
+  });
+});

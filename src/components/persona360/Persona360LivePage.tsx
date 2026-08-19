@@ -16,12 +16,29 @@ import { PERSONA360_FIXTURE } from '../../fixtures/persona360Fixture';
 // the buyer-ledger pull so a dropped socket surfaces as an error instead of a forever spinner.
 const PULL_TIMEOUT_MS = 11 * 60 * 1000;
 const SYNC_WEBHOOK_PATH = '/api/imworkflow/webhook/buyer-intelligence';
+// Slow enrich workflow: PNS transcribed calls + Calls transcribed sales-recordings.
+// Fires in parallel with the sync pull; its `sources` are merged into `live.payload.sources`
+// when it resolves so the columns re-render with the extra signals.
+const ENRICH_WEBHOOK_PATH = '/api/imworkflow/webhook/buyer-intelligence-enrich';
 const TIERS = ['superfast', 'fast', 'normal'] as const;
 type Tier = (typeof TIERS)[number];
 
 interface LiveView {
-  payload: unknown; // 08-parser / final-assemble body
+  payload: unknown; // 08-parser / final-assemble body (sources{} may be enriched later)
   glid: string;
+}
+
+type EnrichPhase = 'idle' | 'loading' | 'done' | 'error';
+
+// Shallow-merge enrich sources into the live payload's sources. Never mutates inputs.
+function mergeEnrichSources(payload: unknown, enrichSources: unknown): unknown {
+  if (!payload || typeof payload !== 'object') return payload;
+  if (!enrichSources || typeof enrichSources !== 'object') return payload;
+  const p = payload as Record<string, unknown>;
+  const srcs = (p.sources && typeof p.sources === 'object')
+    ? (p.sources as Record<string, unknown>)
+    : {};
+  return { ...p, sources: { ...srcs, ...(enrichSources as Record<string, unknown>) } };
 }
 
 export default function Persona360LivePage() {
@@ -32,9 +49,13 @@ export default function Persona360LivePage() {
   const [error, setError] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [live, setLive] = useState<LiveView | null>(null);
+  const [enrichPhase, setEnrichPhase] = useState<EnrichPhase>('idle');
+  const [enrichError, setEnrichError] = useState('');
+  const [showPayload, setShowPayload] = useState(false);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const enrichAbortRef = useRef<AbortController | null>(null);
 
   const stopTimer = useCallback(() => {
     if (timerRef.current) {
@@ -50,14 +71,50 @@ export default function Persona360LivePage() {
     timerRef.current = setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
   }, [stopTimer]);
 
+  const pullEnrich = useCallback(async (targetGlid: string, targetTier: Tier, forceFresh: boolean) => {
+    enrichAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    enrichAbortRef.current = ctrl;
+    setEnrichPhase('loading');
+    setEnrichError('');
+    try {
+      const qs = new URLSearchParams({ glid: targetGlid, tier: targetTier });
+      if (forceFresh) qs.set('nocache', '1');
+      const res = await fetch(`${ENRICH_WEBHOOK_PATH}?${qs.toString()}`, {
+        signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(PULL_TIMEOUT_MS)]),
+      });
+      if (!res.ok) throw new Error(`n8n enrich returned ${res.status} ${res.statusText}`);
+      const body = await res.json() as { sources?: unknown } | null;
+      const enrichSources = body && typeof body === 'object' ? body.sources : undefined;
+      // Only apply if the current live view is still for this glid — otherwise a superseding pull
+      // already moved on and we should drop this response silently.
+      setLive((prev) => (prev && prev.glid === targetGlid
+        ? { ...prev, payload: mergeEnrichSources(prev.payload, enrichSources) }
+        : prev));
+      setEnrichPhase('done');
+    } catch (err) {
+      if (ctrl.signal.aborted) return;
+      setEnrichPhase('error');
+      setEnrichError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (enrichAbortRef.current === ctrl) enrichAbortRef.current = null;
+    }
+  }, []);
+
   const pull = useCallback(async (targetGlid: string, targetTier: Tier, forceFresh: boolean) => {
     abortRef.current?.abort();
+    enrichAbortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setPhase('loading');
     setError('');
     setLive(null);
+    setEnrichPhase('idle');
+    setEnrichError('');
     startTimer();
+    // Fire the slow enrich workflow in parallel with the sync pull. The sync response lands first
+    // (~2–3 min); the enrich response lands later and gets merged into `live.payload.sources`.
+    void pullEnrich(targetGlid, targetTier, forceFresh);
     try {
       const qs = new URLSearchParams({ glid: targetGlid, tier: targetTier });
       if (forceFresh) qs.set('nocache', '1');
@@ -77,7 +134,13 @@ export default function Persona360LivePage() {
         throw new Error(`n8n returned ${res.status} ${res.statusText}`);
       }
       const body: unknown = await res.json();
-      setLive({ payload: body, glid: targetGlid });
+      // Preserve any enrich sources that may have already arrived (races on cache hits).
+      setLive((prev) => {
+        const prevSources = prev && prev.glid === targetGlid && prev.payload && typeof prev.payload === 'object'
+          ? (prev.payload as { sources?: unknown }).sources
+          : undefined;
+        return { payload: prevSources ? mergeEnrichSources(body, prevSources) : body, glid: targetGlid };
+      });
       setPhase('done');
     } catch (err) {
       if (ctrl.signal.aborted) return; // superseded by a newer pull — stay in that pull's phase
@@ -87,12 +150,13 @@ export default function Persona360LivePage() {
       if (abortRef.current === ctrl) abortRef.current = null;
       stopTimer();
     }
-  }, [startTimer, stopTimer]);
+  }, [startTimer, stopTimer, pullEnrich]);
 
   // unmount cleanup
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      enrichAbortRef.current?.abort();
       stopTimer();
     };
   }, [stopTimer]);
@@ -181,11 +245,26 @@ export default function Persona360LivePage() {
 
           <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
             <span>
-              n8n <b className="font-mono">buyer-intelligence</b> · synchronous webhook · one response
+              n8n <b className="font-mono">buyer-intelligence</b> + <b className="font-mono">buyer-intelligence-enrich</b> · sync + parallel enrich
             </span>
             {phase === 'loading' && (
               <span className="inline-flex items-center gap-1 text-teal-700">
                 <Loader2 className="h-3 w-3 animate-spin" /> pipeline running… {elapsed}s
+              </span>
+            )}
+            {enrichPhase === 'loading' && (
+              <span className="inline-flex items-center gap-1 text-indigo-700" title="Slow enrichment (PNS transcribed calls + sales-call recordings) — will merge in when ready">
+                <Loader2 className="h-3 w-3 animate-spin" /> enriching…
+              </span>
+            )}
+            {enrichPhase === 'done' && phase === 'done' && (
+              <span className="inline-flex items-center gap-1 text-indigo-700">
+                <CheckCircle2 className="h-3 w-3" /> enrichment merged
+              </span>
+            )}
+            {enrichPhase === 'error' && (
+              <span className="inline-flex items-center gap-1 text-amber-700" title={enrichError}>
+                enrichment failed
               </span>
             )}
             {isLive && (
@@ -195,6 +274,29 @@ export default function Persona360LivePage() {
                 className="inline-flex items-center gap-1 text-teal-700 underline hover:text-teal-800"
               >
                 <RefreshCw className="h-3 w-3" /> re-pull
+              </button>
+            )}
+            {isLive && (
+              <button
+                type="button"
+                onClick={() => setShowPayload((s) => !s)}
+                className="inline-flex items-center gap-1 text-slate-600 underline hover:text-slate-800"
+                title="Toggle raw workflow response — useful for diagnosing empty columns"
+              >
+                {showPayload ? 'Hide payload' : 'View payload'}
+              </button>
+            )}
+            {isLive && (
+              <button
+                type="button"
+                onClick={() => {
+                  const txt = JSON.stringify(live?.payload ?? null, null, 2);
+                  void navigator.clipboard.writeText(txt);
+                }}
+                className="inline-flex items-center gap-1 text-slate-600 underline hover:text-slate-800"
+                title="Copy the full JSON payload to clipboard so it can be pasted to Claude for mapper-path diagnosis"
+              >
+                Copy payload
               </button>
             )}
           </div>
@@ -218,6 +320,11 @@ export default function Persona360LivePage() {
           </div>
         )}
         <Persona360Page data={data} mode={isLive ? 'live' : 'fixture'} onRetry={isLive ? trigger : undefined} columnStates={columnStates} />
+        {isLive && showPayload && (
+          <pre className="mt-3 max-h-[600px] overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3 text-[10px] leading-tight text-slate-100">
+{JSON.stringify(live?.payload ?? null, null, 2)}
+          </pre>
+        )}
       </div>
     </div>
   );

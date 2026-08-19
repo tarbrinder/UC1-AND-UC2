@@ -1,0 +1,1758 @@
+{
+  "name": "buyer-intelligence-enrich",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// t0 — entry stamp; resolves the speed TIER (superfast default) + preserves .query so every source reads it.\nconst j = $input.first().json;\nconst q = (j && j.query) || {};\nvar tier = String(q.tier || '').toLowerCase();\nif (tier !== 'superfast' && tier !== 'fast' && tier !== 'normal') {\n  tier = (q.full === '1' || q.tier === 'full') ? 'normal' : (q.fast === '1' ? 'fast' : 'superfast'); // back-compat + default superfast\n}\nconst run = { transcripts: tier !== 'superfast', parallel: tier === 'normal', udyam: true, gweb: true, idfy_async: true };\n\n  // #2 result-cache read — a fresh (<24h) hit for THIS buyer pull short-circuits the whole pipeline (cache-gate → respond-cached)\n  var glid = String(q.glid || q.GLID || j.glid || '').trim();\n  var __cached_result = null;\n  try {\n    if (String(q.nocache || '') !== '1' && glid && !q.mode) {\n      var sd = $getWorkflowStaticData('global');\n      var hit = sd.__extcache && sd.__extcache['res:' + glid + ':' + tier];\n      if (hit && hit.payload && (Date.now() - (hit.ts || 0) < 86400000)) __cached_result = hit.payload;\n    }\n  } catch (e) {}\n  var __job_id = glid + '_' + Date.now().toString(36);\n  var __callback_url = String(q.callback_url || q.callbackUrl || '').trim() || null;\n  return [{ json: Object.assign({}, j, { __cached_result: __cached_result, __t0: Date.now(), tier: tier, run: run, query: Object.assign({}, q, { tier: tier }), __job_id: __job_id, __callback_url: __callback_url }) }];"
+      },
+      "id": "e16721fa-7327-471f-8205-2c2192798779",
+      "name": "t0",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        145456,
+        41936
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "path": "buyer-intelligence-enrich",
+        "responseMode": "responseNode",
+        "options": {},
+        "httpMethod": "GET"
+      },
+      "id": "1d7fa348-67e0-4283-b62c-94588d22c4ae",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        145232,
+        41936
+      ],
+      "webhookId": "f1570aab-041e-40dc-a6d7-2606e8922781"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://redash.intermesh.net/api/queries/12322/results",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Key u39CfxKyFrTeXmGYyaXwy0uuNrJ0SsRnrJeuIn4y"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parameters: { GLID: Number($('t0').first().json.query.glid) }, max_age: 0 }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        147504,
+        39824
+      ],
+      "id": "63fa9812-56dc-4752-805c-17e4139b77d4",
+      "name": "calls-trigger",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        147712,
+        39712
+      ],
+      "id": "0d430048-3690-47e4-838e-13fa735a2eaf",
+      "name": "calls-wait-initial",
+      "webhookId": "230c737a-4f8d-45c9-a26e-7cb84002d497"
+    },
+    {
+      "parameters": {
+        "url": "=https://redash.intermesh.net/api/jobs/{{ $('calls-trigger').first().json.job.id }}?api_key=u39CfxKyFrTeXmGYyaXwy0uuNrJ0SsRnrJeuIn4y",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 8000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        147904,
+        39728
+      ],
+      "id": "12cccf28-f72b-4c8c-a32b-f916e057ee3b",
+      "name": "calls-poll",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c75cd182-4a58-4fbc-9b0a-45cee94fafbc",
+              "leftValue": "={{ $json.job.status }}",
+              "rightValue": 3,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        148064,
+        39728
+      ],
+      "id": "5c9a7757-38a9-4e5c-bfee-0134a4696011",
+      "name": "calls-if-done"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cfail1",
+              "leftValue": "={{ $json.job.status }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        148288,
+        39792
+      ],
+      "id": "029f6d53-fbd6-4a62-94e4-5e1cdd6ca615",
+      "name": "calls-if-failed"
+    },
+    {
+      "parameters": {
+        "jsCode": "// INLINE-safe cap (~1 min): NEVER throw (would kill the sync pull) — flag timeout to route to calls-empty.\nif ($runIndex > 6) return [{ json: { __timeout: true } }];\nreturn $input.all();"
+      },
+      "name": "calls-guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        148432,
+        39904
+      ],
+      "id": "3da6988e-5465-42c5-ab4b-f0c1ba653b1d",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cgi1",
+              "leftValue": "={{ $json.__timeout }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        148592,
+        39904
+      ],
+      "id": "a3c5274d-1115-4902-96ea-566a8b73b15b",
+      "name": "calls-guard-if"
+    },
+    {
+      "parameters": {
+        "amount": 4
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        148768,
+        40032
+      ],
+      "id": "8d67c5d9-80e6-49e4-a80b-6c55eb4ae75b",
+      "name": "calls-wait-poll",
+      "webhookId": "b821e241-9a60-40df-9a7f-d25cdeb520d3"
+    },
+    {
+      "parameters": {
+        "url": "=https://redash.intermesh.net/api/query_results/{{ $json.job.query_result_id }}.json?api_key=u39CfxKyFrTeXmGYyaXwy0uuNrJ0SsRnrJeuIn4y",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        148480,
+        39600
+      ],
+      "id": "a4d96077-c297-429d-9767-58e409203b6d",
+      "name": "calls-fetch",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// rows → most-recent N calls {url,date}; emit one item per call, or a single {__none} sentinel\nconst raw = $input.first().json;\nconst txt = String((raw && raw.data != null) ? raw.data : JSON.stringify(raw)).replace(/[\\u0000-\\u001f]/g, ' ');\nlet rows = [];\ntry { rows = (JSON.parse(txt).query_result && JSON.parse(txt).query_result.data.rows) || []; } catch (e) { rows = []; }\nconst calls = rows.map(r => ({ url: r.call_recording_url, date: r.eto_lead_ai_bot_response_insert_date || r.date })).filter(c => c.url);\nreturn calls.length ? calls.map(c => ({ json: c })) : [{ json: { __none: true } }];"
+      },
+      "name": "calls-parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        148704,
+        39600
+      ],
+      "id": "2a485760-4c82-47fa-b131-efab5b425d2b",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cr1",
+              "leftValue": "={{ !!$json.url }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        148928,
+        39600
+      ],
+      "id": "4c83440d-4c29-44f2-83a0-ddd2b5331537",
+      "name": "calls-route-if"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "name": "calls-fetch-audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        149152,
+        39552
+      ],
+      "id": "d157fba9-b75b-4989-b1ba-20947e6a8eec",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://imllm.intermesh.net/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-Jeftmk4N_Ns7ZBXyl0oJGA"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "name": "calls-transcribe",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        150000,
+        39456
+      ],
+      "id": "50941e9e-cd38-42ff-a118-3e50fe2774d5",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1500,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const __all = (n) => { try { return $(n).all().map(i => i.json || {}); } catch (e) { return []; } };\n// [CEO] Joins each transcribed call back to its metadata. v44: rows WITHOUT audio never reached the\n// transcription model (skipped upstream) — they are re-slotted here as honest 'no_audio', so counts stay\n// truthful and no extraction is ever fabricated from silence. Alignment: the k-th real LLM output maps to\n// the k-th audio-bearing source row (same order both sides), replacing the old fragile 1:1 positional join.\nconst src = __all('calls-parse').filter(j => j && j.url);\nconst b64All = __all('calls-audio-b64');\nconst withAudio = []; b64All.forEach((b, i) => { if (b.has_audio) withAudio.push(i); });\nconst real = $input.all().filter(it => !(it.json && it.json.__skipped_no_audio));\nconst byIdx = {}; real.forEach((it, k) => { if (k < withAudio.length) byIdx[withAudio[k]] = it; });\nconst perCall = src.map((meta, i) => {\n  const b = b64All[i] || {};\n  if (!b.has_audio) return { date: meta.date, url: meta.url, extraction: null, status: 'no_audio' };\n  const it = byIdx[i] || {}; const j = it.json || {}; let ex = {};\n  try { const c = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content; ex = typeof c === 'string' ? JSON.parse(c) : (c && typeof c === 'object' ? c : {}); } catch (e) {}\n  const err = it.error || j.error || null;\n  const hasData = !!(ex && ((Array.isArray(ex.products) && ex.products.length > 0) || ex.metadata || ex.lead_tag));\n  return { date: meta.date, url: meta.url, extraction: hasData ? ex : null, status: hasData ? 'extracted' : (err ? 'error' : 'no_data') };\n});\nconst ok = perCall.filter(c => c.status === 'extracted');\nconst noAudio = perCall.filter(c => c.status === 'no_audio').length;\nreturn [{ json: { summary: { redash_records: src.length, call_count: ok.length, failed_count: src.length - ok.length, no_audio_count: noAudio, brief: src.length ? (ok.length + ' of ' + src.length + ' call(s) extracted (Go-schema)' + (noAudio ? ' · ' + noAudio + ' had no recording media (skipped, not failed)' : '')) : 'no call records from Redash', calls: ok, statuses: perCall.map(c => ({ url: c.url, date: c.date, status: c.status })) }, raw: { rows: src } } }];"
+      },
+      "name": "calls-assemble",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150496,
+        39552
+      ],
+      "id": "a31d633e-1f37-4771-b1d5-f394909f6bdd",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { summary: { call_count: 0, calls: [] }, raw: null } }];"
+      },
+      "name": "calls-empty",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150496,
+        40672
+      ],
+      "id": "91856cbc-11ac-4dd9-b16a-e60a9da7cb18",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n does NOT expose binary base64 via $binary.data.data in HTTP-node expressions — read it here.\nconst items = $input.all();\nconst out = [];\nfor (let i = 0; i < items.length; i++) {\n  let b64 = '';\n  const bin = (items[i].binary && items[i].binary.data) || {};\n  try { const buf = await this.helpers.getBinaryDataBuffer(i, 'data'); b64 = buf.toString('base64'); } catch (e) {}\n  if (!b64 && typeof bin.data === 'string' && bin.data.length > 100 && /^[A-Za-z0-9+/=]+$/.test(bin.data.slice(0,120))) b64 = bin.data;\n  const fmt = String(bin.mimeType || '').toLowerCase().includes('wav') ? 'wav' : 'mp3';\n  out.push({ json: { audio_b64: b64, audio_format: fmt, has_audio: !!b64, bytes: b64 ? Math.round(b64.length * 0.75) : 0 } });\n}\nreturn out;\n// v44 no_audio_skip: rows without audio are flagged so the LLM step is bypassed for them (assemble marks them no_audio)."
+      },
+      "name": "calls-audio-b64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        149328,
+        39552
+      ],
+      "id": "45bfc69d-22f9-4672-a6ee-ad5ad592089d",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://redash.intermesh.net/api/queries/12475/results",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Key u39CfxKyFrTeXmGYyaXwy0uuNrJ0SsRnrJeuIn4y"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parameters: { \"Caller id\": String($('t0').first().json.query.glid) }, max_age: 0 }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        148720,
+        40368
+      ],
+      "id": "957ba45b-8e34-4291-b5b8-2653cba7d976",
+      "name": "pns-trigger",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        148864,
+        40368
+      ],
+      "id": "43c34d9a-e9bd-40ec-a738-bb082785f875",
+      "name": "pns-wait-initial",
+      "webhookId": "230c737a-4f8d-45c9-a26e-7cb84002d497"
+    },
+    {
+      "parameters": {
+        "url": "=https://redash.intermesh.net/api/jobs/{{ $('pns-trigger').first().json.job.id }}?api_key=u39CfxKyFrTeXmGYyaXwy0uuNrJ0SsRnrJeuIn4y",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 8000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        149024,
+        40368
+      ],
+      "id": "680bb061-1b48-478b-9ba4-1fdc50078d25",
+      "name": "pns-poll",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c75cd182-4a58-4fbc-9b0a-45cee94fafbc",
+              "leftValue": "={{ $json.job.status }}",
+              "rightValue": 3,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        149184,
+        40336
+      ],
+      "id": "6e22f750-7250-440f-8eb9-f49bd8923c08",
+      "name": "pns-if-done"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cfail1",
+              "leftValue": "={{ $json.job.status }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        149488,
+        40432
+      ],
+      "id": "b5b57727-9740-46f7-8ce2-d641518214da",
+      "name": "pns-if-failed"
+    },
+    {
+      "parameters": {
+        "jsCode": "// INLINE-safe cap (~1 min): NEVER throw (would kill the sync pull) — flag timeout to route to calls-empty.\nif ($runIndex > 6) return [{ json: { __timeout: true } }];\nreturn $input.all();"
+      },
+      "name": "pns-guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        149712,
+        40432
+      ],
+      "id": "241a9e31-0e7e-477f-b441-38bde7a48bb4",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cgi1",
+              "leftValue": "={{ $json.__timeout }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        149904,
+        40352
+      ],
+      "id": "ef954f3b-8a81-4616-a06a-2f1b79e7256b",
+      "name": "pns-guard-if"
+    },
+    {
+      "parameters": {
+        "amount": 4
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        150112,
+        40416
+      ],
+      "id": "00a5bfec-223b-47dd-9720-448349b58449",
+      "name": "pns-wait-poll",
+      "webhookId": "b821e241-9a60-40df-9a7f-d25cdeb520d3"
+    },
+    {
+      "parameters": {
+        "url": "=https://redash.intermesh.net/api/query_results/{{ $json.job.query_result_id }}.json?api_key=u39CfxKyFrTeXmGYyaXwy0uuNrJ0SsRnrJeuIn4y",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        149424,
+        40176
+      ],
+      "id": "9d11132a-c1b8-4235-895d-41b973bd9dc1",
+      "name": "pns-fetch",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// PNS rows → per call {uc_id, offer_id, modref, mcat, subcat, circle, seller_id, date}. uc_id gates (SQL already filters valid calls). __none sentinel if empty.\nconst raw = $input.first().json;\nconst txt = String((raw && raw.data != null) ? raw.data : JSON.stringify(raw)).replace(/[\\u0000-\\u001f]/g, ' ');\nlet rows = [];\ntry { rows = (JSON.parse(txt).query_result && JSON.parse(txt).query_result.data.rows) || []; } catch (e) { rows = []; }\nconst clean = v => (v == null ? '' : String(v).replace(/\\.0$/, ''));\nconst calls = rows.map(r => ({ uc_id: clean(r.pns_call_vendor_uniqueid), offer_id: clean(r.fk_eto_ofr_display_id), modref: r.pns_call_modrefname || '', mcat: r.pns_call_ref_prime_mcat || '', subcat: r.pns_call_ref_prime_subcat || '', circle: r.pns_call_caller_circle || '', seller_id: clean(r.pns_call_receiver_glusr_id), date: r.pns_call_record_date || '' })).filter(c => c.uc_id);\nreturn calls.length ? calls.map(c => ({ json: c })) : [{ json: { __none: true } }];"
+      },
+      "name": "pns-parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        149600,
+        40032
+      ],
+      "id": "a918f9f8-aa09-440f-ae0d-5eb8c6852ac6",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cr1",
+              "leftValue": "={{ !!$json.uc_id }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        149872,
+        39984
+      ],
+      "id": "590b6ff2-53af-41c3-a68b-397a669acdbe",
+      "name": "pns-route-if"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.signed_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "name": "pns-fetch-audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        150624,
+        39904
+      ],
+      "id": "b3edd184-5f9d-4642-a0c8-af831d63a426",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n does NOT expose binary base64 via $binary.data.data in HTTP-node expressions — read it here.\n// v14.1: carry attribution (uc_id/offer_id) + b64_len + fetched MIME for ground-truth instrumentation;\n// guard the fallback so a filesystem-mode store reference (binaryMode:\"separate\") can never leak as audio.\nconst items = $input.all();\nconst parse = $('pns-parse').all().map(x => x.json).filter(j => j && j.uc_id);\nconst out = [];\nfor (let i = 0; i < items.length; i++) {\n  let b64 = '';\n  const bin = (items[i].binary && items[i].binary.data) || {};\n  try { const buf = await this.helpers.getBinaryDataBuffer(i, 'data'); b64 = buf.toString('base64'); } catch (e) {}\n  // only accept an inline fallback that is plausibly real base64 (memory mode); reject store refs like \"filesystem-v2\".\n  if (!b64 && typeof bin.data === 'string' && bin.data.length > 100 && /^[A-Za-z0-9+/=\\r\\n]+$/.test(bin.data)) b64 = bin.data;\n  const mime = String(bin.mimeType || '').toLowerCase();\n  const fmt = mime.includes('wav') ? 'wav' : 'mp3';\n  const meta = parse[i] || {};\n  out.push({ json: {\n    audio_b64: b64,\n    audio_format: fmt,\n    has_audio: !!b64,\n    b64_len: b64.length,\n    bytes: b64 ? Math.round(b64.length * 0.75) : 0,\n    mime: mime || null,\n    uc_id: meta.uc_id, offer_id: meta.offer_id\n  } });\n}\nreturn out;\n// v44 no_audio_skip: rows without audio are flagged so the LLM step is bypassed for them (assemble marks them no_audio)."
+      },
+      "name": "pns-audio-b64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150848,
+        39904
+      ],
+      "id": "63dccf4f-886c-411e-9bbd-6eb75b9634d6",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://imllm.intermesh.net/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-Jeftmk4N_Ns7ZBXyl0oJGA"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "name": "pns-transcribe",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        151520,
+        39792
+      ],
+      "id": "018b62d3-8316-492a-bb55-33530d85c64e",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1500,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const __all = (n) => { try { return $(n).all().map(i => i.json || {}); } catch (e) { return []; } };\n// [CEO] Joins each transcribed PNS call back to its metadata (uc_id, offer_id, date). v44: rows WITHOUT\n// audio never reached the transcription model (skipped upstream) — re-slotted here as honest 'no_audio' with\n// their byte counts, so the health line reads \"skipped: no recording\" instead of a fake 400 failure, and no\n// extraction is ever fabricated from silence. Alignment: k-th real LLM output -> k-th audio-bearing row.\nconst src = __all('pns-parse').filter(j => j && j.uc_id);\nconst b64All = __all('pns-audio-b64');\nconst withAudio = []; b64All.forEach((b, i) => { if (b.has_audio) withAudio.push(i); });\nconst real = $input.all().filter(it => !(it.json && it.json.__skipped_no_audio));\nconst byIdx = {}; real.forEach((it, k) => { if (k < withAudio.length) byIdx[withAudio[k]] = it; });\nconst perCall = src.map((meta, i) => {\n  const b64Item = b64All[i] || {};\n  const base = { date: meta.date, uc_id: meta.uc_id, offer_id: meta.offer_id, product: meta.modref, mcat: meta.mcat, subcat: meta.subcat, circle: meta.circle, seller_id: meta.seller_id, audio_bytes: b64Item.bytes != null ? b64Item.bytes : null, b64_len: b64Item.b64_len != null ? b64Item.b64_len : null, mime: b64Item.mime || null };\n  if (!b64Item.has_audio) return Object.assign(base, { extraction: null, status: 'no_audio', http_status: null, error_msg: null });\n  const it = byIdx[i] || {}; const j = it.json || {}; let ex = {};\n  try { const c = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content; ex = typeof c === 'string' ? JSON.parse(c) : (c && typeof c === 'object' ? c : {}); } catch (e) {}\n  const err = it.error || j.error || null;\n  const http_status = err ? (err.httpCode || err.statusCode || (err.context && err.context.httpCode) || 'error') : 200;\n  const error_msg = err ? String((err.context && (err.context.data || err.context.body)) || err.description || err.message || JSON.stringify(err)).slice(0, 800) : null;\n  const hasData = !!(ex && ((Array.isArray(ex.products) && ex.products.length > 0) || ex.metadata || ex.lead_tag));\n  return Object.assign(base, { extraction: hasData ? ex : null, status: hasData ? 'extracted' : ((http_status && http_status !== 200) ? 'http_error' : 'no_data'), http_status: http_status, error_msg: error_msg });\n});\nconst okCount = perCall.filter(c => c.status === 'extracted').length;\nconst noAudio = perCall.filter(c => c.status === 'no_audio').length;\nreturn [{ json: { summary: { redash_records: src.length, call_count: okCount, failed_count: src.length - okCount, no_audio_count: noAudio, brief: src.length ? (okCount + ' of ' + src.length + ' PNS call(s) extracted (Go-schema)' + (noAudio ? ' · ' + noAudio + ' had no recording media (skipped, not failed)' : '')) : 'no PNS calls', calls: perCall, statuses: perCall.map(c => ({ uc_id: c.uc_id, date: c.date, product: c.product, offer_id: c.offer_id, status: c.status, bytes: c.audio_bytes, mime: c.mime, http: c.http_status, err: c.error_msg })) }, raw: { rows: src } } }];"
+      },
+      "name": "pns-assemble",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        151920,
+        39936
+      ],
+      "id": "705006c6-1e08-4ca0-9d8b-c90d4f57f532",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { summary: { call_count: 0, calls: [] }, raw: null } }];"
+      },
+      "name": "pns-empty",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150160,
+        40192
+      ],
+      "id": "546b1fd2-760b-4654-8c5b-6b5b8175d745",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=http://audio.imutils.com/media/signedurl?uc_id={{ encodeURIComponent($json.uc_id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "TeamName",
+              "value": "MY"
+            },
+            {
+              "name": "BearerToken",
+              "value": "1189d6d2fc21e904e7020b5011e876ad477891f7b0a80ba0e282b2472d7a13fc"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "name": "pns-sign-url",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        150176,
+        39904
+      ],
+      "id": "952ab2d9-8329-49c2-b458-bfb98ccd7970",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// extract Data.signed_url from imutils (uc_id path → GCS). No S3 fallback for PNS.\nreturn $input.all().map((it) => {\n  let body = (it.json && it.json.data != null) ? it.json.data : it.json;\n  if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} }\n  let signed = '';\n  if (body && typeof body === 'object') { signed = (body.Data && (body.Data.signed_url || body.Data.im_url)) || body.signed_url || body.signedUrl || body.url || ''; }\n  else if (typeof body === 'string') { signed = String(body).trim(); }\n  return { json: { signed_url: signed } };\n});"
+      },
+      "name": "pns-sign-parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150400,
+        39904
+      ],
+      "id": "50a973cb-f058-4bd6-b219-0e92f788d4f2",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// [CEO] no-audio skip (v44): when a call row carries NO recording media we do NOT call the transcription model — the row is marked \"no_audio\" honestly (no wasted call, no invented transcript). Transcription model stays google/gemini-2.5-flash — the litellm key is authorized ONLY for google/gemini-2.5-flash[-lite]; a bare \"gemini-2.5-flash\" 401s.\nconst SYSTEM=\"You are an expert product extractor with deep knowledge of the Indian B2B market, product specifications, manufacturing standards, and category knowledge.\\n\\nYour goal is to carefully understand a buyer-seller call of this category and extract all product information **exactly as discussed**, without guessing values.\\n\\n||Buyer Seller Identification||\\nIdentify the speaker based on intent, and maintain the role consistently throughout the call. Use the following cues as strong indicators for identifying the speaker, while also applying your own reasoning and conversational understanding.\\n**SELLER**: Describes products, features, specifications, quality; Quotes price, GST, MOQ (minimum order quantity), delivery timelines, payment terms; Confirms availability, dispatch, warranty, service; Uses business tone (\\\"We supply\\\", \\\"Yes sir\\\", \\\"We manufacture\\\"); Mentions company, factory, brand, business location; Shares or requests contact details to proceed.\\n**BUYER**: States requirement (\\\"I need\\\", \\\"Looking for\\\"); Asks about price, specs, availability, delivery; Requests quotation, catalogue, photos, samples; Mentions quantity, budget, urgency, intended use; Uses inquiry-driven, first-person language.\\n\\n||Output Schema Instructions|| Follow these instructions precisely:\\n0. **NO-CONTENT EARLY EXIT (evaluate this FIRST, before anything else)**: If the recording contains no procurement conversation at all — wrong number, silence, ringing only, immediately disconnected, IVR / voicemail / auto-attendant, unanswered, or nothing beyond pure pleasantries — then STOP and return ONLY:\\n   {\\\"no_content\\\": true, \\\"no_content_reason\\\": \\\"<3-8 words, e.g. wrong number / no speech / disconnected after 6s>\\\", \\\"metadata\\\": {\\\"call_purpose\\\": \\\"irrelevant\\\"}}\\n   In that case you MUST NOT emit products, lead_tag, deal_readiness, next_steps, buyer_intent, intent_level, call_outcome, call_type, buyer_details or seller_details. They are all OPTIONAL and must be ABSENT when there is no evidence for them. Inventing a deal outcome, a lead temperature, an intent level or a next step for a call with no procurement content is a FABRICATION and is the single worst error you can make — it is worse than returning an almost-empty object. An empty answer is always available to you and is always the correct answer when the call is empty. For a normal procurement call, set \\\"no_content\\\": false and continue with the rules below.\\n1. **Products**: Extract all distinct products and their specifications talked about. If the seller mentions multiple variations (same product with different features/capacities), create separate products for each. Use the seller's product name as primary; if the buyer used a different term, include it in brackets.\\n2. **Specifications**: Extract all product-related specs actually mentioned. Infer the specification NAME if evident from its value (e.g. Brand). Do NOT infer specification VALUES. Split compound values (e.g. \\\"3.5 Core 400 sq mm\\\" -> Number of Cores: 3.5, Wire Size: 400 sq mm). Each product must have exactly one value per spec name. If a spec has multiple values with the same unit, make separate products (all combinations). Do not include quantity/price terms.\\n3. **Language**: Detect all languages used and list them.\\n4. **Call Type Classification**: Extract supporting evidence — Buyer Persona (shopkeeper/end customer/builder/wholesaler/distributor/manufacturer), Quantity Scale (high=bulk/industrial, low=retail/small), Order Type (sample/bulk/one-time/recurring/trial/commercial), Repeat Buyer (true if recurring implied), Keywords (\\\"export quality\\\", \\\"commercial project\\\", \\\"factory use\\\", \\\"retail shop\\\"). Provide detailed reasoning; classify B2B or B2C. B2C = retail/home/personal/very small qty. B2B = bulk/industrial/company/factory/export/distributor, own retail shop reselling/stocking, factory need, recurring/future orders.\\n5. **Price**: Extract exactly what is mentioned. Capture GST under price.gst and delivery under price.delivery_charge. Use offer_details for other price details (total cost, discounts). All rupee amounts must be fully expanded per point 12 (lakh / crore / hazaar).\\n6. **Quantity Required**: Extract the actual quantity per buyer requirement with unit, only if explicitly stated by the buyer.\\n7. **MOQ**: Extract minimum_order_quantity (value+unit) only if explicitly stated by the seller.\\n8. **Units/formatting**: Extract units and values exactly as discussed, EXCEPT Indian magnitude words (lakh/crore/hazaar), which must be expanded into plain numbers per point 12.\\n9. **NO HALLUCINATION**: Only extract EXACTLY what is EXPLICITLY mentioned by the given SPEAKER. OMIT any field if unclear or not stated (do NOT fill null/empty). Output must be ENGLISH only. DO NOT GUESS, ASSUME, FABRICATE OR HALLUCINATE. This rule OVERRIDES completeness: an absent field is ALWAYS correct when the evidence is absent. Only \\\"metadata\\\" (carrying \\\"call_purpose\\\") is mandatory; every other top-level object — buyer_details, seller_details, products, lead_tag, next_steps, payment, callback — is OPTIONAL and must be omitted entirely rather than guessed. Never emit a placeholder, \\\"N/A\\\", \\\"unknown\\\", \\\"NA\\\", 0, or an arbitrarily-picked enum value just to satisfy the schema.\\n10. **Strict Length Limits**: Respect every field's maxLength; summarize/truncate to fit; prioritize the most important info.\\n11. **Transactional Signals — WRITE THE EVIDENCE BEFORE THE LABEL**: For every judgement, produce the reason/evidence field FIRST and only then pick the label it supports; never pick a label and then rationalise it. Call Outcome (conclusion_notes with transliterated evidence FIRST, THEN category Committed/Pending/Follow-up/Lost); Deal Readiness (deal_readiness_reason FIRST, THEN deal_readiness Cold/Warm/Hot); Buyer Intent (narrative + reasoning FIRST, THEN intent_level Low/Medium/High); Price Reaction (short transliterated quote FIRST, THEN category Too High/Negotiating/Accepted, omit if price not discussed); Negotiation Notes (discount/freight/price-gap, omit if none); Quantity Acceptance (false ONLY if seller explicitly rejects; continued discussion implies acceptance; omit if qty not discussed); Callback (only an explicit phone-call commitment at a specific time/day; NOT WhatsApp/catalog/images/\\\"soon\\\"); Queries (specific unresolved questions per party, single global sequence, omit pleasantries, translate to English).\\n12. **INDIAN NUMBER UNITS — lakh / crore / hazaar (MANDATORY EXPANSION)**: Indian buyers and sellers state amounts in Indian units. EVERY numeric field — price.value, price.delivery_charge.value, quantity_required.value, minimum_order_quantity.value — MUST carry the FULLY EXPANDED plain number, never the spoken shorthand.\\n   Conversions: 1 hazaar / hazar / hajaar / hazarā / thousand = 1,000; 1 lakh / lac / lakhs = 100,000; 1 crore / cr / karod = 10,000,000; 1 arab = 1,000,000,000.\\n   Examples: \\\"do lakh\\\" -> 200000; \\\"2.5 lakh\\\" -> 250000; \\\"dhai lakh\\\" -> 250000; \\\"sawa lakh\\\" -> 125000; \\\"paune do lakh\\\" -> 175000; \\\"dedh lakh\\\" -> 150000; \\\"ek crore\\\" -> 10000000; \\\"1.2 crore\\\" -> 12000000; \\\"50 hazaar\\\" -> 50000; \\\"pachas hazaar\\\" -> 50000; \\\"das hazaar\\\" -> 10000.\\n   Writing 2.5 when the speaker said \\\"2.5 lakh\\\" is a 100,000x error — ALWAYS expand before you write the number. Bare Hindi numerals also apply to plain counts (do=2, dhai=2.5, teen=3, char=4, paanch=5, das=10, bees=20, pachas=50, sau=100).\\n   EXCEPTION: price.gst.value is a PERCENTAGE (5, 12, 18, 28) — never expand it.\\n   Preserve the spoken phrase verbatim ONLY in a text field that already exists for it (price.buyer_price_reaction.quote, price.negotiation_notes, price.offer_details, price.gst.details, price.delivery_charge.details, metadata.call_outcome.conclusion_notes). Never invent a new field to hold it.\";\nconst GLOSSARY_RPS1=\"# GLOSSARY (im-glossary-v1) — the IndiaMART terms used below, each defined before first use\\nGLID = the buyer's IndiaMART account id.\\nMCAT = an IndiaMART product category.\\nISQ = the structured spec questions answered on a BuyLead.\\nBuyLead / RFQ = a posted buying requirement.\\nKYB = Know-Your-Business — GST / PAN / Udyam registry verification.\\nGSTIN = the GST tax-registration number; PAN = the permanent tax-identity number.\\nSAC / HSN = the official product / service classification codes listed on a GST registration.\\nNIC = the official industry code listed on a Udyam registration.\\nUdyam = the MSME (small-business) registration; it carries the business SIZE band and its NIC industry code.\\nCSL = the buyer's on-site supplier-profile browsing log.\\nPNS = the masked phone calls the buyer made to sellers — spoken intent, the highest-authority signal.\\nMOQ = minimum order quantity, the smallest order a seller will accept.\\ntelecom-circle = the SIM's registered state — a WEAK location hint only.\\nBUYER turns = things the buyer themselves said or typed; OUR-outbound = our own campaign / enquiry-update messages, which are NEVER buyer evidence.\\nGST = India's goods-and-services tax. A \\\"GST percentage\\\" is a rate (5, 12, 18, 28); a \\\"GST amount\\\" is rupees. They are different numbers and the schema keeps them apart.\\nhazaar / lakh / crore = Indian magnitude words for 1,000 / 100,000 / 10,000,000. Rule 12 below governs them.\";\nconst NORMAL_EXAMPLE_RPS1=\"# WORKED EXAMPLE — one complete, filled extraction of a NORMAL procurement call\\nRule 0 above shows you what an EMPTY call looks like. This shows you what a real one looks like. Both matter; do not let the empty skeleton become your default shape.\\nCall (Hinglish, 3 minutes): a buyer in Ghaziabad asks a Delhi seller for corrugated boxes. He says \\\"mujhe paanch hazaar dabbe chahiye, ek kg ke laddu ke liye, paanch ply\\\". The seller quotes \\\"bees rupaye per piece, GST alag, athara percent\\\" and says \\\"MOQ do hazaar piece hai\\\". The buyer says \\\"bees thoda zyada hai, atharah kar do\\\" and the seller says he will confirm by evening. The buyer asks whether they can print his shop name; the seller says yes, at two rupees more. The buyer asks for delivery in ten days; the seller says he can do it. They agree the seller will WhatsApp a rate list and call back tomorrow at 11 am.\\n{\\\"no_content\\\":false,\\\"buyer_details\\\":{\\\"buyer_location\\\":{\\\"buyer_city\\\":\\\"Ghaziabad\\\"}},\\\"seller_details\\\":{\\\"seller_location\\\":{\\\"seller_city\\\":\\\"Delhi\\\"}},\\\"products\\\":[{\\\"product_name\\\":\\\"Corrugated Box (dabba)\\\",\\\"in_stock\\\":\\\"in stock\\\",\\\"is_buyer_interested\\\":true,\\\"price\\\":{\\\"value\\\":20,\\\"currency\\\":\\\"INR\\\",\\\"price_unit\\\":\\\"piece\\\",\\\"buyer_price_reaction\\\":{\\\"quote\\\":\\\"bees thoda zyada hai, atharah kar do\\\",\\\"category\\\":\\\"Negotiating\\\"},\\\"negotiation_notes\\\":\\\"Asked to come down from 20 to 18 per piece; printing quoted at 2 extra\\\",\\\"gst\\\":{\\\"is_gst_included\\\":false,\\\"value\\\":18},\\\"offer_details\\\":\\\"Printing available at Rs 2 extra per piece\\\"},\\\"quantity_required\\\":{\\\"value\\\":5000,\\\"unit\\\":\\\"pieces\\\"},\\\"minimum_order_quantity\\\":{\\\"value\\\":2000,\\\"unit\\\":\\\"pieces\\\"},\\\"seller_accepts_quantity\\\":true,\\\"specifications\\\":[{\\\"name\\\":\\\"Ply\\\",\\\"value\\\":\\\"5 Ply\\\",\\\"buyer_requested\\\":true,\\\"seller_mentioned\\\":false},{\\\"name\\\":\\\"Content Weight\\\",\\\"value\\\":\\\"1\\\",\\\"unit\\\":\\\"kg\\\",\\\"buyer_requested\\\":true,\\\"seller_mentioned\\\":false},{\\\"name\\\":\\\"Printing\\\",\\\"value\\\":\\\"Shop name\\\",\\\"buyer_requested\\\":true,\\\"seller_mentioned\\\":true}]}],\\\"lead_tag\\\":{\\\"deal_readiness_reason\\\":\\\"Stated a firm quantity, negotiated a specific rate and fixed a callback for the next morning, with delivery needed in ten days.\\\",\\\"deal_readiness\\\":\\\"Hot\\\",\\\"deal_blockers\\\":[{\\\"category\\\":\\\"Price\\\",\\\"detail\\\":\\\"Wants 18 against a quoted 20 per piece\\\"}]},\\\"callback\\\":\\\"callback by 11:00 AM IST tomorrow - to confirm the revised rate\\\",\\\"next_steps\\\":{\\\"buyer_next_steps\\\":[\\\"To confirm the printing requirement once the revised rate is received\\\"],\\\"seller_next_steps\\\":[\\\"To confirm whether 18 per piece is workable by this evening\\\",\\\"To send the rate list on WhatsApp\\\"]},\\\"metadata\\\":{\\\"call_purpose\\\":\\\"requirement\\\",\\\"primary_language\\\":\\\"Hindi\\\",\\\"all_languages\\\":[\\\"Hindi\\\",\\\"English\\\"],\\\"buyer_intent\\\":{\\\"narrative\\\":\\\"Needs 5000 five-ply corrugated boxes to pack 1 kg laddu boxes, with his shop name printed, delivered in ten days.\\\",\\\"reasoning\\\":\\\"He gave a firm quantity, a ply, the contents and a delivery window unprompted, and negotiated on rate rather than asking what boxes cost in general.\\\",\\\"intent_level\\\":\\\"High\\\"},\\\"intended_application\\\":\\\"Sweet Packaging\\\",\\\"call_outcome\\\":{\\\"conclusion_notes\\\":\\\"Rate not settled; seller to confirm a revised price by evening and call back next morning (\\\\\\\"atharah kar do\\\\\\\" / \\\\\\\"shaam tak bata dunga\\\\\\\")\\\",\\\"category\\\":\\\"Follow-up\\\"},\\\"call_type\\\":{\\\"evidence\\\":{\\\"buyer_persona\\\":{\\\"persona_category\\\":\\\"retailer\\\",\\\"persona_detail\\\":\\\"Sweet shop owner\\\"},\\\"quantity_scale\\\":\\\"High\\\",\\\"order_type\\\":{\\\"order_type_category\\\":\\\"bulk\\\"},\\\"repeat_buyer\\\":false,\\\"keywords\\\":[\\\"shop name printing\\\",\\\"bulk packaging\\\"]},\\\"reason\\\":\\\"Commercial quantity of packaging for his own retail product, negotiated per-piece against an MOQ, with branded printing — a business purchase, not a household one.\\\",\\\"type\\\":\\\"B2B\\\"},\\\"additional_details\\\":{\\\"buyer_queries\\\":[{\\\"query\\\":\\\"Can the boxes be printed with my shop name?\\\",\\\"sequence\\\":1,\\\"category\\\":\\\"Specifications\\\"},{\\\"query\\\":\\\"Can you deliver in ten days?\\\",\\\"sequence\\\":2,\\\"category\\\":\\\"Delivery\\\"}],\\\"seller_queries\\\":[{\\\"query\\\":\\\"What weight of sweets will go in each box?\\\",\\\"sequence\\\":3,\\\"category\\\":\\\"Specifications\\\"}]}}}\\nWhat that example demonstrates, point by point:\\n- \\\"paanch hazaar\\\" became 5000 and \\\"do hazaar\\\" became 2000 — rule 12 applied, never written as 5 and 2.\\n- \\\"athara percent\\\" became gst.value 18, a PERCENTAGE, and was NOT expanded — the rule 12 carve-out.\\n- \\\"bees rupaye\\\" became price.value 20, and the buyer's counter of 18 is in negotiation_notes, NOT in price.value. The stated price is the seller's; the counter is a reaction.\\n- Every judgement wrote its EVIDENCE FIRST: deal_readiness_reason before deal_readiness, narrative and reasoning before intent_level, conclusion_notes before category, quote before the price-reaction category. Read them in that order and each label follows from the sentence above it.\\n- The verbatim Hinglish is preserved ONLY in fields that already exist for it — buyer_price_reaction.quote, negotiation_notes, conclusion_notes. No new field was invented to hold it.\\n- buyer_details carries ONLY the city, because that is all the call actually stated. His name and number are absent, not guessed from the reference details.\\n- The callback is present because a specific time was committed to. The WhatsApp rate list is in seller_next_steps and NOT in callback — WhatsApp is not a phone-call commitment.\\n- specifications splits the compound \\\"1 kg laddu ke liye, paanch ply\\\" into separate named specs, and marks who raised each one.\\n- Nothing is filled with \\\"N/A\\\", \\\"unknown\\\" or 0. Every field the call did not cover is simply absent.\";\n// RPS-1 (2026-07-28): glossary first so every IndiaMART term is defined before its first use, the original\n// SYSTEM verbatim in the middle (not one rule reworded), and one complete filled NORMAL extraction last.\nconst SYSTEM_RPS1=GLOSSARY_RPS1+\"\\n\\n\"+SYSTEM+\"\\n\\n\"+NORMAL_EXAMPLE_RPS1;\nconst PROMPT_HEAD=\"A buyer connected with a seller via IndiaMART regarding a product requirement.\";\nconst PROMPT_TAIL=\"Important: Use these details only to understand the conversation better. DO NOT use them to fill missing fields if the call does not explicitly confirm them.\";\nconst PROMPT_NOREF=\"No reference details are available for this call. Rely ONLY on what is actually said in the audio; do not infer any name, city or phone number from anything else.\";\nconst ANCHOR_FIELDS=[[\"buyer_name\",\"Buyer name\"],[\"buyer_city\",\"Buyer City\"],[\"buyer_mobile\",\"Buyer Mobile number\"],[\"seller_name\",\"Seller name\"],[\"seller_city\",\"Seller City\"]];\n// v9 fix-3: build the reference block from real values only. A missing value drops its WHOLE line (no dangling \"Buyer name:\" labels). If nothing is known, say so instead of printing five empty labels.\nfunction buildUserText(anchors){\n  const a=(anchors&&typeof anchors===\"object\")?anchors:{};\n  const lines=[];\n  for(const [k,label] of ANCHOR_FIELDS){\n    const raw=a[k];\n    const v=(raw===null||raw===undefined)?\"\":String(raw).trim();\n    if(v&&v!==\"null\"&&v!==\"undefined\") lines.push(label+\": \"+v);\n  }\n  if(!lines.length) return PROMPT_HEAD+\"\\n\\n<reference_details>\\n(none)\\n</reference_details>\\n\\n\"+PROMPT_NOREF;\n  return PROMPT_HEAD+\"\\n\\nThe block below is OUR OWN reference data, not part of the call. It is for clarity only — never a fallback and never a fail-safe.\\n\\n<reference_details>\\n\"+lines.join(\"\\n\")+\"\\n</reference_details>\\n\\n\"+PROMPT_TAIL;\n}\nconst SCHEMA={\"type\":\"object\",\"description\":\"Root schema for call extraction result\",\"additionalProperties\":false,\"required\":[\"metadata\"],\"properties\":{\"no_content\":{\"type\":\"boolean\",\"description\":\"Decide this FIRST. TRUE when the recording carries no procurement content at all (wrong number, silence/ringing only, disconnected, IVR/voicemail, pure pleasantries). When true, emit ONLY no_content, no_content_reason and metadata.call_purpose='irrelevant' — every other object MUST be absent. Set false for a normal procurement call.\"},\"no_content_reason\":{\"type\":\"string\",\"maxLength\":80,\"description\":\"Short factual reason when no_content is true (e.g. 'wrong number', 'no speech in recording', 'disconnected after 6s'). Omit when no_content is false.\"},\"buyer_details\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"buyer_name\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Buyer's name (no company names). Omit if unclear.\"},\"buyer_mobile_number\":{\"type\":\"number\",\"description\":\"Buyer's phone number. Omit if unclear.\"},\"buyer_location\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Buyer's location.\",\"properties\":{\"buyer_city\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Buyer city. Omit if unclear.\"},\"buyer_state\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Buyer state. Omit if unclear.\"},\"buyer_locality\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Buyer locality/area/PIN. Omit if unclear.\"}}}},\"description\":\"Buyer identity as stated in the call. Omit this entire object if nothing about the buyer is stated.\"},\"seller_details\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"seller_name\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Seller's name (no company names). Omit if unclear.\"},\"seller_mobile_number\":{\"type\":\"number\",\"description\":\"Seller's phone number. Omit if unclear.\"},\"seller_location\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Seller's location.\",\"properties\":{\"seller_city\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Seller city. Omit if unclear.\"},\"seller_state\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Seller state. Omit if unclear.\"},\"seller_locality\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Seller locality/area/PIN. Omit if unclear.\"}}}},\"description\":\"Seller identity as stated in the call. Omit this entire object if nothing about the seller is stated.\"},\"products\":{\"type\":\"array\",\"description\":\"Products discussed (one per distinct variation). Omit this entire array if no product was discussed.\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"product_name\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Product name in the seller's wording; append the buyer's term in brackets if different. Omit if unclear.\"},\"in_stock\":{\"type\":\"string\",\"enum\":[\"in stock\",\"out of stock\",\"not sold\"],\"description\":\"Availability as clearly implied. Omit if unclear.\"},\"is_buyer_interested\":{\"type\":\"boolean\",\"description\":\"True if clear buyer interest/purchase intent for this product.\"},\"price\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Structured price for this product\",\"properties\":{\"value\":{\"type\":\"number\",\"description\":\"Numeric price stated by the seller, FULLY EXPANDED to plain rupees (\\\"do lakh\\\" -> 200000, \\\"2.5 lakh\\\" -> 250000, \\\"ek crore\\\" -> 10000000, \\\"50 hazaar\\\" -> 50000). Lower bound if a range. Omit if non-numeric/zero/negative/unclear.\"},\"currency\":{\"type\":\"string\",\"enum\":[\"INR\",\"USD\",\"EUR\",\"GBP\",\"Others\"],\"description\":\"Currency, normalized. Omit if unclear.\"},\"price_unit\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"Pricing unit (piece, kg, meter, 10 kg, 50 pieces). Omit if unclear.\"},\"buyer_price_reaction\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Omit if price is not discussed.\",\"properties\":{\"quote\":{\"type\":\"string\",\"maxLength\":150,\"description\":\"Write this FIRST: short verbatim transliterated buyer quote (English chars). Omit if not stated.\"},\"category\":{\"type\":\"string\",\"enum\":[\"Too High\",\"Negotiating\",\"Accepted\"],\"description\":\"Buyer's reaction category, chosen ONLY after `quote` is written and it must follow from that quote. Omit if price not discussed.\"}}},\"negotiation_notes\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Discount requests, freight charges, or price gaps discussed. Omit if none.\"},\"gst\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"is_gst_included\":{\"type\":\"boolean\",\"description\":\"Whether GST is included in the quoted price. Omit if unclear.\"},\"value\":{\"type\":\"number\",\"description\":\"GST PERCENTAGE (5, 12, 18, 28) — a percentage, never a rupee amount; NEVER expand it as lakh/crore. Omit if non-numeric/zero/negative/decimal/unclear.\"},\"details\":{\"type\":\"string\",\"maxLength\":150,\"description\":\"GST-related details. Omit if unclear.\"}}},\"delivery_charge\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"is_delivery_charge_included\":{\"type\":\"boolean\",\"description\":\"Whether delivery is included. Omit if unclear.\"},\"value\":{\"type\":\"number\",\"description\":\"Numeric delivery charge in plain rupees, FULLY EXPANDED (\\\"das hazaar\\\" -> 10000, \\\"ek lakh\\\" -> 100000). Lower bound if range. Omit if non-numeric/zero/negative/unclear.\"},\"currency\":{\"type\":\"string\",\"enum\":[\"INR\",\"USD\",\"EUR\",\"GBP\",\"Others\"],\"description\":\"Currency. Omit if unclear.\"},\"details\":{\"type\":\"string\",\"maxLength\":150,\"description\":\"Delivery details. Omit if unclear.\"}}},\"offer_details\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Offer/discount details (10% off bulk). Omit if unclear.\"}}},\"quantity_required\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Structured quantity for this product\",\"properties\":{\"value\":{\"type\":\"number\",\"description\":\"Numeric quantity stated by the buyer, FULLY EXPANDED (\\\"do hazaar\\\" -> 2000, \\\"ek lakh\\\" -> 100000, \\\"paanch sau\\\" -> 500). Lower bound if range. Omit if unclear.\"},\"unit\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"Unit (pieces, kg, liters). Omit if unclear.\"}}},\"minimum_order_quantity\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\",\"description\":\"Numeric MOQ stated by the seller, FULLY EXPANDED (\\\"das hazaar\\\" -> 10000, \\\"ek lakh\\\" -> 100000). Lower bound if range. Omit if unclear.\"},\"unit\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"MOQ unit. Omit if unclear.\"}}},\"seller_accepts_quantity\":{\"type\":\"boolean\",\"description\":\"Omit if qty not discussed. false ONLY if seller explicitly rejects the stated quantity; true if discussion continues without rejection.\"},\"specifications\":{\"type\":\"array\",\"description\":\"Specifications for this product. Variations must be separate products.\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"name\":{\"type\":\"string\",\"maxLength\":50,\"description\":\"Spec name stated by any speaker (Input Voltage, Phase, Capacity). Omit if unclear.\"},\"value\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Spec value stated by any speaker. Lower bound if numeric range. Omit if unclear.\"},\"unit\":{\"type\":\"string\",\"maxLength\":20,\"description\":\"Spec unit (V, A, kg, mm, pcs). Omit if unclear.\"},\"buyer_requested\":{\"type\":\"boolean\",\"description\":\"True if the buyer explicitly asked about this spec.\"},\"seller_mentioned\":{\"type\":\"boolean\",\"description\":\"True if the seller explicitly stated this spec.\"}}}}}}},\"lead_tag\":{\"type\":\"object\",\"additionalProperties\":false,\"maxLength\":200,\"description\":\"Deal probability + urgency insights. OMIT this entire object unless the call contains a real procurement discussion — never assign a temperature to a wrong-number, silent, disconnected or pleasantries-only call.\",\"required\":[\"deal_readiness_reason\",\"deal_readiness\"],\"properties\":{\"deal_readiness_reason\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Write this FIRST: 1-sentence evidence for the temperature (why/when), grounded in what was actually said. Never use 'buyer'/'seller'.\"},\"deal_readiness\":{\"type\":\"string\",\"enum\":[\"Cold\",\"Warm\",\"Hot\"],\"description\":\"Lead temperature, chosen ONLY after deal_readiness_reason is written and it must follow from that reason. Hot: ready to pay/visit/needs immediate delivery. Warm: serious intent, delayed by samples/approval. Cold: just checking rates / MOQ or location mismatch.\"},\"deal_blockers\":{\"type\":\"array\",\"description\":\"Friction points. Omit if none.\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"category\":{\"type\":\"string\",\"enum\":[\"Location\",\"MOQ\",\"Payment\",\"Price\",\"Availability\",\"Other\"],\"description\":\"Blocker category.\"},\"detail\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Blocker detail. Omit if not stated.\"}}}}}},\"payment\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"payment_mode\":{\"type\":\"string\",\"enum\":[\"upi\",\"cash\",\"card\",\"net banking\",\"bank transfer\",\"cheque\",\"emi\",\"credit\",\"cod\",\"wallet\"],\"description\":\"Primary payment mode implied. Omit if unclear.\"},\"payment_details\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Payment details (advance, emi, terms). Omit if unclear.\"}}},\"callback\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"ONLY an explicit phone-call commitment at a specific time/day. Format 'callback by [Time/Date IST] - [Context]'. NOT WhatsApp/catalog/images; vague times don't qualify. Omit otherwise.\"},\"next_steps\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"buyer_next_steps\":{\"type\":\"array\",\"description\":\"Buyer actions after the call, each starting with 'To', never using 'buyer'/'seller'.\",\"items\":{\"type\":\"string\",\"maxLength\":150}},\"seller_next_steps\":{\"type\":\"array\",\"description\":\"High-intent seller actions, each starting with 'To', never 'buyer'/'seller'; omit passive actions; empty array if deal is dead.\",\"items\":{\"type\":\"string\",\"maxLength\":150}}},\"description\":\"Concrete post-call actions. Omit this entire object if the call has no procurement content — never invent next steps for a wrong-number, silent or disconnected call.\"},\"metadata\":{\"type\":\"object\",\"description\":\"Call-level metadata\",\"additionalProperties\":false,\"required\":[\"call_purpose\"],\"properties\":{\"call_purpose\":{\"type\":\"string\",\"enum\":[\"requirement\",\"complaint\",\"support\",\"followup\",\"irrelevant\"],\"description\":\"Decide this FIRST — it is the only mandatory field in the whole output. Primary purpose of the call. Use 'irrelevant' for wrong number, silence, disconnection, IVR or pure pleasantries; when you do, also set no_content=true and omit buyer_intent, call_outcome, call_type, additional_details, lead_tag, next_steps and products.\"},\"primary_language\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"Most predominant language.\"},\"all_languages\":{\"type\":\"array\",\"description\":\"Languages detected.\",\"items\":{\"type\":\"string\",\"maxLength\":30}},\"buyer_intent\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"narrative\",\"reasoning\",\"intent_level\"],\"properties\":{\"narrative\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Crisp summary of the buyer's requirement in English.\"},\"reasoning\":{\"type\":\"string\",\"maxLength\":300,\"description\":\"Write this BEFORE intent_level: the evidence from the call that determines the intent level (English chars).\"},\"intent_level\":{\"type\":\"string\",\"enum\":[\"Low\",\"Medium\",\"High\"],\"description\":\"Chosen ONLY after narrative and reasoning are written, and it must follow from them. High: clear specs/project/urgency. Medium: genuine interest, researching. Low: casual price-check.\"}},\"description\":\"Buyer's requirement and intent. OMIT this entire object if the call has no procurement content.\"},\"intended_application\":{\"type\":\"string\",\"maxLength\":50,\"description\":\"2-4 word end-use noun phrase (Retail Resale, Home Renovation, Industrial Production). Omit if not mentioned.\"},\"call_outcome\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Final transactional outcome. Never use 'buyer'/'seller'. OMIT this entire object if the call has no procurement content.\",\"required\":[\"conclusion_notes\",\"category\"],\"properties\":{\"conclusion_notes\":{\"type\":\"string\",\"maxLength\":300,\"description\":\"Write this FIRST: reason + verbatim transliteration in brackets (English chars). No 'buyer'/'seller'.\"},\"category\":{\"type\":\"string\",\"enum\":[\"Committed\",\"Pending\",\"Follow-up\",\"Lost\"],\"description\":\"Final deal status, chosen ONLY after conclusion_notes is written and it must follow from those notes.\"}}},\"call_type\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Structured call type + reasoning. Write `evidence` and `reason` before `type`. OMIT this entire object if the call has no procurement content.\",\"properties\":{\"evidence\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Supporting evidence for the classification.\",\"properties\":{\"buyer_persona\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Identified buyer persona. Omit if unclear.\",\"properties\":{\"persona_category\":{\"type\":\"string\",\"enum\":[\"retailer\",\"wholesaler\",\"distributor\",\"manufacturer\",\"contractor\",\"service_provider\",\"institution\",\"end_consumer\",\"other\"],\"description\":\"Broad business category. Omit if unclear.\"},\"persona_detail\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Specific buyer type (Hotel Owner, Civil Contractor). Omit if unclear.\"}}},\"quantity_scale\":{\"type\":\"string\",\"enum\":[\"High\",\"Low\"],\"description\":\"High=bulk/industrial, Low=retail/small. Only if qty discussed.\"},\"order_type\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Type of order. Omit if unclear.\",\"properties\":{\"order_type_category\":{\"type\":\"string\",\"enum\":[\"sample\",\"bulk\",\"one-time\",\"recurring\",\"trial\",\"commercial\",\"urgent\",\"other\"],\"description\":\"Order type category. Omit if unclear.\"},\"order_type_detail\":{\"type\":\"string\",\"maxLength\":50,\"description\":\"Detail only when category is 'other'. Omit if unclear.\"}}},\"repeat_buyer\":{\"type\":\"boolean\",\"description\":\"True if recurring purchase implied. Omit if unclear.\"},\"keywords\":{\"type\":\"array\",\"description\":\"Context indicators (Export Quality, Commercial Project, Factory Use). Omit if unclear.\",\"items\":{\"type\":\"string\",\"maxLength\":50}}}},\"reason\":{\"type\":\"string\",\"maxLength\":400,\"description\":\"Detailed reasoning for the classification. Omit if unclear.\"},\"type\":{\"type\":\"string\",\"enum\":[\"B2B\",\"B2C\"],\"description\":\"B2B or B2C. Omit if unclear.\"}}},\"additional_details\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"buyer_queries\",\"seller_queries\"],\"properties\":{\"buyer_queries\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"query\",\"sequence\",\"category\"],\"properties\":{\"query\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Specific unanswered buyer question (price/credit/delivery/specs/certs). Translate to English. Omit pleasantries.\"},\"sequence\":{\"type\":\"integer\",\"description\":\"Global sequence across all buyer+seller queries (1,2,3…, no skips).\"},\"category\":{\"type\":\"string\",\"enum\":[\"Pricing\",\"Delivery\",\"Quantity\",\"Specifications\",\"Credit\",\"Availability\",\"Certification\",\"Other\"],\"description\":\"Query category. Use \\\"Other\\\" if it does not fit a listed category.\"}}}},\"seller_queries\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"query\",\"sequence\",\"category\"],\"properties\":{\"query\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Specific unanswered seller question (qty/location/specs/payment). Translate to English. Omit pleasantries.\"},\"sequence\":{\"type\":\"integer\",\"description\":\"Global sequence across all buyer+seller queries.\"},\"category\":{\"type\":\"string\",\"enum\":[\"Pricing\",\"Delivery\",\"Quantity\",\"Specifications\",\"Credit\",\"Availability\",\"Certification\",\"Other\"],\"description\":\"Query category. Use \\\"Other\\\" if it does not fit a listed category.\"}}}}},\"description\":\"Unresolved questions per party. OMIT this entire object if the call has no procurement content.\"}}}}};\n\nconst items = $input.all();\nconst ax = (function(){ try { return $('anchor_extract').first().json.anchors || {}; } catch(e){ return {}; } })();\nconst bName = String(ax.name || ''), bCity = String(ax.city || ''), bMob = String(ax.mobile || '');\nconst userText = buildUserText({ buyer_name: bName, buyer_city: bCity, buyer_mobile: bMob });   // ported fix: real anchors only — a missing anchor drops its whole line (no dangling 'Buyer name:' label), and no seller anchors exist in this workflow so those lines are simply absent.\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const body = { model: 'google/gemini-2.5-flash', temperature: 0, max_tokens: 16000, response_format: { type: 'json_schema', json_schema: { name: 'call_extraction_output', strict: true, schema: SCHEMA } }, messages: [ { role: 'system', content: SYSTEM_RPS1 }, { role: 'user', content: [ { type: 'input_audio', input_audio: { data: String(j.audio_b64 || ''), format: j.audio_format || 'mp3' } }, { type: 'text', text: userText } ] } ] };\n  out.push({ json: { body: body, has_audio: !!j.audio_b64, audio_format: j.audio_format || 'mp3' } });\n}\nreturn out;"
+      },
+      "name": "calls-llm-body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        149552,
+        39552
+      ],
+      "id": "c39a0193-1060-4a97-a065-0879d2b8caf2",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// [CEO] no-audio skip (v44): when a call row carries NO recording media we do NOT call the transcription model — the row is marked \"no_audio\" honestly (no wasted call, no invented transcript). Transcription model stays google/gemini-2.5-flash — the litellm key is authorized ONLY for google/gemini-2.5-flash[-lite]; a bare \"gemini-2.5-flash\" 401s.\nconst SYSTEM=\"You are an expert product extractor with deep knowledge of the Indian B2B market, product specifications, manufacturing standards, and category knowledge.\\n\\nYour goal is to carefully understand a buyer-seller call of this category and extract all product information **exactly as discussed**, without guessing values.\\n\\n||Buyer Seller Identification||\\nIdentify the speaker based on intent, and maintain the role consistently throughout the call. Use the following cues as strong indicators for identifying the speaker, while also applying your own reasoning and conversational understanding.\\n**SELLER**: Describes products, features, specifications, quality; Quotes price, GST, MOQ (minimum order quantity), delivery timelines, payment terms; Confirms availability, dispatch, warranty, service; Uses business tone (\\\"We supply\\\", \\\"Yes sir\\\", \\\"We manufacture\\\"); Mentions company, factory, brand, business location; Shares or requests contact details to proceed.\\n**BUYER**: States requirement (\\\"I need\\\", \\\"Looking for\\\"); Asks about price, specs, availability, delivery; Requests quotation, catalogue, photos, samples; Mentions quantity, budget, urgency, intended use; Uses inquiry-driven, first-person language.\\n\\n||Output Schema Instructions|| Follow these instructions precisely:\\n0. **NO-CONTENT EARLY EXIT (evaluate this FIRST, before anything else)**: If the recording contains no procurement conversation at all — wrong number, silence, ringing only, immediately disconnected, IVR / voicemail / auto-attendant, unanswered, or nothing beyond pure pleasantries — then STOP and return ONLY:\\n   {\\\"no_content\\\": true, \\\"no_content_reason\\\": \\\"<3-8 words, e.g. wrong number / no speech / disconnected after 6s>\\\", \\\"metadata\\\": {\\\"call_purpose\\\": \\\"irrelevant\\\"}}\\n   In that case you MUST NOT emit products, lead_tag, deal_readiness, next_steps, buyer_intent, intent_level, call_outcome, call_type, buyer_details or seller_details. They are all OPTIONAL and must be ABSENT when there is no evidence for them. Inventing a deal outcome, a lead temperature, an intent level or a next step for a call with no procurement content is a FABRICATION and is the single worst error you can make — it is worse than returning an almost-empty object. An empty answer is always available to you and is always the correct answer when the call is empty. For a normal procurement call, set \\\"no_content\\\": false and continue with the rules below.\\n1. **Products**: Extract all distinct products and their specifications talked about. If the seller mentions multiple variations (same product with different features/capacities), create separate products for each. Use the seller's product name as primary; if the buyer used a different term, include it in brackets.\\n2. **Specifications**: Extract all product-related specs actually mentioned. Infer the specification NAME if evident from its value (e.g. Brand). Do NOT infer specification VALUES. Split compound values (e.g. \\\"3.5 Core 400 sq mm\\\" -> Number of Cores: 3.5, Wire Size: 400 sq mm). Each product must have exactly one value per spec name. If a spec has multiple values with the same unit, make separate products (all combinations). Do not include quantity/price terms.\\n3. **Language**: Detect all languages used and list them.\\n4. **Call Type Classification**: Extract supporting evidence — Buyer Persona (shopkeeper/end customer/builder/wholesaler/distributor/manufacturer), Quantity Scale (high=bulk/industrial, low=retail/small), Order Type (sample/bulk/one-time/recurring/trial/commercial), Repeat Buyer (true if recurring implied), Keywords (\\\"export quality\\\", \\\"commercial project\\\", \\\"factory use\\\", \\\"retail shop\\\"). Provide detailed reasoning; classify B2B or B2C. B2C = retail/home/personal/very small qty. B2B = bulk/industrial/company/factory/export/distributor, own retail shop reselling/stocking, factory need, recurring/future orders.\\n5. **Price**: Extract exactly what is mentioned. Capture GST under price.gst and delivery under price.delivery_charge. Use offer_details for other price details (total cost, discounts). All rupee amounts must be fully expanded per point 12 (lakh / crore / hazaar).\\n6. **Quantity Required**: Extract the actual quantity per buyer requirement with unit, only if explicitly stated by the buyer.\\n7. **MOQ**: Extract minimum_order_quantity (value+unit) only if explicitly stated by the seller.\\n8. **Units/formatting**: Extract units and values exactly as discussed, EXCEPT Indian magnitude words (lakh/crore/hazaar), which must be expanded into plain numbers per point 12.\\n9. **NO HALLUCINATION**: Only extract EXACTLY what is EXPLICITLY mentioned by the given SPEAKER. OMIT any field if unclear or not stated (do NOT fill null/empty). Output must be ENGLISH only. DO NOT GUESS, ASSUME, FABRICATE OR HALLUCINATE. This rule OVERRIDES completeness: an absent field is ALWAYS correct when the evidence is absent. Only \\\"metadata\\\" (carrying \\\"call_purpose\\\") is mandatory; every other top-level object — buyer_details, seller_details, products, lead_tag, next_steps, payment, callback — is OPTIONAL and must be omitted entirely rather than guessed. Never emit a placeholder, \\\"N/A\\\", \\\"unknown\\\", \\\"NA\\\", 0, or an arbitrarily-picked enum value just to satisfy the schema.\\n10. **Strict Length Limits**: Respect every field's maxLength; summarize/truncate to fit; prioritize the most important info.\\n11. **Transactional Signals — WRITE THE EVIDENCE BEFORE THE LABEL**: For every judgement, produce the reason/evidence field FIRST and only then pick the label it supports; never pick a label and then rationalise it. Call Outcome (conclusion_notes with transliterated evidence FIRST, THEN category Committed/Pending/Follow-up/Lost); Deal Readiness (deal_readiness_reason FIRST, THEN deal_readiness Cold/Warm/Hot); Buyer Intent (narrative + reasoning FIRST, THEN intent_level Low/Medium/High); Price Reaction (short transliterated quote FIRST, THEN category Too High/Negotiating/Accepted, omit if price not discussed); Negotiation Notes (discount/freight/price-gap, omit if none); Quantity Acceptance (false ONLY if seller explicitly rejects; continued discussion implies acceptance; omit if qty not discussed); Callback (only an explicit phone-call commitment at a specific time/day; NOT WhatsApp/catalog/images/\\\"soon\\\"); Queries (specific unresolved questions per party, single global sequence, omit pleasantries, translate to English).\\n12. **INDIAN NUMBER UNITS — lakh / crore / hazaar (MANDATORY EXPANSION)**: Indian buyers and sellers state amounts in Indian units. EVERY numeric field — price.value, price.delivery_charge.value, quantity_required.value, minimum_order_quantity.value — MUST carry the FULLY EXPANDED plain number, never the spoken shorthand.\\n   Conversions: 1 hazaar / hazar / hajaar / hazarā / thousand = 1,000; 1 lakh / lac / lakhs = 100,000; 1 crore / cr / karod = 10,000,000; 1 arab = 1,000,000,000.\\n   Examples: \\\"do lakh\\\" -> 200000; \\\"2.5 lakh\\\" -> 250000; \\\"dhai lakh\\\" -> 250000; \\\"sawa lakh\\\" -> 125000; \\\"paune do lakh\\\" -> 175000; \\\"dedh lakh\\\" -> 150000; \\\"ek crore\\\" -> 10000000; \\\"1.2 crore\\\" -> 12000000; \\\"50 hazaar\\\" -> 50000; \\\"pachas hazaar\\\" -> 50000; \\\"das hazaar\\\" -> 10000.\\n   Writing 2.5 when the speaker said \\\"2.5 lakh\\\" is a 100,000x error — ALWAYS expand before you write the number. Bare Hindi numerals also apply to plain counts (do=2, dhai=2.5, teen=3, char=4, paanch=5, das=10, bees=20, pachas=50, sau=100).\\n   EXCEPTION: price.gst.value is a PERCENTAGE (5, 12, 18, 28) — never expand it.\\n   Preserve the spoken phrase verbatim ONLY in a text field that already exists for it (price.buyer_price_reaction.quote, price.negotiation_notes, price.offer_details, price.gst.details, price.delivery_charge.details, metadata.call_outcome.conclusion_notes). Never invent a new field to hold it.\";\nconst GLOSSARY_RPS1=\"# GLOSSARY (im-glossary-v1) — the IndiaMART terms used below, each defined before first use\\nGLID = the buyer's IndiaMART account id.\\nMCAT = an IndiaMART product category.\\nISQ = the structured spec questions answered on a BuyLead.\\nBuyLead / RFQ = a posted buying requirement.\\nKYB = Know-Your-Business — GST / PAN / Udyam registry verification.\\nGSTIN = the GST tax-registration number; PAN = the permanent tax-identity number.\\nSAC / HSN = the official product / service classification codes listed on a GST registration.\\nNIC = the official industry code listed on a Udyam registration.\\nUdyam = the MSME (small-business) registration; it carries the business SIZE band and its NIC industry code.\\nCSL = the buyer's on-site supplier-profile browsing log.\\nPNS = the masked phone calls the buyer made to sellers — spoken intent, the highest-authority signal.\\nMOQ = minimum order quantity, the smallest order a seller will accept.\\ntelecom-circle = the SIM's registered state — a WEAK location hint only.\\nBUYER turns = things the buyer themselves said or typed; OUR-outbound = our own campaign / enquiry-update messages, which are NEVER buyer evidence.\\nGST = India's goods-and-services tax. A \\\"GST percentage\\\" is a rate (5, 12, 18, 28); a \\\"GST amount\\\" is rupees. They are different numbers and the schema keeps them apart.\\nhazaar / lakh / crore = Indian magnitude words for 1,000 / 100,000 / 10,000,000. Rule 12 below governs them.\";\nconst NORMAL_EXAMPLE_RPS1=\"# WORKED EXAMPLE — one complete, filled extraction of a NORMAL procurement call\\nRule 0 above shows you what an EMPTY call looks like. This shows you what a real one looks like. Both matter; do not let the empty skeleton become your default shape.\\nCall (Hinglish, 3 minutes): a buyer in Ghaziabad asks a Delhi seller for corrugated boxes. He says \\\"mujhe paanch hazaar dabbe chahiye, ek kg ke laddu ke liye, paanch ply\\\". The seller quotes \\\"bees rupaye per piece, GST alag, athara percent\\\" and says \\\"MOQ do hazaar piece hai\\\". The buyer says \\\"bees thoda zyada hai, atharah kar do\\\" and the seller says he will confirm by evening. The buyer asks whether they can print his shop name; the seller says yes, at two rupees more. The buyer asks for delivery in ten days; the seller says he can do it. They agree the seller will WhatsApp a rate list and call back tomorrow at 11 am.\\n{\\\"no_content\\\":false,\\\"buyer_details\\\":{\\\"buyer_location\\\":{\\\"buyer_city\\\":\\\"Ghaziabad\\\"}},\\\"seller_details\\\":{\\\"seller_location\\\":{\\\"seller_city\\\":\\\"Delhi\\\"}},\\\"products\\\":[{\\\"product_name\\\":\\\"Corrugated Box (dabba)\\\",\\\"in_stock\\\":\\\"in stock\\\",\\\"is_buyer_interested\\\":true,\\\"price\\\":{\\\"value\\\":20,\\\"currency\\\":\\\"INR\\\",\\\"price_unit\\\":\\\"piece\\\",\\\"buyer_price_reaction\\\":{\\\"quote\\\":\\\"bees thoda zyada hai, atharah kar do\\\",\\\"category\\\":\\\"Negotiating\\\"},\\\"negotiation_notes\\\":\\\"Asked to come down from 20 to 18 per piece; printing quoted at 2 extra\\\",\\\"gst\\\":{\\\"is_gst_included\\\":false,\\\"value\\\":18},\\\"offer_details\\\":\\\"Printing available at Rs 2 extra per piece\\\"},\\\"quantity_required\\\":{\\\"value\\\":5000,\\\"unit\\\":\\\"pieces\\\"},\\\"minimum_order_quantity\\\":{\\\"value\\\":2000,\\\"unit\\\":\\\"pieces\\\"},\\\"seller_accepts_quantity\\\":true,\\\"specifications\\\":[{\\\"name\\\":\\\"Ply\\\",\\\"value\\\":\\\"5 Ply\\\",\\\"buyer_requested\\\":true,\\\"seller_mentioned\\\":false},{\\\"name\\\":\\\"Content Weight\\\",\\\"value\\\":\\\"1\\\",\\\"unit\\\":\\\"kg\\\",\\\"buyer_requested\\\":true,\\\"seller_mentioned\\\":false},{\\\"name\\\":\\\"Printing\\\",\\\"value\\\":\\\"Shop name\\\",\\\"buyer_requested\\\":true,\\\"seller_mentioned\\\":true}]}],\\\"lead_tag\\\":{\\\"deal_readiness_reason\\\":\\\"Stated a firm quantity, negotiated a specific rate and fixed a callback for the next morning, with delivery needed in ten days.\\\",\\\"deal_readiness\\\":\\\"Hot\\\",\\\"deal_blockers\\\":[{\\\"category\\\":\\\"Price\\\",\\\"detail\\\":\\\"Wants 18 against a quoted 20 per piece\\\"}]},\\\"callback\\\":\\\"callback by 11:00 AM IST tomorrow - to confirm the revised rate\\\",\\\"next_steps\\\":{\\\"buyer_next_steps\\\":[\\\"To confirm the printing requirement once the revised rate is received\\\"],\\\"seller_next_steps\\\":[\\\"To confirm whether 18 per piece is workable by this evening\\\",\\\"To send the rate list on WhatsApp\\\"]},\\\"metadata\\\":{\\\"call_purpose\\\":\\\"requirement\\\",\\\"primary_language\\\":\\\"Hindi\\\",\\\"all_languages\\\":[\\\"Hindi\\\",\\\"English\\\"],\\\"buyer_intent\\\":{\\\"narrative\\\":\\\"Needs 5000 five-ply corrugated boxes to pack 1 kg laddu boxes, with his shop name printed, delivered in ten days.\\\",\\\"reasoning\\\":\\\"He gave a firm quantity, a ply, the contents and a delivery window unprompted, and negotiated on rate rather than asking what boxes cost in general.\\\",\\\"intent_level\\\":\\\"High\\\"},\\\"intended_application\\\":\\\"Sweet Packaging\\\",\\\"call_outcome\\\":{\\\"conclusion_notes\\\":\\\"Rate not settled; seller to confirm a revised price by evening and call back next morning (\\\\\\\"atharah kar do\\\\\\\" / \\\\\\\"shaam tak bata dunga\\\\\\\")\\\",\\\"category\\\":\\\"Follow-up\\\"},\\\"call_type\\\":{\\\"evidence\\\":{\\\"buyer_persona\\\":{\\\"persona_category\\\":\\\"retailer\\\",\\\"persona_detail\\\":\\\"Sweet shop owner\\\"},\\\"quantity_scale\\\":\\\"High\\\",\\\"order_type\\\":{\\\"order_type_category\\\":\\\"bulk\\\"},\\\"repeat_buyer\\\":false,\\\"keywords\\\":[\\\"shop name printing\\\",\\\"bulk packaging\\\"]},\\\"reason\\\":\\\"Commercial quantity of packaging for his own retail product, negotiated per-piece against an MOQ, with branded printing — a business purchase, not a household one.\\\",\\\"type\\\":\\\"B2B\\\"},\\\"additional_details\\\":{\\\"buyer_queries\\\":[{\\\"query\\\":\\\"Can the boxes be printed with my shop name?\\\",\\\"sequence\\\":1,\\\"category\\\":\\\"Specifications\\\"},{\\\"query\\\":\\\"Can you deliver in ten days?\\\",\\\"sequence\\\":2,\\\"category\\\":\\\"Delivery\\\"}],\\\"seller_queries\\\":[{\\\"query\\\":\\\"What weight of sweets will go in each box?\\\",\\\"sequence\\\":3,\\\"category\\\":\\\"Specifications\\\"}]}}}\\nWhat that example demonstrates, point by point:\\n- \\\"paanch hazaar\\\" became 5000 and \\\"do hazaar\\\" became 2000 — rule 12 applied, never written as 5 and 2.\\n- \\\"athara percent\\\" became gst.value 18, a PERCENTAGE, and was NOT expanded — the rule 12 carve-out.\\n- \\\"bees rupaye\\\" became price.value 20, and the buyer's counter of 18 is in negotiation_notes, NOT in price.value. The stated price is the seller's; the counter is a reaction.\\n- Every judgement wrote its EVIDENCE FIRST: deal_readiness_reason before deal_readiness, narrative and reasoning before intent_level, conclusion_notes before category, quote before the price-reaction category. Read them in that order and each label follows from the sentence above it.\\n- The verbatim Hinglish is preserved ONLY in fields that already exist for it — buyer_price_reaction.quote, negotiation_notes, conclusion_notes. No new field was invented to hold it.\\n- buyer_details carries ONLY the city, because that is all the call actually stated. His name and number are absent, not guessed from the reference details.\\n- The callback is present because a specific time was committed to. The WhatsApp rate list is in seller_next_steps and NOT in callback — WhatsApp is not a phone-call commitment.\\n- specifications splits the compound \\\"1 kg laddu ke liye, paanch ply\\\" into separate named specs, and marks who raised each one.\\n- Nothing is filled with \\\"N/A\\\", \\\"unknown\\\" or 0. Every field the call did not cover is simply absent.\";\n// RPS-1 (2026-07-28): glossary first so every IndiaMART term is defined before its first use, the original\n// SYSTEM verbatim in the middle (not one rule reworded), and one complete filled NORMAL extraction last.\nconst SYSTEM_RPS1=GLOSSARY_RPS1+\"\\n\\n\"+SYSTEM+\"\\n\\n\"+NORMAL_EXAMPLE_RPS1;\nconst PROMPT_HEAD=\"A buyer connected with a seller via IndiaMART regarding a product requirement.\";\nconst PROMPT_TAIL=\"Important: Use these details only to understand the conversation better. DO NOT use them to fill missing fields if the call does not explicitly confirm them.\";\nconst PROMPT_NOREF=\"No reference details are available for this call. Rely ONLY on what is actually said in the audio; do not infer any name, city or phone number from anything else.\";\nconst ANCHOR_FIELDS=[[\"buyer_name\",\"Buyer name\"],[\"buyer_city\",\"Buyer City\"],[\"buyer_mobile\",\"Buyer Mobile number\"],[\"seller_name\",\"Seller name\"],[\"seller_city\",\"Seller City\"]];\n// v9 fix-3: build the reference block from real values only. A missing value drops its WHOLE line (no dangling \"Buyer name:\" labels). If nothing is known, say so instead of printing five empty labels.\nfunction buildUserText(anchors){\n  const a=(anchors&&typeof anchors===\"object\")?anchors:{};\n  const lines=[];\n  for(const [k,label] of ANCHOR_FIELDS){\n    const raw=a[k];\n    const v=(raw===null||raw===undefined)?\"\":String(raw).trim();\n    if(v&&v!==\"null\"&&v!==\"undefined\") lines.push(label+\": \"+v);\n  }\n  if(!lines.length) return PROMPT_HEAD+\"\\n\\n<reference_details>\\n(none)\\n</reference_details>\\n\\n\"+PROMPT_NOREF;\n  return PROMPT_HEAD+\"\\n\\nThe block below is OUR OWN reference data, not part of the call. It is for clarity only — never a fallback and never a fail-safe.\\n\\n<reference_details>\\n\"+lines.join(\"\\n\")+\"\\n</reference_details>\\n\\n\"+PROMPT_TAIL;\n}\nconst SCHEMA={\"type\":\"object\",\"description\":\"Root schema for call extraction result\",\"additionalProperties\":false,\"required\":[\"metadata\"],\"properties\":{\"no_content\":{\"type\":\"boolean\",\"description\":\"Decide this FIRST. TRUE when the recording carries no procurement content at all (wrong number, silence/ringing only, disconnected, IVR/voicemail, pure pleasantries). When true, emit ONLY no_content, no_content_reason and metadata.call_purpose='irrelevant' — every other object MUST be absent. Set false for a normal procurement call.\"},\"no_content_reason\":{\"type\":\"string\",\"maxLength\":80,\"description\":\"Short factual reason when no_content is true (e.g. 'wrong number', 'no speech in recording', 'disconnected after 6s'). Omit when no_content is false.\"},\"buyer_details\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"buyer_name\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Buyer's name (no company names). Omit if unclear.\"},\"buyer_mobile_number\":{\"type\":\"number\",\"description\":\"Buyer's phone number. Omit if unclear.\"},\"buyer_location\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Buyer's location.\",\"properties\":{\"buyer_city\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Buyer city. Omit if unclear.\"},\"buyer_state\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Buyer state. Omit if unclear.\"},\"buyer_locality\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Buyer locality/area/PIN. Omit if unclear.\"}}}},\"description\":\"Buyer identity as stated in the call. Omit this entire object if nothing about the buyer is stated.\"},\"seller_details\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"seller_name\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Seller's name (no company names). Omit if unclear.\"},\"seller_mobile_number\":{\"type\":\"number\",\"description\":\"Seller's phone number. Omit if unclear.\"},\"seller_location\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Seller's location.\",\"properties\":{\"seller_city\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Seller city. Omit if unclear.\"},\"seller_state\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Seller state. Omit if unclear.\"},\"seller_locality\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Seller locality/area/PIN. Omit if unclear.\"}}}},\"description\":\"Seller identity as stated in the call. Omit this entire object if nothing about the seller is stated.\"},\"products\":{\"type\":\"array\",\"description\":\"Products discussed (one per distinct variation). Omit this entire array if no product was discussed.\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"product_name\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Product name in the seller's wording; append the buyer's term in brackets if different. Omit if unclear.\"},\"in_stock\":{\"type\":\"string\",\"enum\":[\"in stock\",\"out of stock\",\"not sold\"],\"description\":\"Availability as clearly implied. Omit if unclear.\"},\"is_buyer_interested\":{\"type\":\"boolean\",\"description\":\"True if clear buyer interest/purchase intent for this product.\"},\"price\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Structured price for this product\",\"properties\":{\"value\":{\"type\":\"number\",\"description\":\"Numeric price stated by the seller, FULLY EXPANDED to plain rupees (\\\"do lakh\\\" -> 200000, \\\"2.5 lakh\\\" -> 250000, \\\"ek crore\\\" -> 10000000, \\\"50 hazaar\\\" -> 50000). Lower bound if a range. Omit if non-numeric/zero/negative/unclear.\"},\"currency\":{\"type\":\"string\",\"enum\":[\"INR\",\"USD\",\"EUR\",\"GBP\",\"Others\"],\"description\":\"Currency, normalized. Omit if unclear.\"},\"price_unit\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"Pricing unit (piece, kg, meter, 10 kg, 50 pieces). Omit if unclear.\"},\"buyer_price_reaction\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Omit if price is not discussed.\",\"properties\":{\"quote\":{\"type\":\"string\",\"maxLength\":150,\"description\":\"Write this FIRST: short verbatim transliterated buyer quote (English chars). Omit if not stated.\"},\"category\":{\"type\":\"string\",\"enum\":[\"Too High\",\"Negotiating\",\"Accepted\"],\"description\":\"Buyer's reaction category, chosen ONLY after `quote` is written and it must follow from that quote. Omit if price not discussed.\"}}},\"negotiation_notes\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Discount requests, freight charges, or price gaps discussed. Omit if none.\"},\"gst\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"is_gst_included\":{\"type\":\"boolean\",\"description\":\"Whether GST is included in the quoted price. Omit if unclear.\"},\"value\":{\"type\":\"number\",\"description\":\"GST PERCENTAGE (5, 12, 18, 28) — a percentage, never a rupee amount; NEVER expand it as lakh/crore. Omit if non-numeric/zero/negative/decimal/unclear.\"},\"details\":{\"type\":\"string\",\"maxLength\":150,\"description\":\"GST-related details. Omit if unclear.\"}}},\"delivery_charge\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"is_delivery_charge_included\":{\"type\":\"boolean\",\"description\":\"Whether delivery is included. Omit if unclear.\"},\"value\":{\"type\":\"number\",\"description\":\"Numeric delivery charge in plain rupees, FULLY EXPANDED (\\\"das hazaar\\\" -> 10000, \\\"ek lakh\\\" -> 100000). Lower bound if range. Omit if non-numeric/zero/negative/unclear.\"},\"currency\":{\"type\":\"string\",\"enum\":[\"INR\",\"USD\",\"EUR\",\"GBP\",\"Others\"],\"description\":\"Currency. Omit if unclear.\"},\"details\":{\"type\":\"string\",\"maxLength\":150,\"description\":\"Delivery details. Omit if unclear.\"}}},\"offer_details\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Offer/discount details (10% off bulk). Omit if unclear.\"}}},\"quantity_required\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Structured quantity for this product\",\"properties\":{\"value\":{\"type\":\"number\",\"description\":\"Numeric quantity stated by the buyer, FULLY EXPANDED (\\\"do hazaar\\\" -> 2000, \\\"ek lakh\\\" -> 100000, \\\"paanch sau\\\" -> 500). Lower bound if range. Omit if unclear.\"},\"unit\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"Unit (pieces, kg, liters). Omit if unclear.\"}}},\"minimum_order_quantity\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\",\"description\":\"Numeric MOQ stated by the seller, FULLY EXPANDED (\\\"das hazaar\\\" -> 10000, \\\"ek lakh\\\" -> 100000). Lower bound if range. Omit if unclear.\"},\"unit\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"MOQ unit. Omit if unclear.\"}}},\"seller_accepts_quantity\":{\"type\":\"boolean\",\"description\":\"Omit if qty not discussed. false ONLY if seller explicitly rejects the stated quantity; true if discussion continues without rejection.\"},\"specifications\":{\"type\":\"array\",\"description\":\"Specifications for this product. Variations must be separate products.\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"name\":{\"type\":\"string\",\"maxLength\":50,\"description\":\"Spec name stated by any speaker (Input Voltage, Phase, Capacity). Omit if unclear.\"},\"value\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Spec value stated by any speaker. Lower bound if numeric range. Omit if unclear.\"},\"unit\":{\"type\":\"string\",\"maxLength\":20,\"description\":\"Spec unit (V, A, kg, mm, pcs). Omit if unclear.\"},\"buyer_requested\":{\"type\":\"boolean\",\"description\":\"True if the buyer explicitly asked about this spec.\"},\"seller_mentioned\":{\"type\":\"boolean\",\"description\":\"True if the seller explicitly stated this spec.\"}}}}}}},\"lead_tag\":{\"type\":\"object\",\"additionalProperties\":false,\"maxLength\":200,\"description\":\"Deal probability + urgency insights. OMIT this entire object unless the call contains a real procurement discussion — never assign a temperature to a wrong-number, silent, disconnected or pleasantries-only call.\",\"required\":[\"deal_readiness_reason\",\"deal_readiness\"],\"properties\":{\"deal_readiness_reason\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Write this FIRST: 1-sentence evidence for the temperature (why/when), grounded in what was actually said. Never use 'buyer'/'seller'.\"},\"deal_readiness\":{\"type\":\"string\",\"enum\":[\"Cold\",\"Warm\",\"Hot\"],\"description\":\"Lead temperature, chosen ONLY after deal_readiness_reason is written and it must follow from that reason. Hot: ready to pay/visit/needs immediate delivery. Warm: serious intent, delayed by samples/approval. Cold: just checking rates / MOQ or location mismatch.\"},\"deal_blockers\":{\"type\":\"array\",\"description\":\"Friction points. Omit if none.\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"category\":{\"type\":\"string\",\"enum\":[\"Location\",\"MOQ\",\"Payment\",\"Price\",\"Availability\",\"Other\"],\"description\":\"Blocker category.\"},\"detail\":{\"type\":\"string\",\"maxLength\":100,\"description\":\"Blocker detail. Omit if not stated.\"}}}}}},\"payment\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"payment_mode\":{\"type\":\"string\",\"enum\":[\"upi\",\"cash\",\"card\",\"net banking\",\"bank transfer\",\"cheque\",\"emi\",\"credit\",\"cod\",\"wallet\"],\"description\":\"Primary payment mode implied. Omit if unclear.\"},\"payment_details\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Payment details (advance, emi, terms). Omit if unclear.\"}}},\"callback\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"ONLY an explicit phone-call commitment at a specific time/day. Format 'callback by [Time/Date IST] - [Context]'. NOT WhatsApp/catalog/images; vague times don't qualify. Omit otherwise.\"},\"next_steps\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"buyer_next_steps\":{\"type\":\"array\",\"description\":\"Buyer actions after the call, each starting with 'To', never using 'buyer'/'seller'.\",\"items\":{\"type\":\"string\",\"maxLength\":150}},\"seller_next_steps\":{\"type\":\"array\",\"description\":\"High-intent seller actions, each starting with 'To', never 'buyer'/'seller'; omit passive actions; empty array if deal is dead.\",\"items\":{\"type\":\"string\",\"maxLength\":150}}},\"description\":\"Concrete post-call actions. Omit this entire object if the call has no procurement content — never invent next steps for a wrong-number, silent or disconnected call.\"},\"metadata\":{\"type\":\"object\",\"description\":\"Call-level metadata\",\"additionalProperties\":false,\"required\":[\"call_purpose\"],\"properties\":{\"call_purpose\":{\"type\":\"string\",\"enum\":[\"requirement\",\"complaint\",\"support\",\"followup\",\"irrelevant\"],\"description\":\"Decide this FIRST — it is the only mandatory field in the whole output. Primary purpose of the call. Use 'irrelevant' for wrong number, silence, disconnection, IVR or pure pleasantries; when you do, also set no_content=true and omit buyer_intent, call_outcome, call_type, additional_details, lead_tag, next_steps and products.\"},\"primary_language\":{\"type\":\"string\",\"maxLength\":30,\"description\":\"Most predominant language.\"},\"all_languages\":{\"type\":\"array\",\"description\":\"Languages detected.\",\"items\":{\"type\":\"string\",\"maxLength\":30}},\"buyer_intent\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"narrative\",\"reasoning\",\"intent_level\"],\"properties\":{\"narrative\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Crisp summary of the buyer's requirement in English.\"},\"reasoning\":{\"type\":\"string\",\"maxLength\":300,\"description\":\"Write this BEFORE intent_level: the evidence from the call that determines the intent level (English chars).\"},\"intent_level\":{\"type\":\"string\",\"enum\":[\"Low\",\"Medium\",\"High\"],\"description\":\"Chosen ONLY after narrative and reasoning are written, and it must follow from them. High: clear specs/project/urgency. Medium: genuine interest, researching. Low: casual price-check.\"}},\"description\":\"Buyer's requirement and intent. OMIT this entire object if the call has no procurement content.\"},\"intended_application\":{\"type\":\"string\",\"maxLength\":50,\"description\":\"2-4 word end-use noun phrase (Retail Resale, Home Renovation, Industrial Production). Omit if not mentioned.\"},\"call_outcome\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Final transactional outcome. Never use 'buyer'/'seller'. OMIT this entire object if the call has no procurement content.\",\"required\":[\"conclusion_notes\",\"category\"],\"properties\":{\"conclusion_notes\":{\"type\":\"string\",\"maxLength\":300,\"description\":\"Write this FIRST: reason + verbatim transliteration in brackets (English chars). No 'buyer'/'seller'.\"},\"category\":{\"type\":\"string\",\"enum\":[\"Committed\",\"Pending\",\"Follow-up\",\"Lost\"],\"description\":\"Final deal status, chosen ONLY after conclusion_notes is written and it must follow from those notes.\"}}},\"call_type\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Structured call type + reasoning. Write `evidence` and `reason` before `type`. OMIT this entire object if the call has no procurement content.\",\"properties\":{\"evidence\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Supporting evidence for the classification.\",\"properties\":{\"buyer_persona\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Identified buyer persona. Omit if unclear.\",\"properties\":{\"persona_category\":{\"type\":\"string\",\"enum\":[\"retailer\",\"wholesaler\",\"distributor\",\"manufacturer\",\"contractor\",\"service_provider\",\"institution\",\"end_consumer\",\"other\"],\"description\":\"Broad business category. Omit if unclear.\"},\"persona_detail\":{\"type\":\"string\",\"maxLength\":60,\"description\":\"Specific buyer type (Hotel Owner, Civil Contractor). Omit if unclear.\"}}},\"quantity_scale\":{\"type\":\"string\",\"enum\":[\"High\",\"Low\"],\"description\":\"High=bulk/industrial, Low=retail/small. Only if qty discussed.\"},\"order_type\":{\"type\":\"object\",\"additionalProperties\":false,\"description\":\"Type of order. Omit if unclear.\",\"properties\":{\"order_type_category\":{\"type\":\"string\",\"enum\":[\"sample\",\"bulk\",\"one-time\",\"recurring\",\"trial\",\"commercial\",\"urgent\",\"other\"],\"description\":\"Order type category. Omit if unclear.\"},\"order_type_detail\":{\"type\":\"string\",\"maxLength\":50,\"description\":\"Detail only when category is 'other'. Omit if unclear.\"}}},\"repeat_buyer\":{\"type\":\"boolean\",\"description\":\"True if recurring purchase implied. Omit if unclear.\"},\"keywords\":{\"type\":\"array\",\"description\":\"Context indicators (Export Quality, Commercial Project, Factory Use). Omit if unclear.\",\"items\":{\"type\":\"string\",\"maxLength\":50}}}},\"reason\":{\"type\":\"string\",\"maxLength\":400,\"description\":\"Detailed reasoning for the classification. Omit if unclear.\"},\"type\":{\"type\":\"string\",\"enum\":[\"B2B\",\"B2C\"],\"description\":\"B2B or B2C. Omit if unclear.\"}}},\"additional_details\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"buyer_queries\",\"seller_queries\"],\"properties\":{\"buyer_queries\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"query\",\"sequence\",\"category\"],\"properties\":{\"query\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Specific unanswered buyer question (price/credit/delivery/specs/certs). Translate to English. Omit pleasantries.\"},\"sequence\":{\"type\":\"integer\",\"description\":\"Global sequence across all buyer+seller queries (1,2,3…, no skips).\"},\"category\":{\"type\":\"string\",\"enum\":[\"Pricing\",\"Delivery\",\"Quantity\",\"Specifications\",\"Credit\",\"Availability\",\"Certification\",\"Other\"],\"description\":\"Query category. Use \\\"Other\\\" if it does not fit a listed category.\"}}}},\"seller_queries\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"query\",\"sequence\",\"category\"],\"properties\":{\"query\":{\"type\":\"string\",\"maxLength\":200,\"description\":\"Specific unanswered seller question (qty/location/specs/payment). Translate to English. Omit pleasantries.\"},\"sequence\":{\"type\":\"integer\",\"description\":\"Global sequence across all buyer+seller queries.\"},\"category\":{\"type\":\"string\",\"enum\":[\"Pricing\",\"Delivery\",\"Quantity\",\"Specifications\",\"Credit\",\"Availability\",\"Certification\",\"Other\"],\"description\":\"Query category. Use \\\"Other\\\" if it does not fit a listed category.\"}}}}},\"description\":\"Unresolved questions per party. OMIT this entire object if the call has no procurement content.\"}}}}};\n\nconst items = $input.all();\nconst ax = (function(){ try { return $('anchor_extract').first().json.anchors || {}; } catch(e){ return {}; } })();\nconst bName = String(ax.name || ''), bCity = String(ax.city || ''), bMob = String(ax.mobile || '');\nconst userText = buildUserText({ buyer_name: bName, buyer_city: bCity, buyer_mobile: bMob });   // ported fix: real anchors only — a missing anchor drops its whole line (no dangling 'Buyer name:' label), and no seller anchors exist in this workflow so those lines are simply absent.\nconst out = [];\nfor (const it of items) {\n  const j = it.json || {};\n  const body = { model: 'google/gemini-2.5-flash', temperature: 0, max_tokens: 16000, response_format: { type: 'json_schema', json_schema: { name: 'call_extraction_output', strict: true, schema: SCHEMA } }, messages: [ { role: 'system', content: SYSTEM_RPS1 }, { role: 'user', content: [ { type: 'input_audio', input_audio: { data: String(j.audio_b64 || ''), format: j.audio_format || 'mp3' } }, { type: 'text', text: userText } ] } ] };\n  out.push({ json: { body: body, has_audio: !!j.audio_b64, audio_format: j.audio_format || 'mp3' } });\n}\nreturn out;"
+      },
+      "name": "pns-llm-body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        151072,
+        39904
+      ],
+      "id": "82a0fe2f-708c-4ee7-acd1-4a6c9629c0a0",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "calls-tier-gate1",
+              "leftValue": "={{ !!(($('t0').first().json.run||{}).transcripts) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e6c00893-443e-4773-959d-2004d3a29a4d",
+      "name": "calls-tier-gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        146576,
+        40944
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "pns-tier-gate1",
+              "leftValue": "={{ !!(($('t0').first().json.run||{}).transcripts) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "65952906-bb18-4317-8192-3bf751ce37b3",
+      "name": "pns-tier-gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        148496,
+        40560
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "callsai1",
+              "leftValue": "={{ !!$json.has_audio }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        149776,
+        39552
+      ],
+      "id": "f8cc1634-b369-4b55-a4f2-7bb849886aa0",
+      "name": "calls-audio-if",
+      "notes": "[CEO] Gate: only call rows that actually carry recording audio go to the transcription model. Rows with no media are routed to the skip lane — we never pay for (or fabricate from) a silent row."
+    },
+    {
+      "parameters": {
+        "jsCode": "// [CEO] Skip lane: these call rows had NO recording media (0 audio bytes). We mark them and pass them\n// around the transcription model entirely — no LLM call, no 400 error, no invented transcript.\nreturn $input.all().map(() => ({ json: { __skipped_no_audio: true } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150000,
+        39648
+      ],
+      "id": "685b3670-9c3a-45d7-8243-756be6be9072",
+      "name": "calls-audio-skip"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        150224,
+        39552
+      ],
+      "id": "7e318e18-3bde-4015-80e8-f324459ad661",
+      "name": "calls-join",
+      "notes": "[CEO] Re-joins transcribed rows with skipped (no-media) rows so the assemble step sees every call exactly once."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "pnsai1",
+              "leftValue": "={{ !!$json.has_audio }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        151296,
+        39904
+      ],
+      "id": "94f0b18f-8d93-4b4a-96b0-5f21a525bf57",
+      "name": "pns-audio-if",
+      "notes": "[CEO] Gate: only call rows that actually carry recording audio go to the transcription model. Rows with no media are routed to the skip lane — we never pay for (or fabricate from) a silent row."
+    },
+    {
+      "parameters": {
+        "jsCode": "// [CEO] Skip lane: these call rows had NO recording media (0 audio bytes). We mark them and pass them\n// around the transcription model entirely — no LLM call, no 400 error, no invented transcript.\nreturn $input.all().map(() => ({ json: { __skipped_no_audio: true } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        151520,
+        40000
+      ],
+      "id": "0ee4f2a5-350f-428e-a043-019019d96870",
+      "name": "pns-audio-skip"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        151744,
+        39904
+      ],
+      "id": "7841305f-64dc-4ccc-b01d-39625cb2f1ca",
+      "name": "pns-join",
+      "notes": "[CEO] Re-joins transcribed rows with skipped (no-media) rows so the assemble step sees every call exactly once."
+    },
+    {
+      "parameters": {
+        "jsCode": "// enrich-assemble — thin collector for buyer-intelligence-enrich.\n// Reads terminal outputs of the PNS + Calls pipelines and packages\n// { glid, fetched_at, sources: { pns_calls, calls }, __health }.\nconst ref = (n) => { try { const it = $(n).first(); return it ? it.json : null; } catch (e) { return null; } };\nlet glid = null; try { glid = $('t0').first().json.query.glid; } catch (e) {}\nconst sources = {\n  pns_calls: ref('pns-assemble'),\n  calls: ref('calls-assemble'),\n};\nconst health = Object.keys(sources).map((k) => {\n  const s = sources[k] || {};\n  const h = s.__health || (s.summary && s.summary.__health) || {};\n  return { node: h.node || k, ok: h.ok !== false, status: h.status || (h.ok === false ? 'error' : 'ok'), count: h.count != null ? h.count : null, error_msg: h.error_msg || h.reason || null, version: h.version || null };\n});\nreturn [{ json: { glid, fetched_at: new Date().toISOString(), sources, __health: health } }];"
+      },
+      "id": "enrich-assemble-id",
+      "name": "enrich-assemble",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "enrich-respond-id",
+      "name": "respondToWebhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        4600,
+        800
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "calls-trigger": {
+      "main": [
+        [
+          {
+            "node": "calls-wait-initial",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-wait-initial": {
+      "main": [
+        [
+          {
+            "node": "calls-poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-poll": {
+      "main": [
+        [
+          {
+            "node": "calls-if-done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-if-done": {
+      "main": [
+        [
+          {
+            "node": "calls-fetch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "calls-if-failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-if-failed": {
+      "main": [
+        [
+          {
+            "node": "calls-empty",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "calls-guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-guard": {
+      "main": [
+        [
+          {
+            "node": "calls-guard-if",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-guard-if": {
+      "main": [
+        [
+          {
+            "node": "calls-empty",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "calls-wait-poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-wait-poll": {
+      "main": [
+        [
+          {
+            "node": "calls-poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-fetch": {
+      "main": [
+        [
+          {
+            "node": "calls-parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-parse": {
+      "main": [
+        [
+          {
+            "node": "calls-route-if",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-route-if": {
+      "main": [
+        [
+          {
+            "node": "calls-fetch-audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "calls-empty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-fetch-audio": {
+      "main": [
+        [
+          {
+            "node": "calls-audio-b64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-transcribe": {
+      "main": [
+        [
+          {
+            "node": "calls-join",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-audio-b64": {
+      "main": [
+        [
+          {
+            "node": "calls-llm-body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-trigger": {
+      "main": [
+        [
+          {
+            "node": "pns-wait-initial",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-wait-initial": {
+      "main": [
+        [
+          {
+            "node": "pns-poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-poll": {
+      "main": [
+        [
+          {
+            "node": "pns-if-done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-if-done": {
+      "main": [
+        [
+          {
+            "node": "pns-fetch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "pns-if-failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-if-failed": {
+      "main": [
+        [
+          {
+            "node": "pns-empty",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "pns-guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-guard": {
+      "main": [
+        [
+          {
+            "node": "pns-guard-if",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-guard-if": {
+      "main": [
+        [
+          {
+            "node": "pns-empty",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "pns-wait-poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-wait-poll": {
+      "main": [
+        [
+          {
+            "node": "pns-poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-fetch": {
+      "main": [
+        [
+          {
+            "node": "pns-parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-parse": {
+      "main": [
+        [
+          {
+            "node": "pns-route-if",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-route-if": {
+      "main": [
+        [
+          {
+            "node": "pns-sign-url",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "pns-empty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-fetch-audio": {
+      "main": [
+        [
+          {
+            "node": "pns-audio-b64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-transcribe": {
+      "main": [
+        [
+          {
+            "node": "pns-join",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-audio-b64": {
+      "main": [
+        [
+          {
+            "node": "pns-llm-body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-sign-url": {
+      "main": [
+        [
+          {
+            "node": "pns-sign-parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-sign-parse": {
+      "main": [
+        [
+          {
+            "node": "pns-fetch-audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-llm-body": {
+      "main": [
+        [
+          {
+            "node": "calls-audio-if",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-llm-body": {
+      "main": [
+        [
+          {
+            "node": "pns-audio-if",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-tier-gate": {
+      "main": [
+        [
+          {
+            "node": "calls-trigger",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "calls-empty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-tier-gate": {
+      "main": [
+        [
+          {
+            "node": "pns-trigger",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "pns-empty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-audio-if": {
+      "main": [
+        [
+          {
+            "node": "calls-transcribe",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "calls-audio-skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-audio-skip": {
+      "main": [
+        [
+          {
+            "node": "calls-join",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "calls-join": {
+      "main": [
+        [
+          {
+            "node": "calls-assemble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-audio-if": {
+      "main": [
+        [
+          {
+            "node": "pns-transcribe",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "pns-audio-skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-audio-skip": {
+      "main": [
+        [
+          {
+            "node": "pns-join",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "pns-join": {
+      "main": [
+        [
+          {
+            "node": "pns-assemble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "t0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "t0": {
+      "main": [
+        [
+          {
+            "node": "pns-tier-gate",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "calls-tier-gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-empty": {
+      "main": [
+        [
+          {
+            "node": "pns-assemble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-empty": {
+      "main": [
+        [
+          {
+            "node": "calls-assemble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pns-assemble": {
+      "main": [
+        [
+          {
+            "node": "enrich-assemble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calls-assemble": {
+      "main": [
+        [
+          {
+            "node": "enrich-assemble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "enrich-assemble": {
+      "main": [
+        [
+          {
+            "node": "respondToWebhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "instanceId": "17519d3ef9735db55aeaaca554134cc04945a8942840756f95f4251d52adf708"
+  },
+  "id": "buyer-intelligence-enrich-id",
+  "tags": []
+}

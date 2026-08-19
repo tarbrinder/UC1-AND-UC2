@@ -142,11 +142,19 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
   // 08-parser identity block (sync webhook) — deterministic passthrough already masked upstream.
   // Absent on legacy async payloads, so identity falls back to sources.* below.
   const identity08 = secOf(payload, 'identity');
+  // 08-parser pns_profiling block — .products / .buyer_locations feed sourcing below.
+  const pns08 = net08.pns_profiling && typeof net08.pns_profiling === 'object'
+    ? (net08.pns_profiling as Json) : {};
+  const pns08Val = pns08.value && typeof pns08.value === 'object' ? (pns08.value as Json) : {};
 
   const identitySum = sumOf(sources, 'identity');
   const extSum = sumOf(sources, 'external');
   const bpSum = sumOf(sources, 'buyerprofile');
   const pnsSum = sumOf(sources, 'pns');
+  // buyer-intelligence-enrich (slow) adds pns_calls (transcribed masked-number calls) and calls
+  // (sales-recordings). Present only after the enrich workflow merges — absent on sync-only pulls.
+  const pnsCallsSum = sumOf(sources, 'pns_calls');
+  const callsSum = sumOf(sources, 'calls');
   const reqSum = sumOf(sources, 'requirement');
   const cslSum = sumOf(sources, 'csl');
   const gstSum = sumOf(sources, 'gst_detail_union');
@@ -159,17 +167,38 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
     ? (cpWrap.value as Json) : {};
   const companyName = strV(cpObj.company);
 
-  // ── Sign3 fraud-seller-detection score — raw 0–1 passthrough or 'unknown' (never 0) ──
-  const s3s = (extSum.sign3_scores && typeof extSum.sign3_scores === 'object')
-    ? (extSum.sign3_scores as Json) : {};
-  const fsd = s3s.fraud_seller_detection_score;
-  const hasFsd = typeof fsd === 'number' && Number.isFinite(fsd);
-  const fsd08Wrap = risk08.fraud_seller_detection_score
-    && typeof risk08.fraud_seller_detection_score === 'object'
-    ? (risk08.fraud_seller_detection_score as Json) : {};
-  const fsd08 = fsd08Wrap.value;
-  const hasFsd08 = typeof fsd08 === 'number' && Number.isFinite(fsd08);
-  const rawSign3: number | 'unknown' = hasFsd08 ? (fsd08 as number) : hasFsd ? (fsd as number) : 'unknown';
+  // ── Sign3 fraud-seller-detection score — raw 0–1 passthrough or 'unknown' (never 0).
+  //    The score shows up in several equivalent shapes across parser/source variants:
+  //      • risk.fraud_seller_detection_score.value   (08-parser wrapped)
+  //      • risk.fraud_seller_detection_score         (08-parser flat)
+  //      • sources.external.summary.sign3_scores.fraud_seller_detection_score
+  //      • sources.external.summary.sign3.fraud_seller_detection_score
+  //      • sources.external.summary.fraud_seller_detection_score (flat)
+  //    First finite number wins. ──
+  const firstFiniteFsd = (): number | null => {
+    const raw08 = risk08.fraud_seller_detection_score;
+    if (typeof raw08 === 'number' && Number.isFinite(raw08)) return raw08;
+    if (raw08 && typeof raw08 === 'object') {
+      const v = (raw08 as Json).value;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+    }
+    const s3s = (extSum.sign3_scores && typeof extSum.sign3_scores === 'object')
+      ? (extSum.sign3_scores as Json) : null;
+    if (s3s && typeof s3s.fraud_seller_detection_score === 'number' && Number.isFinite(s3s.fraud_seller_detection_score)) {
+      return s3s.fraud_seller_detection_score as number;
+    }
+    const s3 = (extSum.sign3 && typeof extSum.sign3 === 'object')
+      ? (extSum.sign3 as Json) : null;
+    if (s3 && typeof s3.fraud_seller_detection_score === 'number' && Number.isFinite(s3.fraud_seller_detection_score)) {
+      return s3.fraud_seller_detection_score as number;
+    }
+    if (typeof extSum.fraud_seller_detection_score === 'number' && Number.isFinite(extSum.fraud_seller_detection_score)) {
+      return extSum.fraud_seller_detection_score as number;
+    }
+    return null;
+  };
+  const fsdNum = firstFiniteFsd();
+  const rawSign3: number | 'unknown' = fsdNum != null ? fsdNum : 'unknown';
 
   // ── identity ── prefer the 08-parser identity block (masked upstream); fall back to sources.* for async payloads.
   const name = str(
@@ -230,6 +259,9 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
     ?? null;
   const stageRaw = strV(persona08.business_stage);
   const entityType = strV(persona08.business_type) || str(bpSum.business_type) || 'Business';
+  // turnover fallback: LLM annual_turnover first; GST-declared band from company_previous when null
+  const annualTurnover = strV(persona08.annual_turnover);
+  const declaredTurnover = strV(cpObj.gst_declared_turnover_band);
   const persona: Persona360Data['persona'] = {
     primary: personaPrimary || '—',
     matchPct: 0,
@@ -240,8 +272,8 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
     stage: mapStage(stageRaw),
     stageEstimate: stageRaw || undefined,
     turnover: {
-      display: strV(persona08.annual_turnover) || '',
-      declared: false,
+      display: annualTurnover || declaredTurnover,
+      declared: !annualTurnover && !!declaredTurnover,
     },
     entity: {
       type: entityType,
@@ -266,7 +298,8 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
   pushCities(reqSum.search_cities);
   pushCities(cslSum.browse_cities);
   pushCities(cslSum.cities_resolved);
-  const operatingCity = str(bpSum.city ?? identitySum.city).trim().toLowerCase();
+  pushCities(pns08Val.buyer_locations); // 08-parser PNS profiling — sourcing cities spoken in calls
+  const operatingCity = str(identity08.city ?? bpSum.city ?? identitySum.city).trim().toLowerCase();
   const cities = citySet
     .filter((c) => c.trim().toLowerCase() !== operatingCity)
     .map((name) => ({ name, sharePct: 0 })); // shares are a formula gap — never invented
@@ -279,6 +312,21 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
     }
   };
   pushProd(pnsSum.products);
+  // enrich sources — spoken product mentions from transcribed calls
+  pushProd(pnsCallsSum.products);
+  pushProd(callsSum.products);
+  pushProd(callsSum.products_of_interest);
+  // 08 parser sourcing/persona sometimes carries products_of_interest directly (wrapped or flat)
+  {
+    const p1 = sourcing08.products_of_interest;
+    const p2 = persona08.products_of_interest;
+    for (const raw of [p1, p2]) {
+      if (Array.isArray(raw)) pushProd(raw);
+      else if (raw && typeof raw === 'object' && Array.isArray((raw as Json).value)) pushProd((raw as Json).value);
+    }
+  }
+  // 08-parser pns_profiling products — spoken product names from call summaries (unioned + deduped)
+  pushProd(pns08Val.products);
   if (Array.isArray(reqSum.requirements)) {
     for (const r of reqSum.requirements as Json[]) {
       const t = str((r as Json).title);
@@ -287,6 +335,8 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
   }
   pushProd([str(bpSum.browse_interest)]);
   pushProd(bpSum.products_of_interest);
+  pushProd(bpSum.interests);
+  pushProd(bpSum.interest_products);
 
   // deliveryNote surfaces sourcing_channel and, when present, location_sourcing_preference (LLM
   // deterministic per-workflow note like "Operates in Greater Noida"). Both together read naturally
@@ -389,19 +439,18 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
       || (gstHas ? str(gstSum.legal_name ?? gstSum.trade_name ?? '') : ''),
     state: gstHas ? 'good' : 'caution',
   });
-  const pns08 = net08.pns_profiling && typeof net08.pns_profiling === 'object'
-    ? (net08.pns_profiling as Json) : {};
-  const pns08Val = pns08.value && typeof pns08.value === 'object' ? (pns08.value as Json) : {};
-  const pnsCalls = num(pns08Val.call_count) ?? num(pnsSum.call_count);
+  const pnsCalls = num(pns08Val.call_count) ?? num(pnsSum.call_count) ?? num(pnsCallsSum.call_count) ?? num(pnsCallsSum.count);
   internetRows.push({
     label: 'PNS profiling',
     sub: pnsCalls != null ? `${pnsCalls} calls` : undefined,
     state: pnsCalls != null ? 'good' : 'caution',
   });
-  const udyHas = !!(udySum.udyam_reg_no || udySum.enterprise_type);
+  const udyVerified08 = risk08.udyam_registered && typeof risk08.udyam_registered === 'object'
+    ? (risk08.udyam_registered as Json).value : undefined;
+  const udyHas = !!(udySum.udyam_reg_no || udySum.enterprise_type) || udyVerified08 === true;
   internetRows.push({
     label: 'Udyam registration',
-    sub: udyHas ? str(udySum.enterprise_type ?? udySum.udyam_reg_no) || undefined : undefined,
+    sub: udyHas ? str(udySum.enterprise_type ?? udySum.udyam_reg_no) || 'Registered' : undefined,
     state: udyHas ? 'good' : 'caution',
   });
   internetRows.push({
@@ -415,12 +464,16 @@ export function mapFinalToPersona360(payload: unknown): Persona360Data {
     ? (bpSum.verification as Json) : {};
   const gstVerified08 = risk08.gst_verified && typeof risk08.gst_verified === 'object'
     ? (risk08.gst_verified as Json).value : undefined;
-  const udyVerified08 = risk08.udyam_registered && typeof risk08.udyam_registered === 'object'
-    ? (risk08.udyam_registered as Json).value : undefined;
   const panVerified08 = risk08.pan_present && typeof risk08.pan_present === 'object'
     ? (risk08.pan_present as Json).value : undefined;
-  verifiedTags.push({ name: 'Mobile', verified: bpVer.alt_mobile === true || !!identitySum.mobile });
-  verifiedTags.push({ name: 'Email', verified: bpVer.email === true || !!identitySum.email });
+  // 08-parser verification_flags — chip fallback when sources.buyerprofile.verification is absent
+  const verFlags08 = (() => {
+    const w = risk08.verification_flags && typeof risk08.verification_flags === 'object'
+      ? (risk08.verification_flags as Json).value : null;
+    return w && typeof w === 'object' ? (w as Json) : {};
+  })();
+  verifiedTags.push({ name: 'Mobile', verified: bpVer.alt_mobile === true || verFlags08.alt_mobile === true || !!identitySum.mobile });
+  verifiedTags.push({ name: 'Email', verified: bpVer.email === true || verFlags08.email === true || !!identitySum.email });
   verifiedTags.push({ name: 'PAN', verified: panVerified08 === true || !!pan });
   verifiedTags.push({ name: 'GST', verified: gstVerified08 === true || gstHas });
   verifiedTags.push({ name: 'Udyam', verified: udyVerified08 === true || udyHas });
@@ -517,8 +570,8 @@ export function deriveColumnStates(payload: unknown): ColumnStates {
   };
   return {
     persona: hasSec('persona') || has('buyerprofile') || has('pns') || has('identity') ? 'ready' : 'empty',
-    sourcing: hasSec('sourcing') || has('requirement') || has('csl') || has('pns') ? 'ready' : 'empty',
+    sourcing: hasSec('sourcing') || has('requirement') || has('csl') || has('pns') || has('pns_calls') || has('calls') ? 'ready' : 'empty',
     risk: hasSec('risk') || has('external') || has('buyerprofile') || has('gst_detail_union') ? 'ready' : 'empty',
-    internet: hasSec('internet_profile') || has('gst_detail_union') || has('pns') || has('udyam') || has('buyerprofile') ? 'ready' : 'empty',
+    internet: hasSec('internet_profile') || has('gst_detail_union') || has('pns') || has('pns_calls') || has('udyam') || has('buyerprofile') ? 'ready' : 'empty',
   };
 }

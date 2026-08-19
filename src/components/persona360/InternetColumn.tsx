@@ -18,7 +18,7 @@ export function InternetColumn({
   onRetry?: () => void;
   mode?: 'fixture' | 'live';
 }) {
-  const pctAvailable = mode === 'fixture' || internet.counts !== undefined;
+  const pctAvailable = mode === 'fixture'; // live: % is a formula gap → pending chip + real counts
   const hasCounts = internet.counts !== undefined;
   return (
     <section className="bg-white p-4 dark:bg-slate-800">
