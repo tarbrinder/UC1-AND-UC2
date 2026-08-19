@@ -55,14 +55,19 @@ export function RiskColumn({
   state = 'ready',
   sourcesAbsent,
   onRetry,
+  mode = 'fixture',
 }: {
   risk: Persona360Data['risk'];
   state?: ColumnState;
   sourcesAbsent?: string[];
   onRetry?: () => void;
+  mode?: 'fixture' | 'live';
 }) {
   const fraudDetail = risk.fraudRead?.detail ?? '';
   const fraudParts = fraudDetail.split('ability to pay');
+  // Live mode: no single numeric risk score is emitted by the workflow (audit §1) → pass
+  // numericAvailable=false so RiskScoreBlock renders the pending chip + raw Sign3 score,
+  // never a fabricated 0/100 + band.
   return (
     <section className="bg-white p-4 dark:bg-slate-800">
       <SectionTitle>3 · RISK &amp; FRAUD</SectionTitle>
@@ -71,13 +76,13 @@ export function RiskColumn({
       {state === 'empty' && <ColumnEmpty message="No risk data" sourcesAbsent={sourcesAbsent} />}
       {state === 'ready' && (
         <>
-          <RiskScoreBlock score={risk.score} band={risk.band} rawSign3={risk.rawSign3} />
+          <RiskScoreBlock score={risk.score} band={risk.band} rawSign3={risk.rawSign3} numericAvailable={mode !== 'live'} />
 
           <div className="mb-4 grid grid-cols-2 gap-3">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-wide text-gray-500">SM risk</div>
               <div className="text-[15px] font-extrabold" style={{ color: positive }}>
-                {risk.smRisk}
+                {risk.smRisk || (mode === 'live' ? '—' : risk.smRisk)}
               </div>
               <div className="text-[10px] text-gray-500">{risk.smNote}</div>
             </div>
@@ -86,7 +91,7 @@ export function RiskColumn({
                 {/* seller-side rating (also-seller signal) — never "buyer trust" (audit §3) */}
                 <div className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Rating &amp; grade</div>
                 <div className="text-[15px] font-extrabold text-gray-900">
-                  {risk.rating.value} · {risk.rating.grade}
+                  {risk.rating.value}{risk.rating.grade ? ` · ${risk.rating.grade}` : ''}
                 </div>
                 <div className="text-[10px] text-gray-500">{risk.rating.count} supplier ratings</div>
               </div>
@@ -106,7 +111,7 @@ export function RiskColumn({
             ))}
           </div>
 
-          {risk.fraudRead && (
+          {risk.fraudRead && mode !== 'live' && (
             <div
               className="rounded-r-md border-l-2 p-3"
               style={{ backgroundColor: fraudBg, borderLeftColor: fraudRule }}

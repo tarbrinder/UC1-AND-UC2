@@ -18,7 +18,7 @@ function MetaPair({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function PersonaHeader({ data }: { data: Persona360Data }) {
+export function PersonaHeader({ data, mode = 'fixture' }: { data: Persona360Data; mode?: 'fixture' | 'live' }) {
   const { identity, trust } = data;
   const meta: { label: string; value: string }[] = [
     { label: 'AGE / GENDER', value: [identity.age, identity.gender].filter(Boolean).join(' · ') },
@@ -53,21 +53,49 @@ export function PersonaHeader({ data }: { data: Persona360Data }) {
       </div>
 
       <div className="flex items-center gap-4">
-        <TrustRing score={trust.score} max={trust.max} />
-        <div>
-          <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400">Trust score</div>
-          <div className="text-[13px] font-bold" style={{ color: caution }}>
-            {trust.recommendation}
-          </div>
-          <ul className="mt-1 space-y-0.5">
-            {trust.signals.map((s) => (
-              <li key={s.label} className="flex items-center gap-1.5 text-[11px] text-slate-200">
-                <span className={`h-1.5 w-1.5 rounded-full ${SIGNAL_DOT[s.state]}`} aria-hidden="true" />
-                {s.label}
-              </li>
-            ))}
-          </ul>
-        </div>
+        {/* Live mode trust = round((1 - Sign3 fsd) * 100). When Sign3 is 'unknown' the mapper
+            leaves score at 0 and sets recommendation to a "Sign3 unavailable" string — render the
+            dashed ring + chip only then, never for a real derived score. */}
+        {mode === 'live' ? (
+          (() => {
+            const sign3Unknown = trust.score === 0 && /unavailable|pending/i.test(trust.recommendation);
+            return (
+              <div className="flex items-center gap-4">
+                <TrustRing score={trust.score} max={trust.max} pending={sign3Unknown} />
+                <div>
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400">Trust score</div>
+                  {sign3Unknown ? (
+                    <div className="mt-0.5 inline-block rounded border border-amber-400 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-600">
+                      Sign3 unavailable
+                    </div>
+                  ) : (
+                    <div className="text-[13px] font-bold text-white">
+                      {trust.score}<span className="text-slate-400">/{trust.max}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()
+        ) : (
+          <>
+            <TrustRing score={trust.score} max={trust.max} />
+            <div>
+              <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400">Trust score</div>
+              <div className="text-[13px] font-bold" style={{ color: caution }}>
+                {trust.recommendation}
+              </div>
+              <ul className="mt-1 space-y-0.5">
+                {trust.signals.map((s) => (
+                  <li key={s.label} className="flex items-center gap-1.5 text-[11px] text-slate-200">
+                    <span className={`h-1.5 w-1.5 rounded-full ${SIGNAL_DOT[s.state]}`} aria-hidden="true" />
+                    {s.label}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </>
+        )}
       </div>
     </header>
   );

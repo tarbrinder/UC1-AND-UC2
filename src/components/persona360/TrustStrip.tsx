@@ -2,11 +2,11 @@
 // in live mode render Pending unless product defines a formula (design §5 TrustStrip).
 // Non-interactive (aria-hidden, not an input).
 
-export function TrustStrip({ score, max, mode = 'fixture' }: { score: number; max: number; mode?: 'fixture' | 'live' }) {
-  if (mode === 'live') {
+export function TrustStrip({ score, max, mode = 'fixture', pending = false }: { score: number; max: number; mode?: 'fixture' | 'live'; pending?: boolean }) {
+  if (mode === 'live' && pending) {
     return (
       <div className="flex h-8 items-center bg-white px-4 text-[10px] text-gray-400" aria-hidden="true">
-        trustScore · <span className="ml-1 border border-amber-400 bg-amber-50 px-1.5 py-0.5 text-amber-600">formula pending</span>
+        trustScore · <span className="ml-1 border border-amber-400 bg-amber-50 px-1.5 py-0.5 text-amber-600">Sign3 unavailable</span>
       </div>
     );
   }

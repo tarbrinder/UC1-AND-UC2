@@ -4,7 +4,7 @@
 import { caution, trustTrack } from './tokens';
 
 /* ---------------------------------- TrustRing ------------------------------------- */
-export function TrustRing({ score, max, size = 64 }: { score: number; max: number; size?: number }) {
+export function TrustRing({ score, max, size = 64, pending = false }: { score: number; max: number; size?: number; pending?: boolean }) {
   const stroke = 6;
   const r = (size - stroke) / 2 - 1;
   const c = 2 * Math.PI * r;
@@ -16,27 +16,34 @@ export function TrustRing({ score, max, size = 64 }: { score: number; max: numbe
       height={size}
       viewBox={`0 0 ${size} ${size}`}
       role="img"
-      aria-label={`Trust score ${score} of ${max}`}
+      aria-label={pending ? 'Trust score formula pending' : `Trust score ${score} of ${max}`}
     >
       <g transform={`rotate(-90 ${size / 2} ${size / 2})`} aria-hidden="true">
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={trustTrack} strokeWidth={stroke} />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={r}
-          fill="none"
-          stroke={caution}
-          strokeWidth={stroke}
-          strokeDasharray={dashed}
-          strokeLinecap="round"
-        />
+        {pending ? (
+          /* live-mode pending ring: dashed track, no fabricated arc/number */
+          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={caution} strokeWidth={stroke} strokeDasharray={`2 6`} strokeLinecap="round" opacity={0.5} />
+        ) : (
+          <circle
+            cx={size / 2}
+            cy={size / 2}
+            r={r}
+            fill="none"
+            stroke={caution}
+            strokeWidth={stroke}
+            strokeDasharray={dashed}
+            strokeLinecap="round"
+          />
+        )}
       </g>
       <text x="50%" y="47%" textAnchor="middle" dominantBaseline="middle" className="fill-white text-xl font-extrabold">
-        {score}
+        {pending ? '—' : score}
       </text>
-      <text x="50%" y="70%" textAnchor="middle" dominantBaseline="middle" className="fill-slate-400" style={{ fontSize: 8 }}>
-        of {max}
-      </text>
+      {!pending && (
+        <text x="50%" y="70%" textAnchor="middle" dominantBaseline="middle" className="fill-slate-400" style={{ fontSize: 8 }}>
+          of {max}
+        </text>
+      )}
     </svg>
   );
 }

@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/imworkflow/:path*",
+      "destination": "https://imworkflow.intermesh.net/:path*"
+    }
+  ]
+}

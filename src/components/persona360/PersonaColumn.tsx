@@ -11,12 +11,17 @@ const STAGE_LABELS: Record<(typeof STAGES)[number], string> = {
   enterprise: 'Enterprise',
 };
 
-function AssignedPersonaCard({ persona }: { persona: Persona360Data['persona'] }) {
+function AssignedPersonaCard({ persona, mode = 'fixture' }: { persona: Persona360Data['persona']; mode?: 'fixture' | 'live' }) {
+  // In live mode the workflow/audit does not emit a real match % — never fabricate one
+  // from the score-less adapter (matchPct is 0 there). Show '—' instead of "0% match".
+  const showMatch = mode !== 'live' ? persona.matchPct : (persona.matchPct > 0 ? persona.matchPct : null);
   return (
     <div className="mb-4 rounded-md p-3" style={{ backgroundColor: navy }}>
       <div className="flex items-center justify-between">
         <span className="text-[9px] uppercase tracking-wider text-slate-400">Assigned persona</span>
-        <span className="text-[11px] font-bold text-amber-500">{persona.matchPct}% match</span>
+        <span className="text-[11px] font-bold text-amber-500">
+          {showMatch != null ? `${showMatch}% match` : 'match —'}
+        </span>
       </div>
       <div className="mt-1 text-[15px] font-extrabold leading-snug text-white">{persona.primary}</div>
       {persona.alternate && <div className="mt-0.5 text-[10px] text-slate-300">Alternate: {persona.alternate}</div>}
@@ -57,11 +62,13 @@ export function PersonaColumn({
   state = 'ready',
   sourcesAbsent,
   onRetry,
+  mode = 'fixture',
 }: {
   persona: Persona360Data['persona'];
   state?: ColumnState;
   sourcesAbsent?: string[];
   onRetry?: () => void;
+  mode?: 'fixture' | 'live';
 }) {
   return (
     <section className="bg-white p-4 dark:bg-slate-800">
@@ -71,7 +78,7 @@ export function PersonaColumn({
       {state === 'empty' && <ColumnEmpty message="No persona data" sourcesAbsent={sourcesAbsent} />}
       {state === 'ready' && (
         <>
-          <AssignedPersonaCard persona={persona} />
+          <AssignedPersonaCard persona={persona} mode={mode} />
           <FieldRow label="Industry" sub={persona.industrySecondary}>
             <div className="text-[13px] font-semibold text-gray-900">{persona.industry}</div>
           </FieldRow>

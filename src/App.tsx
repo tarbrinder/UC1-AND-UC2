@@ -7,7 +7,8 @@ import SimpleRFQForm from './components/SimpleRFQForm';
 import StandardRFQForm from './components/StandardRFQForm';
 import AsyncPrototypePage from './components/AsyncPrototypePage';
 import AsyncBuyerProfilePage from './components/AsyncBuyerProfilePage';
-import Persona360Page from './components/persona360/Persona360Page';
+import PersonaLauncherDock from './components/PersonaLauncherDock';
+import Persona360LivePage from './components/persona360/Persona360LivePage';
 import { getStandardProduct } from './lib/standardProducts';
 import { getOfflineSnapshot } from './lib/offlineSnapshot';
 
@@ -54,8 +55,13 @@ export default function App() {
   }
   // Any OTHER non-empty ?rfq value is a bad/stale link → explicit not-found, not a silent MainApp mount (P2-234).
   if (rfqMode) return <RouteNotFound detail={`"${rfqMode}" is not a valid form.`} />;
-  if (new URLSearchParams(window.location.search).get('persona360') === '1') return <Persona360Page />; // NEW additive Buyer-Persona 360, fixture-first
-  return <MainApp />;
+  if (new URLSearchParams(window.location.search).get('persona360') === '1') return <Persona360LivePage />; // LIVE Buyer-Persona 360 (fixture preview until a GLID is pulled)
+  return (
+    <>
+      <MainApp />
+      <PersonaLauncherDock />
+    </>
+  );
 }
 
 // Explicit not-found for a mistyped/stale demo deep link — replaces the silent fall-through into MainApp (GLADMIN).
