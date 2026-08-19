@@ -1,0 +1,3150 @@
+{
+  "glid": "268590579",
+  "fetched_at": "2026-08-18T10:45:49.129Z",
+  "derived_anchors": {
+    "mobile": "6306941152",
+    "name": "Jaiveer",
+    "city": "Auraiya",
+    "state": "Uttar Pradesh",
+    "company": null,
+    "gst": null,
+    "email": "jayveernayak75@gmail.com"
+  },
+  "source_registry": {
+    "calls": {
+      "source_name": "calls",
+      "purpose": "Transcribed sales-call recordings (spoken intent; date-matched to a requirement for UC2).",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": true,
+      "should_influence_trust_score": false,
+      "observed_only": false
+    },
+    "pns_calls": {
+      "source_name": "pns_calls",
+      "purpose": "PNS masked-number call log — products/categories called about (sourcing basket), caller telecom circle (location hint), offer_id linking a call to a BuyLead, + transcribed spoken intent.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": true,
+      "should_influence_trust_score": false,
+      "observed_only": false
+    },
+    "csl": {
+      "source_name": "csl",
+      "purpose": "On-site search/browse clickstream — base parsed activity + ID-decoded category/city/product NAMES.",
+      "trust_level": "medium",
+      "should_influence_persona": false,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": false,
+      "observed_only": false
+    },
+    "requirement": {
+      "source_name": "requirement",
+      "purpose": "BuyLeads ⨝ ISQ — declared demand + answered specs, category-named, with status/recency. The current-requirement signal.",
+      "trust_level": "high",
+      "should_influence_persona": false,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": true,
+      "should_influence_trust_score": false,
+      "observed_only": false
+    },
+    "whatsapp": {
+      "source_name": "whatsapp",
+      "purpose": "One chronological WhatsApp timeline — buyer turns = signal, our offers = context.",
+      "trust_level": "medium",
+      "should_influence_persona": false,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": false,
+      "observed_only": false
+    },
+    "identity": {
+      "source_name": "identity",
+      "purpose": "Registered identity + account tenure (name/company/city/state/designation/email/mobile + member_since/last_login).",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "pns": {
+      "source_name": "pns",
+      "purpose": "AI-distilled sales-call insights — buyer SPOKE (highest intent/requirement/location trust).",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": true,
+      "should_influence_trust_score": false,
+      "observed_only": false
+    },
+    "external": {
+      "source_name": "external",
+      "purpose": "Paid external identity/trust (Befisc+Sign3) — name/email/mobile/PAN/gender/age/location/income TRIANGULATED vs identity for confidence. Cross-check, never primary intent.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": true
+    },
+    "mobiles": {
+      "source_name": "mobiles",
+      "purpose": "Buyer phone triangulated across Profile/Befisc/Sign3 — ≥2 sources = VERIFIED number, all 3 = triple-verified.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "pan_union": {
+      "source_name": "pan_union",
+      "purpose": "PANs from Sign3 phone_to_pan + Befisc + Profile, deduped/source-tagged + Sign3 pan_advance authoritative entity type (Individual/Company/Firm...) & sole-prop/director flags → b2b_b2c.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "gstin_union": {
+      "source_name": "gstin_union",
+      "purpose": "GSTINs from Sign3 pan_gst_search + IDfy pan_gst_link + Befisc + Profile, deduped, found_by-tagged; multi-state count = scale/B2B.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "gst_detail_union": {
+      "source_name": "gst_detail_union",
+      "purpose": "Per-field GST consensus across Sign3 gst_validate + IDfy ind_gst_certificate + Befisc FFFQ — each field carries canonical value, agreement_count, and raw per-vendor values. ≥2 agree ⇒ high-confidence industry/constitution/nature deduction; disagreements surfaced for arbitration.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": true,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "web_osint": {
+      "source_name": "web_osint",
+      "purpose": "Web/OSINT (Parallel.ai deep search) — public digital footprint the registries cannot see: website, employee_count/size, socials + activity level, Google-Business rating/reviews, Udyam, other businesses, recent news, year_established. Corroboration + scale/legitimacy/digital-maturity; cross-validates KYB identity (web address vs GST address, web business_type vs GST constitution). NEVER overrides KYB identity.",
+      "trust_level": "medium",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": true
+    },
+    "udyam": {
+      "source_name": "udyam",
+      "purpose": "Sign3 Udyam/MSME registration (PAN→Udyam→details) — enterprise_type (Micro/Small/Medium = authoritative SIZE band), major_activity, organization_type, NIC industry codes+descriptions, official address, incorporation date. Government MSME record: hard SIZE + industry + entity signal; official_address triangulates GST/web address.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "buyerprofile": {
+      "source_name": "buyerprofile",
+      "purpose": "IndiaMART buyer record — business_type, MCAT interests, products SOLD (also-a-seller), cleaned social, geo, activity, verification.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "company_reg": {
+      "source_name": "company_reg",
+      "purpose": "IndiaMART VERIFIED GST/KYB record — constitution, nature, turnover band, reg year, PAN, partner names. PRIMARY registry authority.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "pan_gst_idfy": {
+      "source_name": "pan_gst_idfy",
+      "purpose": "IDfy PAN→all-GSTINs — registration count + multi-state footprint (scale/B2B signal); complements Befisc GSTIN discovery.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": false,
+      "should_influence_requirement_generation": false,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "gst_cert_idfy": {
+      "source_name": "gst_cert_idfy",
+      "purpose": "IDfy GST Certificate — legal/trade name, constitution, nature_of_business (retail/wholesale/mfg/import/export), taxpayer type, vintage, filing-compliance history. Second independent KYB source: triangulates Befisc-Advanced.",
+      "trust_level": "high",
+      "should_influence_persona": true,
+      "should_influence_intent": true,
+      "should_influence_requirement_generation": true,
+      "should_influence_trust_score": true,
+      "observed_only": false
+    },
+    "gst": {
+      "source_name": "gst",
+      "trust_level": "high",
+      "observed_only": true,
+      "purpose": "Mobile/Email→GST (KYB) registered-business signal"
+    }
+  },
+  "source_priority": {
+    "persona": [
+      "pns",
+      "identity",
+      "external",
+      "csl"
+    ],
+    "intent": [
+      "pns",
+      "whatsapp",
+      "requirement",
+      "csl"
+    ],
+    "requirement": [
+      "requirement",
+      "pns"
+    ],
+    "trust": [
+      "identity",
+      "external",
+      "pns"
+    ],
+    "location": [
+      "pns",
+      "identity",
+      "external",
+      "whatsapp",
+      "csl"
+    ]
+  },
+  "sources": {
+    "aadhaar": {
+      "source": "aadhaar",
+      "summary": {
+        "present": false,
+        "found_by": []
+      },
+      "__health": {
+        "node": "aadhaar-fact",
+        "ok": true,
+        "present": false,
+        "note": "no aadhaar on any profile/identity source"
+      }
+    },
+    "calls": {
+      "summary": {
+        "redash_records": 1,
+        "call_count": 1,
+        "failed_count": 0,
+        "no_audio_count": 0,
+        "brief": "1 of 1 call(s) extracted (Go-schema)",
+        "calls": [
+          {
+            "date": "2026-05-10T16:44:23.210",
+            "url": "https://squadiq-call-recs.s3.amazonaws.com/8K3GCZV14.mp3",
+            "extraction": {
+              "no_content": true,
+              "no_content_reason": "disconnected after 26s",
+              "metadata": {
+                "call_purpose": "irrelevant"
+              }
+            },
+            "status": "extracted"
+          }
+        ],
+        "statuses": [
+          {
+            "url": "https://squadiq-call-recs.s3.amazonaws.com/8K3GCZV14.mp3",
+            "date": "2026-05-10T16:44:23.210",
+            "status": "extracted"
+          }
+        ]
+      }
+    },
+    "pns_calls": {
+      "summary": {
+        "redash_records": 10,
+        "call_count": 9,
+        "failed_count": 1,
+        "no_audio_count": 1,
+        "brief": "9 of 10 PNS call(s) extracted (Go-schema) · 1 had no recording media (skipped, not failed)",
+        "calls": [
+          {
+            "date": "2026-05-06T17:02:27",
+            "uc_id": "Xchange808b981f-7fcc-489f-a185-108a516bd217",
+            "mcat": "A4 Notebook",
+            "subcat": "Diaries, Notebook, Files, Folders, Envelope, Calendar & Related Stationery Items",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "118210160",
+            "extraction": {
+              "no_content": false,
+              "buyer_details": {
+                "buyer_name": "Jaideep Singh",
+                "buyer_location": {
+                  "buyer_state": "Uttar Pradesh"
+                }
+              },
+              "seller_details": {
+                "seller_location": {
+                  "seller_city": "Delhi"
+                }
+              },
+              "products": [
+                {
+                  "product_name": "Notebook Raw Material (paper)",
+                  "is_buyer_interested": true,
+                  "specifications": [
+                    {
+                      "name": "Product Type",
+                      "value": "Paper",
+                      "buyer_requested": true,
+                      "seller_mentioned": true
+                    }
+                  ]
+                }
+              ],
+              "lead_tag": {
+                "deal_readiness_reason": "The buyer is starting a new manufacturing unit and is exploring options for raw materials or finished products.",
+                "deal_readiness": "Warm"
+              },
+              "next_steps": {
+                "buyer_next_steps": [
+                  "To review the details of the finished product and its pricing shared by the seller"
+                ],
+                "seller_next_steps": [
+                  "To share details of the finished product and its pricing on WhatsApp"
+                ]
+              },
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi",
+                  "English"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer is looking for raw materials (paper) to manufacture notebooks, as he is starting a new manufacturing unit. He is also open to buying finished products for resale.",
+                  "reasoning": "The buyer explicitly stated his requirement for notebook raw materials and mentioned he is starting a new manufacturing unit. He also showed interest in reselling finished products.",
+                  "intent_level": "High"
+                },
+                "intended_application": "Notebook Manufacturing",
+                "call_outcome": {
+                  "conclusion_notes": "The seller will share details of finished products and their pricing with the buyer, who is starting a new manufacturing unit and is considering both raw material and finished product options.",
+                  "category": "Follow-up"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "manufacturer",
+                      "persona_detail": "Notebook Manufacturer"
+                    },
+                    "quantity_scale": "High",
+                    "order_type": {
+                      "order_type_category": "commercial"
+                    },
+                    "repeat_buyer": false,
+                    "keywords": [
+                      "manufacturing unit",
+                      "raw material",
+                      "resale"
+                    ]
+                  },
+                  "reason": "The buyer is setting up a manufacturing unit for notebooks and is inquiring about raw materials or finished products for resale, indicating a business-to-business transaction.",
+                  "type": "B2B"
+                },
+                "additional_details": {
+                  "buyer_queries": [
+                    {
+                      "query": "What will be the rate for the finished product?",
+                      "sequence": 1,
+                      "category": "Pricing"
+                    },
+                    {
+                      "query": "What will be the selling price for the finished product?",
+                      "sequence": 2,
+                      "category": "Pricing"
+                    },
+                    {
+                      "query": "From where are you speaking?",
+                      "sequence": 3,
+                      "category": "Other"
+                    }
+                  ]
+                }
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-06T16:42:02",
+            "uc_id": "Xchange439b3259-6305-42cc-a15b-f976bde2cb9f",
+            "product": "Paper Plates Raw Material",
+            "mcat": "Paper Plate Raw Material",
+            "subcat": "Paper, Paper Rolls, Paper Sheets and Papermade Products",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "9699899",
+            "extraction": {
+              "no_content": false,
+              "buyer_details": {
+                "buyer_location": {
+                  "buyer_city": "Kanpur",
+                  "buyer_locality": "Geeta Nagar"
+                }
+              },
+              "products": [
+                {
+                  "product_name": "Raw Material",
+                  "is_buyer_interested": true,
+                  "price": {
+                    "value": 52,
+                    "currency": "INR",
+                    "buyer_price_reaction": {
+                      "quote": "80 chahiye sir",
+                      "category": "Too High"
+                    }
+                  },
+                  "quantity_required": {
+                    "value": 80,
+                    "unit": "kg"
+                  },
+                  "specifications": [
+                    {
+                      "name": "Rate",
+                      "value": "52",
+                      "unit": "rupees",
+                      "buyer_requested": false,
+                      "seller_mentioned": true
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer is looking for raw material and is asking about the current rate.",
+                  "reasoning": "The buyer initiated the call to inquire about the rate of raw material and stated a quantity he needs.",
+                  "intent_level": "Medium"
+                },
+                "call_outcome": {
+                  "conclusion_notes": "The buyer found the price too high and the conversation ended without further commitment.",
+                  "category": "Lost"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "other",
+                      "persona_detail": "unknown"
+                    },
+                    "quantity_scale": "Low",
+                    "order_type": {
+                      "order_type_category": "one-time"
+                    },
+                    "repeat_buyer": false
+                  },
+                  "reason": "The buyer is inquiring about raw material for a specific quantity, indicating a business-related purchase.",
+                  "type": "B2B"
+                }
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-07T13:07:37",
+            "uc_id": "Xchangeaf7ca0e1-ad93-48f4-abb0-22c625533e8c",
+            "mcat": "Tissue Jumbo Roll",
+            "subcat": "Towels, Napkins, Handkerchieves & Aprons",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "3809364",
+            "extraction": {
+              "no_content": false,
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer is looking for raw material to make notebooks.",
+                  "reasoning": "The buyer explicitly stated their requirement for raw material to make notebooks.",
+                  "intent_level": "High"
+                },
+                "call_outcome": {
+                  "conclusion_notes": "The call ended with the seller promising a callback to provide information about the raw material for notebooks.",
+                  "category": "Follow-up"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "other",
+                      "persona_detail": "Notebook Manufacturer"
+                    },
+                    "quantity_scale": "High",
+                    "order_type": {
+                      "order_type_category": "commercial"
+                    },
+                    "repeat_buyer": false,
+                    "keywords": [
+                      "raw material",
+                      "notebook making"
+                    ]
+                  },
+                  "reason": "The buyer is looking for raw material to manufacture notebooks, indicating a business-to-business transaction for commercial purposes.",
+                  "type": "B2B"
+                },
+                "additional_details": {
+                  "buyer_queries": [
+                    {
+                      "query": "Is raw material for making notebooks available?",
+                      "sequence": 1,
+                      "category": "Availability"
+                    }
+                  ]
+                }
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-05T18:00:52",
+            "uc_id": "Xchangef62c7943-cce1-4e3e-a95f-6fc2044f865b",
+            "offer_id": "143766051895",
+            "mcat": "Binding Service",
+            "subcat": "Offset Printing, Binding & Laminating Services & Solutions",
+            "seller_id": "45658841",
+            "extraction": {
+              "no_content": false,
+              "buyer_details": {
+                "buyer_location": {
+                  "buyer_city": "Kanpur",
+                  "buyer_state": "UP"
+                }
+              },
+              "seller_details": {
+                "seller_location": {
+                  "seller_city": "Vadodara",
+                  "seller_state": "Gujarat"
+                }
+              },
+              "products": [
+                {
+                  "product_name": "Raw Material (paper)",
+                  "is_buyer_interested": true,
+                  "quantity_required": {
+                    "value": 150,
+                    "unit": "kg"
+                  },
+                  "seller_accepts_quantity": false,
+                  "specifications": [
+                    {
+                      "name": "GSM",
+                      "value": "48-54 GSM",
+                      "buyer_requested": true,
+                      "seller_mentioned": false
+                    }
+                  ]
+                }
+              ],
+              "lead_tag": {
+                "deal_readiness_reason": "The buyer is looking for raw material for manufacturing and wants to start his own factory. However, the seller is located in Vadodara, Gujarat, and the buyer is in Kanpur, UP, making transportation costs too high.",
+                "deal_readiness": "Cold",
+                "deal_blockers": [
+                  {
+                    "category": "Location",
+                    "detail": "Seller is in Gujarat, buyer in UP, transportation costs too high"
+                  }
+                ]
+              },
+              "next_steps": {
+                "buyer_next_steps": [
+                  "To look for local suppliers in UP"
+                ]
+              },
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer needs 100-150 kg of 48-54 GSM paper as raw material for his own manufacturing unit.",
+                  "reasoning": "The buyer explicitly stated the product, specifications, quantity, and his intention to start a manufacturing unit, indicating a clear and specific requirement.",
+                  "intent_level": "High"
+                },
+                "intended_application": "Manufacturing",
+                "call_outcome": {
+                  "conclusion_notes": "The deal is lost due to the significant distance between the buyer and seller, making transportation costs too high. The seller advised the buyer to look for local suppliers.",
+                  "category": "Lost"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "manufacturer",
+                      "persona_detail": "Starting own manufacturing unit"
+                    },
+                    "quantity_scale": "High",
+                    "order_type": {
+                      "order_type_category": "bulk"
+                    },
+                    "repeat_buyer": false,
+                    "keywords": [
+                      "manufacturing",
+                      "raw material",
+                      "factory"
+                    ]
+                  },
+                  "reason": "The buyer is looking for raw material in bulk for his own manufacturing unit, indicating a business-to-business transaction.",
+                  "type": "B2B"
+                },
+                "additional_details": {
+                  "buyer_queries": [
+                    {
+                      "query": "What is the rate of the raw material?",
+                      "sequence": 1,
+                      "category": "Pricing"
+                    }
+                  ],
+                  "seller_queries": [
+                    {
+                      "query": "What type of raw material do you need?",
+                      "sequence": 2,
+                      "category": "Specifications"
+                    },
+                    {
+                      "query": "Where are you calling from?",
+                      "sequence": 3,
+                      "category": "Other"
+                    },
+                    {
+                      "query": "How much quantity do you need?",
+                      "sequence": 4,
+                      "category": "Quantity"
+                    }
+                  ]
+                }
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-18T11:39:03",
+            "uc_id": "Xchangea40f24f7-4116-4d7e-9e2e-7908f808bf25",
+            "product": "Ruled Writing Paper",
+            "mcat": "Writing Paper",
+            "subcat": "Paper, Paper Rolls, Paper Sheets and Papermade Products",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "85830202",
+            "extraction": {
+              "no_content": false,
+              "products": [
+                {
+                  "product_name": "Paper",
+                  "is_buyer_interested": true,
+                  "specifications": [
+                    {
+                      "name": "Type",
+                      "value": "Raw material for notebook making",
+                      "buyer_requested": true,
+                      "seller_mentioned": false
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer is looking for paper, which is a raw material for making notebooks.",
+                  "reasoning": "The buyer explicitly stated his requirement for paper as a raw material for making notebooks.",
+                  "intent_level": "High"
+                },
+                "intended_application": "Notebook Manufacturing",
+                "call_outcome": {
+                  "conclusion_notes": "The seller provided another contact number for the buyer to get details about the paper.",
+                  "category": "Follow-up"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "manufacturer",
+                      "persona_detail": "Notebook manufacturer"
+                    },
+                    "quantity_scale": "High",
+                    "order_type": {
+                      "order_type_category": "recurring"
+                    },
+                    "repeat_buyer": true,
+                    "keywords": [
+                      "raw material",
+                      "notebook making"
+                    ]
+                  },
+                  "reason": "The buyer is looking for raw material to manufacture notebooks, indicating a business-to-business transaction with a high quantity scale and recurring order type.",
+                  "type": "B2B"
+                }
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-10T16:43:54",
+            "uc_id": "Xchange96dc0c84-4ce4-4409-b995-2fd9b0d31e82",
+            "mcat": "Writing Notebook",
+            "subcat": "Diaries, Notebook, Files, Folders, Envelope, Calendar & Related Stationery Items",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "30024278",
+            "extraction": {
+              "no_content": true,
+              "no_content_reason": "disconnected after 16s",
+              "metadata": {
+                "call_purpose": "irrelevant"
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-10T16:40:58",
+            "uc_id": "Xchange5cb28d1d-8d7f-4780-8944-68b5c471d790",
+            "mcat": "Pizza Boxes",
+            "subcat": "Food & Agro Products Packaging Materials & Supplies",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "16602465",
+            "extraction": {
+              "no_content": false,
+              "buyer_details": {
+                "buyer_location": {
+                  "buyer_city": "Kanpur"
+                }
+              },
+              "seller_details": {
+                "seller_location": {
+                  "seller_city": "Kanpur"
+                }
+              },
+              "products": [
+                {
+                  "product_name": "Paper",
+                  "is_buyer_interested": true,
+                  "specifications": [
+                    {
+                      "name": "Purpose",
+                      "value": "Copy/Notebook making",
+                      "buyer_requested": true,
+                      "seller_mentioned": false
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer is looking for paper to make copies and notebooks.",
+                  "reasoning": "The buyer explicitly stated his requirement for paper to make copies and notebooks.",
+                  "intent_level": "High"
+                },
+                "intended_application": "Notebook/Copy Making",
+                "call_outcome": {
+                  "conclusion_notes": "The seller provided another number for the buyer to contact for his requirement.",
+                  "category": "Follow-up"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "manufacturer",
+                      "persona_detail": "Paper product manufacturer"
+                    },
+                    "quantity_scale": "High",
+                    "order_type": {
+                      "order_type_category": "recurring"
+                    },
+                    "repeat_buyer": true,
+                    "keywords": [
+                      "copy making",
+                      "notebook making"
+                    ]
+                  },
+                  "reason": "The buyer is a manufacturer of paper products (copies and notebooks) and is looking for raw material (paper) for his business, indicating a B2B transaction.",
+                  "type": "B2B"
+                }
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-05T17:59:06",
+            "uc_id": "2bd45714-fd76-4660-9c2f-3875ab1b0613",
+            "circle": "India",
+            "seller_id": "0",
+            "status": "no_audio"
+          },
+          {
+            "date": "2026-05-10T16:34:28",
+            "uc_id": "Xchangeb4e85fda-1f78-4674-b928-f85ade72bd5a",
+            "mcat": "A4 Notebook",
+            "subcat": "Diaries, Notebook, Files, Folders, Envelope, Calendar & Related Stationery Items",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "118210160",
+            "extraction": {
+              "no_content": false,
+              "buyer_details": {
+                "buyer_location": {
+                  "buyer_city": "Kanpur"
+                }
+              },
+              "seller_details": {
+                "seller_location": {
+                  "seller_city": "Delhi"
+                }
+              },
+              "products": [
+                {
+                  "product_name": "Raw Material Paper (kagaz)",
+                  "is_buyer_interested": true,
+                  "price": {
+                    "currency": "INR",
+                    "price_unit": "kg",
+                    "buyer_price_reaction": {
+                      "quote": "Bhai sahab kagaz 36 tarike ka hai. Main aapko kaise rate bata dun? Motamota 45 rupaye se kagaz shuru hai. 95 rupaye tak ki quality hai.",
+                      "category": "Negotiating"
+                    },
+                    "offer_details": "Price starts from 45 rupees and goes up to 95 rupees per kg."
+                  },
+                  "quantity_required": {
+                    "unit": "ton"
+                  },
+                  "specifications": [
+                    {
+                      "name": "GSM",
+                      "value": "54",
+                      "buyer_requested": true,
+                      "seller_mentioned": false
+                    }
+                  ]
+                }
+              ],
+              "lead_tag": {
+                "deal_readiness_reason": "The buyer is looking for raw material paper for his manufacturing business and wants to know the price based on GSM. The seller asked him to call back tomorrow as it is a holiday.",
+                "deal_readiness": "Warm"
+              },
+              "callback": "callback by tomorrow - to discuss the price of paper",
+              "next_steps": {
+                "buyer_next_steps": [
+                  "To call the seller tomorrow to discuss the price of paper"
+                ],
+                "seller_next_steps": [
+                  "To check the stock and rates for different GSMs of paper"
+                ]
+              },
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer is looking for raw material paper for his manufacturing business and wants to know the price based on GSM. He needs it in varying quantities, sometimes 1 ton, sometimes half a ton, depending on his supply.",
+                  "reasoning": "The buyer clearly stated his requirement for raw material paper, mentioned the GSM, and discussed the quantity needed for his manufacturing business. He also inquired about the price range.",
+                  "intent_level": "High"
+                },
+                "intended_application": "Manufacturing",
+                "call_outcome": {
+                  "conclusion_notes": "The buyer will call back tomorrow to discuss the price as it is a holiday today. (\"main kal aapse baat karun kya?\" / \"haanji aap kal kariye\")",
+                  "category": "Follow-up"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "manufacturer"
+                    },
+                    "quantity_scale": "High",
+                    "order_type": {
+                      "order_type_category": "recurring"
+                    },
+                    "repeat_buyer": true,
+                    "keywords": [
+                      "raw material",
+                      "manufacturing"
+                    ]
+                  },
+                  "reason": "The buyer is a manufacturer who needs raw material paper in varying quantities for his business, indicating a recurring and bulk requirement.",
+                  "type": "B2B"
+                },
+                "additional_details": {
+                  "buyer_queries": [
+                    {
+                      "query": "What is the rate for 54 GSM paper?",
+                      "sequence": 1,
+                      "category": "Pricing"
+                    },
+                    {
+                      "query": "If I give you my sample, will I get the same material, or will you send material according to your standards?",
+                      "sequence": 2,
+                      "category": "Specifications"
+                    }
+                  ],
+                  "seller_queries": [
+                    {
+                      "query": "What quantity do you need?",
+                      "sequence": 3,
+                      "category": "Quantity"
+                    }
+                  ]
+                }
+              }
+            },
+            "status": "extracted"
+          },
+          {
+            "date": "2026-05-06T11:01:43",
+            "uc_id": "Xchange5430c53e-593b-47cc-ae65-e826b9104b5e",
+            "mcat": "Paper Plate Making Machine",
+            "subcat": "Paper Cone Making, Folding, Coating and Paper Making Machines",
+            "circle": "UP West and Uttaranchal",
+            "seller_id": "24831589",
+            "extraction": {
+              "no_content": false,
+              "buyer_details": {
+                "buyer_location": {
+                  "buyer_city": "Kanpur"
+                }
+              },
+              "seller_details": {
+                "seller_location": {
+                  "seller_city": "Delhi",
+                  "seller_locality": "Uttam Nagar"
+                }
+              },
+              "products": [
+                {
+                  "product_name": "Cutting Machine",
+                  "is_buyer_interested": true,
+                  "price": {
+                    "value": 160000,
+                    "currency": "INR",
+                    "price_unit": "unit"
+                  },
+                  "specifications": [
+                    {
+                      "name": "Size",
+                      "value": "32",
+                      "unit": "inch",
+                      "buyer_requested": true,
+                      "seller_mentioned": true
+                    }
+                  ]
+                },
+                {
+                  "product_name": "Stitching Machine",
+                  "is_buyer_interested": true,
+                  "price": {
+                    "value": 95000,
+                    "currency": "INR",
+                    "price_unit": "unit"
+                  }
+                }
+              ],
+              "lead_tag": {
+                "deal_readiness_reason": "The buyer is currently in Delhi and is planning to visit the seller's location in Uttam Nagar within half an hour to discuss the requirement face-to-face.",
+                "deal_readiness": "Hot"
+              },
+              "callback": "callback by seller - to discuss the final rate face-to-face",
+              "next_steps": {
+                "buyer_next_steps": [
+                  "To visit the seller's location in Uttam Nagar within half an hour"
+                ],
+                "seller_next_steps": [
+                  "To provide the final rate face-to-face",
+                  "To share location and details on WhatsApp"
+                ]
+              },
+              "metadata": {
+                "call_purpose": "requirement",
+                "primary_language": "Hindi",
+                "all_languages": [
+                  "Hindi"
+                ],
+                "buyer_intent": {
+                  "narrative": "The buyer is looking for cutting and stitching machines, specifically a 32-inch cutting machine. He is currently in Delhi and plans to visit the seller's location in Uttam Nagar to finalize the deal.",
+                  "reasoning": "The buyer explicitly stated his requirement for specific machines, including a 32-inch cutting machine, and is making an immediate plan to visit the seller's location for a face-to-face discussion and finalization of rates.",
+                  "intent_level": "High"
+                },
+                "intended_application": "Manufacturing",
+                "call_outcome": {
+                  "conclusion_notes": "The buyer is coming to the seller's location in Uttam Nagar within half an hour to discuss the final rates and details face-to-face.",
+                  "category": "Follow-up"
+                },
+                "call_type": {
+                  "evidence": {
+                    "buyer_persona": {
+                      "persona_category": "manufacturer"
+                    },
+                    "quantity_scale": "Low",
+                    "order_type": {
+                      "order_type_category": "one-time"
+                    },
+                    "repeat_buyer": false
+                  },
+                  "reason": "The buyer is looking for manufacturing machines for his business, indicating a B2B transaction. He is interested in specific types of machines and is willing to visit the seller for a face-to-face discussion.",
+                  "type": "B2B"
+                },
+                "additional_details": {
+                  "buyer_queries": [
+                    {
+                      "query": "What is the rate for the cutting machine?",
+                      "sequence": 1,
+                      "category": "Pricing"
+                    },
+                    {
+                      "query": "What is the rate for the stitching machine?",
+                      "sequence": 2,
+                      "category": "Pricing"
+                    },
+                    {
+                      "query": "What is the rate for the edge square machine?",
+                      "sequence": 3,
+                      "category": "Pricing"
+                    },
+                    {
+                      "query": "Where is your location in Uttam Nagar?",
+                      "sequence": 4,
+                      "category": "Other"
+                    },
+                    {
+                      "query": "What about raw material?",
+                      "sequence": 5,
+                      "category": "Other"
+                    },
+                    {
+                      "query": "What about service?",
+                      "sequence": 6,
+                      "category": "Other"
+                    },
+                    {
+                      "query": "Can I visit now to discuss?",
+                      "sequence": 7,
+                      "category": "Other"
+                    },
+                    {
+                      "query": "Can you provide a final rate?",
+                      "sequence": 8,
+                      "category": "Pricing"
+                    },
+                    {
+                      "query": "Can you provide a manufacturer in Kanpur?",
+                      "sequence": 9,
+                      "category": "Other"
+                    }
+                  ],
+                  "seller_queries": [
+                    {
+                      "query": "What size cutting machine do you need?",
+                      "sequence": 10,
+                      "category": "Specifications"
+                    }
+                  ]
+                }
+              }
+            },
+            "status": "extracted"
+          }
+        ],
+        "statuses": [
+          {
+            "uc_id": "Xchange808b981f-7fcc-489f-a185-108a516bd217",
+            "date": "2026-05-06T17:02:27",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "Xchange439b3259-6305-42cc-a15b-f976bde2cb9f",
+            "date": "2026-05-06T16:42:02",
+            "product": "Paper Plates Raw Material",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "Xchangeaf7ca0e1-ad93-48f4-abb0-22c625533e8c",
+            "date": "2026-05-07T13:07:37",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "Xchangef62c7943-cce1-4e3e-a95f-6fc2044f865b",
+            "date": "2026-05-05T18:00:52",
+            "offer_id": "143766051895",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "Xchangea40f24f7-4116-4d7e-9e2e-7908f808bf25",
+            "date": "2026-05-18T11:39:03",
+            "product": "Ruled Writing Paper",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "Xchange96dc0c84-4ce4-4409-b995-2fd9b0d31e82",
+            "date": "2026-05-10T16:43:54",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "Xchange5cb28d1d-8d7f-4780-8944-68b5c471d790",
+            "date": "2026-05-10T16:40:58",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "2bd45714-fd76-4660-9c2f-3875ab1b0613",
+            "date": "2026-05-05T17:59:06",
+            "status": "no_audio"
+          },
+          {
+            "uc_id": "Xchangeb4e85fda-1f78-4674-b928-f85ade72bd5a",
+            "date": "2026-05-10T16:34:28",
+            "status": "extracted"
+          },
+          {
+            "uc_id": "Xchange5430c53e-593b-47cc-ae65-e826b9104b5e",
+            "date": "2026-05-06T11:01:43",
+            "status": "extracted"
+          }
+        ]
+      }
+    },
+    "csl": {
+      "summary": {
+        "csl_activity": false,
+        "brief": "No CSL activity in this window."
+      },
+      "raw": null
+    },
+    "requirement": {
+      "summary": {
+        "requirement_count": 20,
+        "requirements": [
+          {
+            "offer_id": "144879155963",
+            "title": "1300Pcs/Hr Notebook Making Machine",
+            "description": "Buyer searched for notebook manufacturing machine, used machine, and container making machines in Kanpur",
+            "verified": "0",
+            "product_or_service": "product",
+            "posted": "25-MAY-26",
+            "status": "Expired",
+            "expiry": "28-MAY-26",
+            "is_expired": true,
+            "recency_days": 85,
+            "category": "Notebook Making Machines",
+            "category_id": "122454",
+            "specs": {
+              "Automation Grade": "Semi-Automatic",
+              "Machine Components": "Cut Stitch Square",
+              "Cutting Machine Size": "32 inch",
+              "Buyer Filled Details": "Send kro"
+            },
+            "specs_meta": {
+              "Automation Grade": "unknown",
+              "Machine Components": "unknown",
+              "Cutting Machine Size": "unknown",
+              "Buyer Filled Details": "unknown"
+            },
+            "_specs_status": "present",
+            "_specs_join": "offer_id",
+            "requirement_type": "Business Use"
+          },
+          {
+            "offer_id": "144751699552",
+            "title": "Notebook Making Machines",
+            "description": "Buyer searched for Kanpur M paper notebooks and Kanpur M paper",
+            "verified": "0",
+            "product_or_service": "product",
+            "posted": "23-MAY-26",
+            "status": "Expired",
+            "expiry": "26-MAY-26",
+            "is_expired": true,
+            "recency_days": 87,
+            "category": "Notebook Making Machines",
+            "category_id": "122454",
+            "specs": {
+              "Automation Grade": "Semi-Automatic",
+              "Cutting Machine Size": "32-36 inch",
+              "Buyer Filled Details": "Tino, Kanpur btao"
+            },
+            "specs_meta": {
+              "Automation Grade": "unknown",
+              "Cutting Machine Size": "unknown",
+              "Buyer Filled Details": "unknown"
+            },
+            "_specs_status": "present",
+            "_specs_join": "offer_id",
+            "requirement_type": "Business Use"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "offer_id": "144536070046",
+            "title": "Tata Chhota Hathi",
+            "query_id": "3139182435",
+            "verified": "0",
+            "product_or_service": "product",
+            "posted": "19-MAY-26",
+            "status": "Expired",
+            "expiry": "22-MAY-26",
+            "is_expired": true,
+            "recency_days": 91,
+            "category": "TATA Ace",
+            "category_id": "187315",
+            "specs": {
+              "Fuel Type": "Diesel",
+              "Model": "Ace Gold",
+              "Condition": "New"
+            },
+            "specs_meta": {
+              "Fuel Type": "unknown",
+              "Model": "unknown",
+              "Condition": "unknown"
+            },
+            "_specs_status": "present",
+            "_specs_join": "offer_id",
+            "requirement_type": "Business Use"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "offer_id": "144432325067",
+            "title": "Open Garbage Tipper Body Maker",
+            "description": "Buyer searched for notebook making machine in Kanpur, raw material 46 gsm, and paper making machines",
+            "verified": "0",
+            "product_or_service": "product",
+            "posted": "17-MAY-26",
+            "status": "Expired",
+            "expiry": "21-MAY-26",
+            "is_expired": true,
+            "recency_days": 93,
+            "category": "Steel Load Body",
+            "category_id": "137557",
+            "specs": {
+              "Surface Finish": "Painted",
+              "Vehicle Type": "Tempo"
+            },
+            "specs_meta": {
+              "Surface Finish": "unknown",
+              "Vehicle Type": "unknown"
+            },
+            "_specs_status": "present",
+            "_specs_join": "offer_id",
+            "requirement_type": "Business Use"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Rejected",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "offer_id": "144009800585",
+            "title": "Motorized Notebook Making Machine",
+            "query_id": "3136074535",
+            "verified": "0",
+            "product_or_service": "product",
+            "posted": "10-MAY-26",
+            "status": "Expired",
+            "expiry": "13-MAY-26",
+            "is_expired": true,
+            "recency_days": 100,
+            "_specs_status": "none",
+            "_specs_join": "offer_id"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "offer_id": "143836997985",
+            "title": "Exercise Notebook Raw Material",
+            "query_id": "3135055286",
+            "verified": "3",
+            "product_or_service": "product",
+            "posted": "06-MAY-26",
+            "status": "Expired",
+            "expiry": "09-MAY-26",
+            "is_expired": true,
+            "recency_days": 104,
+            "_specs_status": "none",
+            "_specs_join": "offer_id"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          },
+          {
+            "status": "Approved",
+            "_specs_status": "not_fetched"
+          }
+        ]
+      },
+      "__health": {
+        "node": "requirement",
+        "ok": true,
+        "buyleads": 20,
+        "isq_results": 20,
+        "isq_input_empty": false,
+        "isq_empty": 2,
+        "beyond_fetch_cap": 0,
+        "mcat_requested": 4,
+        "mcat_resolved": 3,
+        "with_description": 3,
+        "with_query_id": 3,
+        "with_verified": 6,
+        "with_product_or_service": 6
+      }
+    },
+    "whatsapp": {
+      "summary": {
+        "products_enquired": [
+          "White Printed Paper Notebook Copy Raw Material"
+        ],
+        "button_taps": [
+          "Located near me",
+          "👍 Yes, Perfect",
+          "Call IndiaMART",
+          "Raise a Complaint",
+          "Need Help",
+          "Register as Seller",
+          "Buy"
+        ],
+        "counts": {
+          "buyer_turns": 20,
+          "meaningful_buyer_turns": 14,
+          "our_turns": 29,
+          "total": 49,
+          "responsive": true
+        },
+        "campaigns_received": 0,
+        "campaigns_responded": 0,
+        "response_rate": 0,
+        "yes_responses": 0,
+        "no_responses": 0,
+        "images_requested": false,
+        "supplier_feedback_given": true
+      },
+      "raw": {
+        "timeline": [
+          {
+            "ts": 1778107727000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Requirement is active. Sellers will connect",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107734000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Just so it",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107746000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Sorry, didn't understand",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107747000,
+            "sender": "buyer",
+            "kind": "button_tap",
+            "text": "Buy",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107755000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Ji",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107756000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Requirement is active. Sellers will connect",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107765000,
+            "sender": "buyer",
+            "kind": "button_tap",
+            "text": "Register as Seller",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107766000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Sorry, didn't understand",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107774000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Set up your seller account",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107779000,
+            "sender": "buyer",
+            "kind": "button_tap",
+            "text": "Need Help",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107786000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "What do you need help with?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107788000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "More options",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107788000,
+            "sender": "buyer",
+            "kind": "button_tap",
+            "text": "Raise a Complaint",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107796000,
+            "sender": "buyer",
+            "kind": "button_tap",
+            "text": "Call IndiaMART",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107796000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Sorry for the inconvenience.",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778107804000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "📞 Call 09696969696\n📧 customercare@indiamart.com",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778146872000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Narayani Enterprises (Koderma)\n\n📞 07943441195\n\n🔗 https://www.indiamart.com/narayanienterprises-koderma/\n\nTrustSEAL Verified ✅\n⭐3.3 (7)\n\nIs this Seller helpful ?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778146955000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Calling",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778146964000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "This might be due to an open buy requirement.",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778146967000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "No",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778146975000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Sorry for the inconvenience.",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778146984000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Bat kese kre",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778159508000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Hi! You just spoke with *Virgin Pulp And Papers LLP* 📞\nWas the call helpful?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778172633000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Himja Enterprises (Kanpur)\n\n📞 07942702089\n\n🔗 https://www.indiamart.com/himja-enterprises/\n\nGST Verified ✅\n\nIs this Seller helpful ?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778175129000,
+            "sender": "buyer",
+            "kind": "button_tap",
+            "text": "👍 Yes, Perfect",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778175136000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "More Options",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778175136000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "How was Himja Enterprises helpful?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778175137000,
+            "sender": "buyer",
+            "kind": "button_tap",
+            "text": "Located near me",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778175144000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Thank you!\nYour feedback has been submitted.\n\nGreat to hear!\n\n🛡️ Get up to ₹5L Payment Protection\nPay Himja Enterprises via IndiaMART-verified account\n\n🔗 https://m.indiamart.com/payment-protection?wa",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778175146000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Chat with sellers about your enquiry in real time on the App. | [Download App,https://indiamart.in/INSTALLAPP]",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778434781000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "https://m.indiamart.com/pd/22943308948?4975124\n\nHello *S. K. Engineers*,\nNeed best price for White Printed Paper Notebook Copy Raw Material, 75 Gsm",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778434788000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Please Enter GSM",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778434789000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "More options",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778434798000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "54 GSM",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778434806000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "How many *kg*?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778434820000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Please Enter I am interested in",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778434821000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "More options",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435420000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Share details for approval.",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435427000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Thank You!\nYour requirement for Paper Notebook Copy Raw Material has been sent to S. K. Engineers.",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435454000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Rate fore me",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435462000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Noted",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435464000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Ji",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435473000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Noted",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435474000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Btayegi",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435510000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "Price",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435554000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778435560000,
+            "sender": "buyer",
+            "kind": "free_text",
+            "text": "?",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1778439022000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Hi! Did you connect with *S. K. Engineers*?\n📞 Call now for best price & quick response\n\n👉 +917942628279\n✅ GST & TrustSeal Verified \n\n🛡️ ₹5L Payment Protection\n\n🔗 https://m.indiamart.com/payment-protection?wa",
+            "channel": "inbound"
+          },
+          {
+            "ts": 1779099789000,
+            "sender": "ours",
+            "kind": "caption",
+            "text": "Thanks, we have noted your requirement.",
+            "channel": "inbound"
+          }
+        ],
+        "inbound": {
+          "enquiries": [
+            {
+              "date": "2026-05-10 18:50:22",
+              "product": null,
+              "seller": "S. K. Engineers",
+              "seller_city": null
+            },
+            {
+              "date": "2026-05-10 17:50:27",
+              "product": "Paper Notebook Copy Raw Material",
+              "seller": null,
+              "seller_city": null
+            },
+            {
+              "date": "2026-05-07 16:50:33",
+              "product": null,
+              "seller": "Himja Enterprises",
+              "seller_city": "Kanpur"
+            },
+            {
+              "date": "2026-05-07 13:11:48",
+              "product": null,
+              "seller": "Virgin Pulp And Papers LLP",
+              "seller_city": null
+            },
+            {
+              "date": "2026-05-07 09:41:12",
+              "product": null,
+              "seller": "Narayani Enterprises",
+              "seller_city": "Koderma"
+            }
+          ],
+          "products": [
+            "Paper Notebook Copy Raw Material"
+          ],
+          "sellers_shared": [
+            "S. K. Engineers",
+            "Himja Enterprises",
+            "Virgin Pulp And Papers LLP",
+            "Narayani Enterprises"
+          ],
+          "seller_cities": [
+            "Kanpur",
+            "Koderma"
+          ],
+          "buyer_typed_enquiries": [
+            {
+              "product": "White Printed Paper Notebook Copy Raw Material",
+              "gsm": "75 Gsm"
+            }
+          ],
+          "location_preference": [
+            "Near me"
+          ],
+          "positive_feedback": 1,
+          "negative_feedback": 0,
+          "message_count": 49
+        }
+      },
+      "__health": {
+        "node": "whatsapp",
+        "ok": true,
+        "has_conversations": false,
+        "has_inbound": true,
+        "outbound_records": 0,
+        "inbound_messages": 49,
+        "buyer_turns": 20,
+        "our_turns": 29,
+        "total_turns": 49,
+        "campaigns_received": 0,
+        "campaigns_responded": 0,
+        "response_rate": 0
+      }
+    },
+    "identity": {
+      "summary": {
+        "name": "Jaiveer",
+        "city": "Auraiya",
+        "district": "Auraiya",
+        "state": "Uttar Pradesh",
+        "location_preference": 4,
+        "fcp_flag": 0,
+        "is_paid": "FREE",
+        "paidurl": "not activated",
+        "glusr_usr_approv": "A",
+        "emails": [
+          "jayveernayak75@gmail.com"
+        ],
+        "mobiles": [
+          "6306941152"
+        ],
+        "listing_status": "NFL"
+      },
+      "__health": {
+        "node": "identity",
+        "ok": true,
+        "saw_profile": true,
+        "saw_usersince": true,
+        "error": null
+      }
+    },
+    "pns": {
+      "summary": {
+        "call_count": 0
+      },
+      "raw": {
+        "Code": 401,
+        "Status": "Failure",
+        "Reason": "expired token",
+        "UniqueId": "69e8d56b44ae4eb24f2d4264a0148c9e0c3aad122a82968763d6580465fa3d75",
+        "data": [],
+        "call_count": 0,
+        "_pages_merged": 1
+      }
+    },
+    "external": {
+      "summary": {
+        "observed_only": true,
+        "verified_name": "JAYVEER SINGH",
+        "verified_name_source": "sign3_bank",
+        "verified_name_confidence": "high",
+        "sign3_bank_name": "JAYVEER SINGH",
+        "sign3_associated_name": "JAYVEER SINGH",
+        "social_presence_count": 3,
+        "social_platforms": [
+          "FLIPKART",
+          "FACEBOOK",
+          "INSTAGRAM"
+        ],
+        "telecom_sim_circle": "Uttar Pradesh (E)",
+        "identity_verified": true,
+        "befisc_record_found": false,
+        "sign3_record_found": true
+      },
+      "raw": {
+        "befisc": {
+          "api_category": "Mobile Number Lookup",
+          "api_name": "Profile Advance",
+          "billable": false,
+          "status": 403,
+          "message": "Request limit exceeded",
+          "datetime": "2026-08-18 10:38:19.124093"
+        },
+        "sign3": {
+          "request_id": "17415044-1d3a-494f-989c-2e20b9f32b13",
+          "phone_data": {
+            "primary_data": {
+              "key": "+916306941152",
+              "type": "phone",
+              "social_profile_count": 3,
+              "account_details": {
+                "SHAADI": {
+                  "error": true
+                },
+                "FLIPKART": {
+                  "user_exist": true
+                },
+                "SNAPDEAL": {
+                  "user_exist": false
+                },
+                "HOUSING": {
+                  "user_exist": false
+                },
+                "FACEBOOK": {
+                  "user_exist": true
+                },
+                "INSTAGRAM": {
+                  "user_exist": true
+                },
+                "SKYPE": {
+                  "error": true
+                },
+                "MICROSOFT": {
+                  "user_exist": false
+                },
+                "TWITTER": {
+                  "user_exist": false
+                },
+                "YATRA": {
+                  "user_exist": false
+                },
+                "JEEVANSATHI": {
+                  "user_exist": false
+                },
+                "TOI": {
+                  "user_exist": false
+                },
+                "INDIANEXPRESS": {
+                  "user_exist": false
+                },
+                "ZOHO": {
+                  "user_exist": false
+                },
+                "NOBROKER": {
+                  "user_exist": false
+                },
+                "BYJU": {
+                  "error": true
+                },
+                "PHONEPE": {
+                  "error": true
+                }
+              },
+              "phone_meta": {
+                "phone_number": "+916306941152",
+                "operator": "Jio",
+                "circle": "Uttar Pradesh (E)",
+                "revocations": {}
+              },
+              "breach_details": {
+                "phone": "+916306941152",
+                "breaches": [],
+                "breaches_status": "not-found"
+              }
+            },
+            "intelligence_data": {
+              "bank_verified_name": "JAYVEER SINGH",
+              "verified_names_status": "found",
+              "associated_names": [
+                {
+                  "name": "JAYVEER SINGH",
+                  "confidence_score": "high",
+                  "source": "s17"
+                }
+              ]
+            },
+            "status_code": 2000,
+            "status": "SUCCESS"
+          },
+          "status_code": 2000,
+          "status": "SUCCESS"
+        }
+      },
+      "__health": {
+        "node": "external",
+        "ok": true,
+        "befisc_input": true,
+        "sign3_input": true
+      }
+    },
+    "mobiles": {
+      "summary": {
+        "rows": [
+          {
+            "mobile": "6306941152",
+            "found_by": [
+              "profile",
+              "sign3",
+              "im_profile"
+            ],
+            "agreement_count": 3,
+            "triple_match": true,
+            "is_primary": true,
+            "__health": {
+              "node": "mobiles",
+              "ok": true,
+              "status": "success",
+              "count": 1,
+              "version": "compile",
+              "fetched_at": "2026-08-18T10:38:38.552Z"
+            }
+          }
+        ],
+        "primary": "6306941152",
+        "count": 1
+      },
+      "rows": [
+        {
+          "mobile": "6306941152",
+          "found_by": [
+            "profile",
+            "sign3",
+            "im_profile"
+          ],
+          "agreement_count": 3,
+          "triple_match": true,
+          "is_primary": true,
+          "__health": {
+            "node": "mobiles",
+            "ok": true,
+            "status": "success",
+            "count": 1,
+            "version": "compile",
+            "fetched_at": "2026-08-18T10:38:38.552Z"
+          }
+        }
+      ],
+      "__health": {
+        "node": "mobiles",
+        "ok": true,
+        "status": "success",
+        "count": 1,
+        "version": "compile",
+        "fetched_at": "2026-08-18T10:38:38.552Z"
+      }
+    },
+    "pan_union": {
+      "summary": {
+        "primary": null,
+        "count": 0,
+        "advance": {
+          "summary": {
+            "_meta": {
+              "source": "pan_advance",
+              "api": "sign3/pan_advance",
+              "status": "no_data",
+              "returned": 0,
+              "fetched_at": "2026-08-18T10:38:44.419Z"
+            }
+          },
+          "__health": {
+            "node": "pan_advance",
+            "ok": true,
+            "status": "no_data",
+            "count": 0,
+            "version": "sign3/pan_advance",
+            "fetched_at": "2026-08-18T10:38:44.419Z"
+          }
+        }
+      },
+      "rows": [],
+      "advance": {
+        "summary": {
+          "pan_advance": [],
+          "_meta": {
+            "source": "pan_advance",
+            "api": "sign3/pan_advance",
+            "status": "no_data",
+            "returned": 0,
+            "fetched_at": "2026-08-18T10:38:44.419Z"
+          }
+        },
+        "__health": {
+          "node": "pan_advance",
+          "ok": true,
+          "status": "no_data",
+          "count": 0,
+          "version": "sign3/pan_advance",
+          "fetched_at": "2026-08-18T10:38:44.419Z"
+        }
+      },
+      "__health": {
+        "node": "pan_union",
+        "ok": false,
+        "status": "no_data",
+        "count": 0,
+        "version": "compile",
+        "fetched_at": "2026-08-18T10:38:43.805Z"
+      }
+    },
+    "gstin_union": {
+      "gsts": [],
+      "gst": "",
+      "gst_count": 0,
+      "gst_found": false,
+      "per": [],
+      "__health": {
+        "fetched_at": "2026-08-18T10:45:04.158Z",
+        "node": "gst_compile",
+        "ok": true,
+        "count": 0,
+        "sources": [],
+        "agreement_max": 0
+      }
+    },
+    "gst_detail_union": {
+      "summary": {
+        "count": 0,
+        "_meta": {
+          "source": "gst_detail_union",
+          "api": "consensus(sign3+idfy+befisc)",
+          "status": "no_data",
+          "returned": 0,
+          "vendors": [
+            "sign3",
+            "idfy",
+            "befisc"
+          ],
+          "fetched_at": "2026-08-18T10:45:04.726Z"
+        }
+      },
+      "__health": {
+        "node": "gst_detail_union",
+        "ok": true,
+        "status": "no_data",
+        "count": 0,
+        "version": "consensus/v1",
+        "fetched_at": "2026-08-18T10:45:04.726Z"
+      }
+    },
+    "web_osint": {
+      "summary": null,
+      "basis": [],
+      "run_id": "",
+      "__health": {
+        "node": "web_osint",
+        "ok": false,
+        "status": "skipped",
+        "reason": "no identity to search",
+        "version": "parallel/core",
+        "fetched_at": "2026-08-18T10:45:05.606Z"
+      }
+    },
+    "udyam": {
+      "summary": {
+        "count": 0,
+        "_meta": {
+          "source": "udyam",
+          "api": "sign3/pan_to_udyam (+phone_to_udyam fallback)",
+          "status": "no_data",
+          "returned": 0,
+          "fetched_at": "2026-08-18T10:38:54.341Z"
+        }
+      },
+      "__health": {
+        "node": "udyam",
+        "ok": true,
+        "status": "no_data",
+        "count": 0,
+        "version": "sign3/pan_to_udyam·enterprise_data (verify not used)",
+        "fetched_at": "2026-08-18T10:38:54.341Z"
+      }
+    },
+    "buyerprofile": {
+      "summary": {
+        "contacts_name": "Jaiveer",
+        "member_since": "3 Months",
+        "city": "Auraiya",
+        "district": "Auraiya",
+        "state": "Uttar Pradesh",
+        "emails": [
+          "jayveernayak75@gmail.com"
+        ],
+        "mobiles": [
+          "6306941152",
+          "6306941152"
+        ],
+        "is_gst_verified": false,
+        "aadhaar_is_test": false,
+        "products_of_interest": [
+          "Raw Paper Material",
+          "Notebook Making Machines",
+          "TATA Ace",
+          "Second Hand Paper Cutting Machine",
+          "Maplitho Paper",
+          "Edge Squaring Machine",
+          "Raw Paper",
+          "Writing Paper",
+          "Paper Plate Raw Material",
+          "FRP Square Manhole Cover",
+          "Steel Load Body"
+        ],
+        "browse_interest": [
+          "Notebook Making Machines",
+          "Paper Cup Making Machine",
+          "Aluminium Foil Container Making Machine",
+          "Paper Plate Making Machine",
+          "Rolling Paper",
+          "LCV Transportation Service",
+          "Mini Truck",
+          "Full Truck Load Transport Service",
+          "Edge Cutting Machine",
+          "Edge Squaring Machine",
+          "Maplitho Paper",
+          "Writing Paper",
+          "Designer Wedding Cards",
+          "Differential Pressure Gauge",
+          "Silver Paper Plates Raw Material"
+        ],
+        "is_also_seller": false,
+        "activity": {
+          "total_requirement": 27,
+          "past_requirement_count": 0,
+          "total_calls": 20,
+          "pns_call_cnt": 11,
+          "call_back_cnt": 16,
+          "enq_count": 16,
+          "enq_reply": 7,
+          "buy_reply": 5
+        },
+        "verification": {
+          "email": false,
+          "alt_email": false,
+          "alt_mobile": false,
+          "whatsapp_active": true,
+          "verified_business_buyer_flag": 0
+        },
+        "is_fraud": false,
+        "verification_status": "1"
+      },
+      "raw": {
+        "aadhar": [],
+        "alternate_website": null,
+        "avg_rating": null,
+        "business_type": null,
+        "buy_reply": "5",
+        "buyer_past_requirement_count": "0",
+        "buyer_product_of_interest": "",
+        "buyer_product_sold": null,
+        "buyer_search_browse_interest": "Notebook Making Machines, Paper Cup Making Machine, Aluminium Foil Container Making Machine, Paper Plate Making Machine, Rolling Paper, LCV Transportation Service, Mini Truck, Full Truck Load Transport Service, Edge Cutting Machine, Edge Squaring Machine, Maplitho Paper, Writing Paper, Designer Wedding Cards, Differential Pressure Gauge, Silver Paper Plates Raw Material",
+        "call_back_cnt": "16",
+        "contact_city": "Auraiya",
+        "contact_country_iso": "IN",
+        "contact_district": "Auraiya",
+        "contact_district_hq_id": "77491",
+        "contact_district_hq_name": "Auraiya",
+        "contact_locality": null,
+        "contact_number": "6306941152",
+        "contact_pincode": null,
+        "contact_state": "Uttar Pradesh",
+        "contacts_address": null,
+        "contacts_company": null,
+        "contacts_email1": "jayveernayak75@gmail.com",
+        "contacts_email2": null,
+        "contacts_glid": 268590579,
+        "contacts_landline": null,
+        "contacts_mobile1": "6306941152",
+        "contacts_mobile2": null,
+        "contacts_name": "Jaiveer",
+        "contacts_title": null,
+        "contacts_website": null,
+        "custtype_weight": null,
+        "enq_count": "16",
+        "enq_reply": "7",
+        "fraudreason": null,
+        "glusr_usr_approv": "A",
+        "glusr_usr_countryname": "India",
+        "glusr_usr_custtype_id": null,
+        "glusr_usr_designation": null,
+        "glusr_usr_im_gsm": null,
+        "glusr_usr_latitude": null,
+        "glusr_usr_logo_img_90x90": null,
+        "glusr_usr_longitude": null,
+        "glusr_usr_membersince": "3 Months",
+        "glusr_usr_ph_country": "91",
+        "glusr_usr_year_of_estb": null,
+        "gst": null,
+        "hrs_tag": null,
+        "iec_code": null,
+        "is_alternate_email_verified": "0",
+        "is_alternate_mobile_verified": "0",
+        "is_email_verified": "0",
+        "is_fraud": 0,
+        "is_gst_verified": "0",
+        "is_iec_verified": "0",
+        "is_whatsapp_active": "1",
+        "linkedin_url": null,
+        "no_of_emp": null,
+        "pan": null,
+        "pns_call_cnt": "11",
+        "pns_response_rate": null,
+        "products_of_interest": [
+          {
+            "glcat_mcat_flname": "raw-paper-material",
+            "glcat_mcat_id": 149724,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/ST/LX/GLADMIN-149724/raw-paper-material.jpg",
+            "glcat_mcat_name": "Raw Paper Material"
+          },
+          {
+            "glcat_mcat_flname": "notebook-making-machines",
+            "glcat_mcat_id": 122454,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/RN/RY/MY-2/notebook-making-machines.jpg",
+            "glcat_mcat_name": "Notebook Making Machines"
+          },
+          {
+            "glcat_mcat_flname": "tata-ace-mini-truck",
+            "glcat_mcat_id": 187315,
+            "glcat_mcat_img1": "http://5.imimg.com/data5/TA/UR/TJ/GLADMIN-60238/tata-ace.jpg",
+            "glcat_mcat_name": "TATA Ace"
+          },
+          {
+            "glcat_mcat_flname": "used-paper-cutting-machine",
+            "glcat_mcat_id": 194945,
+            "glcat_mcat_img1": "http://5.imimg.com/data5/HU/MA/GLADMIN-2/second-hand-paper-cutting-machine.jpg",
+            "glcat_mcat_name": "Second Hand Paper Cutting Machine"
+          },
+          {
+            "glcat_mcat_flname": "maplitho-paper",
+            "glcat_mcat_id": 121056,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/TY/YS/GLADMIN-121056/maplitho-paper.jpg",
+            "glcat_mcat_name": "Maplitho Paper"
+          },
+          {
+            "glcat_mcat_flname": "edge-squaring-machine",
+            "glcat_mcat_id": 132873,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/YX/TB/MY-2/edge-squaring-machine.png",
+            "glcat_mcat_name": "Edge Squaring Machine"
+          },
+          {
+            "glcat_mcat_flname": "raw-paper",
+            "glcat_mcat_id": 120967,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/OY/QW/GLADMIN-120967/raw-paper.jpg",
+            "glcat_mcat_name": "Raw Paper"
+          },
+          {
+            "glcat_mcat_flname": "writing-paper",
+            "glcat_mcat_id": 41521,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/YO/TL/GLADMIN-41521/writing-paper.jpg",
+            "glcat_mcat_name": "Writing Paper"
+          },
+          {
+            "glcat_mcat_flname": "paper-plate-raw-material",
+            "glcat_mcat_id": 114113,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/ND/PY/GLADMIN-114113/paper-plate-raw-material.jpg",
+            "glcat_mcat_name": "Paper Plate Raw Material"
+          },
+          {
+            "glcat_mcat_flname": "frp-square-manhole-cover",
+            "glcat_mcat_id": 221406,
+            "glcat_mcat_img1": "http://5.imimg.com/data5/PG/QV/XI/GLADMIN-73467/frp-square-manhole-cover.jpg",
+            "glcat_mcat_name": "FRP Square Manhole Cover"
+          },
+          {
+            "glcat_mcat_flname": "steel-load-body",
+            "glcat_mcat_id": 137557,
+            "glcat_mcat_img1": "http://3.imimg.com/data3/DV/TL/GLADMIN-137557/steel-load-body.jpg",
+            "glcat_mcat_name": "Steel Load Body"
+          }
+        ],
+        "rating_count": null,
+        "social_profiles": [],
+        "total_calls": "20",
+        "total_requirement": 27,
+        "trustseal_approv": null,
+        "trustseal_code": null,
+        "turn_over": null,
+        "udyam": [],
+        "verification_status": "1",
+        "verified_business_buyer_flag": null
+      },
+      "__health": {
+        "node": "buyerprofile",
+        "ok": true,
+        "status": "success",
+        "present": true,
+        "fetched_at": "2026-08-18T10:38:13.239Z"
+      }
+    },
+    "company_reg": {
+      "summary": {},
+      "raw": {
+        "AADHAR": [],
+        "FK_GST_VERIFICATION_SRC_ID": "",
+        "GLUSR_GST_ANNUAL_TURNOVER": "",
+        "GLUSR_GST_LEGAL_STATUS": "",
+        "GLUSR_GST_NATURE_OF_BUSINESS": "",
+        "GLUSR_GST_PARTNER_NAME": "",
+        "GLUSR_GST_REGISTRATION_YEAR": "",
+        "GLUSR_GST_UPDATE_DATE": "",
+        "GLUSR_NATURE_OF_BUSINESS_SECONDARY": "",
+        "GLUSR_USR_AADHAR_NUMBER": "",
+        "GLUSR_USR_COMP_CIN_NUMBER": "",
+        "GLUSR_USR_COMP_CST_NO": "",
+        "GLUSR_USR_COMP_DGFT_IEC_CODE": "",
+        "GLUSR_USR_COMP_DNB_NUMBER": "",
+        "GLUSR_USR_COMP_EPF_NUMBER": "",
+        "GLUSR_USR_COMP_ESI_NUMBER": "",
+        "GLUSR_USR_COMP_EXCISE_REG_NO": "",
+        "GLUSR_USR_COMP_FSSAI_NO": "",
+        "GLUSR_USR_COMP_NSIC_NO": "",
+        "GLUSR_USR_COMP_PAN_NUMBER": "",
+        "GLUSR_USR_COMP_RBI_NO": "",
+        "GLUSR_USR_COMP_REG_ID": "",
+        "GLUSR_USR_COMP_REG_NUMBER": "",
+        "GLUSR_USR_COMP_REG_WITH": "",
+        "GLUSR_USR_COMP_SCT_NUMBER": "",
+        "GLUSR_USR_COMP_SERVICE_TAX_NO": "",
+        "GLUSR_USR_COMP_SSI_NUMBER": "",
+        "GLUSR_USR_COMP_SST_NO": "",
+        "GLUSR_USR_COMP_TAN_NUMBER": "",
+        "GLUSR_USR_COMP_VAT_NUMBER": "",
+        "GLUSR_USR_KYC_STATUS": "",
+        "GST": "",
+        "GST_REFERENCE_URL": "",
+        "GST_VERIFICATION_SRC_DATE": "",
+        "PAN_REFERENCE_URL": "",
+        "UDYAM": []
+      },
+      "__health": {
+        "node": "otherdetail",
+        "ok": true,
+        "status": "no_data",
+        "present": false,
+        "api": "users/otherdetail?type=CompRgst",
+        "fetched_at": "2026-08-18T10:38:55.547Z"
+      }
+    },
+    "pan_gst_idfy": null,
+    "gst_cert_idfy": {
+      "summary": {
+        "_meta": {
+          "source": "gst_cert_idfy",
+          "api": "idfy/v3/ind_gst_certificate",
+          "status": "skipped",
+          "requested": 0,
+          "returned": 0,
+          "errors": [],
+          "fetched_at": "2026-08-18T10:45:04.364Z"
+        }
+      },
+      "__health": {
+        "node": "gst_cert_idfy",
+        "ok": true,
+        "status": "skipped",
+        "requested": 0,
+        "count": 0,
+        "error_msg": null,
+        "version": "idfy/v3/ind_gst_certificate",
+        "fetched_at": "2026-08-18T10:45:04.364Z"
+      }
+    },
+    "gst": {
+      "summary": {
+        "gst_count": 0,
+        "gst_found": false,
+        "contacts_tried": 2
+      },
+      "raw": {
+        "gsts": [],
+        "gst": "",
+        "gst_count": 0,
+        "gst_found": false,
+        "contacts_tried": 2,
+        "per": []
+      }
+    }
+  },
+  "sources_present": [
+    "calls",
+    "pns_calls",
+    "requirement",
+    "whatsapp",
+    "identity",
+    "external",
+    "mobiles",
+    "buyerprofile"
+  ],
+  "sources_absent": [
+    "aadhaar",
+    "csl",
+    "pns",
+    "pan_union",
+    "gstin_union",
+    "gst_detail_union",
+    "web_osint",
+    "udyam",
+    "company_reg",
+    "pan_gst_idfy",
+    "gst_cert_idfy",
+    "gst"
+  ],
+  "requirement_brain": {
+    "facts": [
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Automation Grade",
+        "value": "Semi-Automatic",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Machine Components",
+        "value": "Cut Stitch Square",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Cutting Machine Size",
+        "value": "32 inch",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Buyer Filled Details",
+        "value": "Send kro",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "mcat",
+        "value": "Notebook Making Machines",
+        "confidence": 75
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "title",
+        "value": "1300Pcs/Hr Notebook Making Machine",
+        "confidence": 70
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Automation Grade",
+        "value": "Semi-Automatic",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Cutting Machine Size",
+        "value": "32-36 inch",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Buyer Filled Details",
+        "value": "Tino, Kanpur btao",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "mcat",
+        "value": "Notebook Making Machines",
+        "confidence": 75
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "title",
+        "value": "Notebook Making Machines",
+        "confidence": 70
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Fuel Type",
+        "value": "Diesel",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Model",
+        "value": "Ace Gold",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Condition",
+        "value": "New",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "mcat",
+        "value": "TATA Ace",
+        "confidence": 75
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "title",
+        "value": "Tata Chhota Hathi",
+        "confidence": 70
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Surface Finish",
+        "value": "Painted",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "spec",
+        "key": "Vehicle Type",
+        "value": "Tempo",
+        "confidence": 80
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "mcat",
+        "value": "Steel Load Body",
+        "confidence": 75
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "title",
+        "value": "Open Garbage Tipper Body Maker",
+        "confidence": 70
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "title",
+        "value": "Motorized Notebook Making Machine",
+        "confidence": 70
+      },
+      {
+        "source": "requirement",
+        "type": "category",
+        "key": "title",
+        "value": "Exercise Notebook Raw Material",
+        "confidence": 70
+      }
+    ],
+    "buyer_intelligence": {
+      "known_specs": [
+        "Automation Grade",
+        "Machine Components",
+        "Cutting Machine Size",
+        "Buyer Filled Details",
+        "Fuel Type",
+        "Model",
+        "Condition",
+        "Surface Finish",
+        "Vehicle Type"
+      ],
+      "known_intent": [],
+      "history_categories": [
+        "Notebook Making Machines",
+        "1300Pcs/Hr Notebook Making Machine",
+        "TATA Ace",
+        "Tata Chhota Hathi",
+        "Steel Load Body",
+        "Open Garbage Tipper Body Maker",
+        "Motorized Notebook Making Machine",
+        "Exercise Notebook Raw Material"
+      ],
+      "products_of_interest": [
+        "1300Pcs/Hr Notebook Making Machine",
+        "Notebook Making Machines",
+        "Tata Chhota Hathi",
+        "Open Garbage Tipper Body Maker",
+        "Motorized Notebook Making Machine",
+        "Exercise Notebook Raw Material",
+        "White Printed Paper Notebook Copy Raw Material",
+        "Notebook Raw Material (paper)",
+        "Raw Material",
+        "Raw Material (paper)",
+        "Paper",
+        "Raw Material Paper (kagaz)",
+        "Cutting Machine",
+        "Stitching Machine"
+      ],
+      "fact_count": 22
+    },
+    "category_intelligence": null,
+    "planner_input": {
+      "category_critical_specs": [],
+      "buyer_known_specs": [
+        "Automation Grade",
+        "Machine Components",
+        "Cutting Machine Size",
+        "Buyer Filled Details",
+        "Fuel Type",
+        "Model",
+        "Condition",
+        "Surface Finish",
+        "Vehicle Type"
+      ],
+      "suggested_ask": [],
+      "rule": "category_intelligence is FORM-fetched via ?mode=build_category/category; the form unions category criticals with these buyer known_specs."
+    },
+    "_scope": "buyer-only — category fetched separately (RFQ form)"
+  },
+  "pipeline_timing": [
+    {
+      "node": "web_osint",
+      "status": "skipped",
+      "count": null,
+      "done_at_s": 460.8
+    },
+    {
+      "node": "gst_detail_union",
+      "status": "no_data",
+      "count": 0,
+      "done_at_s": 460
+    },
+    {
+      "node": "gst_cert_idfy",
+      "status": "skipped",
+      "count": 0,
+      "done_at_s": 459.6
+    },
+    {
+      "node": "gst_compile",
+      "status": "ok",
+      "count": 0,
+      "done_at_s": 459.4
+    },
+    {
+      "node": "otherdetail",
+      "status": "no_data",
+      "count": null,
+      "done_at_s": 90.8
+    },
+    {
+      "node": "udyam",
+      "status": "no_data",
+      "count": 0,
+      "done_at_s": 89.6
+    },
+    {
+      "node": "pan_union",
+      "status": "no_data",
+      "count": 0,
+      "done_at_s": 79
+    },
+    {
+      "node": "mobiles",
+      "status": "success",
+      "count": 1,
+      "done_at_s": 73.8
+    },
+    {
+      "node": "buyerprofile",
+      "status": "success",
+      "count": null,
+      "done_at_s": 48.5
+    }
+  ],
+  "total_pull_s": 460.8,
+  "pipeline_health": {
+    "ok_count": 18,
+    "no_data_count": 5,
+    "error_count": 0,
+    "errors": []
+  },
+  "__health": [
+    {
+      "node": "aadhaar-fact",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "calls",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "pns_calls",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "csl",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "requirement",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "whatsapp",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "identity",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "pns",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "external",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "mobiles",
+      "ok": true,
+      "status": "success",
+      "count": 1,
+      "error_msg": null,
+      "retryable": null,
+      "version": "compile"
+    },
+    {
+      "node": "pan_union",
+      "ok": false,
+      "status": "no_data",
+      "count": 0,
+      "error_msg": null,
+      "retryable": null,
+      "version": "compile"
+    },
+    {
+      "node": "gst_compile",
+      "ok": true,
+      "status": "ok",
+      "count": 0,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "gst_detail_union",
+      "ok": true,
+      "status": "no_data",
+      "count": 0,
+      "error_msg": null,
+      "retryable": null,
+      "version": "consensus/v1"
+    },
+    {
+      "node": "web_osint",
+      "ok": false,
+      "status": "skipped",
+      "count": null,
+      "error_msg": "no identity to search",
+      "retryable": null,
+      "version": "parallel/core"
+    },
+    {
+      "node": "udyam",
+      "ok": true,
+      "status": "no_data",
+      "count": 0,
+      "error_msg": null,
+      "retryable": null,
+      "version": "sign3/pan_to_udyam·enterprise_data (verify not used)"
+    },
+    {
+      "node": "buyerprofile",
+      "ok": true,
+      "status": "success",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "otherdetail",
+      "ok": true,
+      "status": "no_data",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "pan_gst_idfy",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    },
+    {
+      "node": "gst_cert_idfy",
+      "ok": true,
+      "status": "skipped",
+      "count": 0,
+      "error_msg": null,
+      "retryable": null,
+      "version": "idfy/v3/ind_gst_certificate"
+    },
+    {
+      "node": "gst",
+      "ok": true,
+      "status": "ok",
+      "count": null,
+      "error_msg": null,
+      "retryable": null,
+      "version": null
+    }
+  ],
+  "buyer": {
+    "business_story": {
+      "value": "An established business manufacturing notebooks, sourcing raw paper material and notebook making machines.",
+      "confidence": 70,
+      "reason": "Composed from the grounded attributes: business_stage ('established business'), business_type ('manufacturer'), sub_industry ('Paper & Pulp'), and products_of_interest ('Raw Paper Material', 'Notebook Making Machines'). Confidence is high as it synthesizes well-supported attributes.",
+      "grounded": true,
+      "sources": [
+        "REQUIREMENTS",
+        "BUYER PROFILE"
+      ],
+      "policy": "IDENTITY",
+      "confidence_breakdown": {
+        "source_quality": 75,
+        "agreement": 90,
+        "freshness": 100,
+        "conflict_penalty": 0,
+        "final": 67
+      }
+    },
+    "business_persona": {
+      "value": "A manufacturer who sources raw paper material and notebook making machines.",
+      "confidence": 75,
+      "reason": "The buyer's products of interest and requirements strongly indicate a focus on notebook manufacturing, sourcing both raw materials and machinery. This is consistent with the 'Notebook Making Machines' and 'Raw Paper Material' categories in REQUIREMENTS and BUYER PROFILE. Confidence is high due to consistent product interest.",
+      "grounded": true,
+      "sources": [
+        "REQUIREMENTS",
+        "BUYER PROFILE"
+      ],
+      "policy": "IDENTITY",
+      "confidence_breakdown": {
+        "source_quality": 80,
+        "agreement": 90,
+        "freshness": 100,
+        "conflict_penalty": 0,
+        "final": 72
+      }
+    },
+    "business_type": {
+      "value": "Manufacturer",
+      "confidence": 70,
+      "reason": "The buyer's consistent requirements for 'Notebook Making Machines' and 'Raw Paper Material' strongly suggest a manufacturing operation. This is inferred from the product cluster in REQUIREMENTS and BUYER PROFILE. Confidence is medium as there is no direct declaration, but strong inference.",
+      "grounded": true,
+      "sources": [
+        "REQUIREMENTS",
+        "BUYER PROFILE"
+      ],
+      "policy": "IDENTITY",
+      "confidence_breakdown": {
+        "source_quality": 70,
+        "agreement": 80,
+        "freshness": 100,
+        "conflict_penalty": 0,
+        "final": 56
+      }
+    },
+    "business_stage": {
+      "value": "established business",
+      "confidence": 60,
+      "reason": "The buyer has been a member for 3 months with 27 total requirements and 20 calls, indicating consistent activity over a short period. While not explicitly stated as 'early-stage', the volume of activity suggests an established operation rather than a brand new venture. This is inferred from the 'member_since' and 'activity' data in BUYER PROFILE. Confidence is moderate as there's no direct 'setup' signal.",
+      "grounded": true,
+      "sources": [
+        "BUYER PROFILE"
+      ],
+      "policy": "IDENTITY",
+      "confidence_breakdown": {
+        "source_quality": 60,
+        "agreement": 70,
+        "freshness": 100,
+        "conflict_penalty": 0,
+        "final": 42
+      }
+    },
+    "sourcing_channel": {
+      "value": "IndiaMART BuyLeads · Kanpur",
+      "confidence": 70,
+      "reason": "The buyer actively uses IndiaMART BuyLeads, as evidenced by 27 total requirements. One requirement for 'Notebook Making Machines' explicitly mentions 'Tino, Kanpur btao', indicating a preference or interest in sourcing from Kanpur. This is derived from REQUIREMENTS and BUYER PROFILE. Confidence is medium due to explicit mention of a city in a requirement.",
+      "grounded": true,
+      "sources": [
+        "REQUIREMENTS",
+        "BUYER PROFILE"
+      ],
+      "policy": "MARKET",
+      "confidence_breakdown": {
+        "source_quality": 70,
+        "agreement": 80,
+        "freshness": 100,
+        "conflict_penalty": 0,
+        "final": 56
+      }
+    },
+    "location_sourcing_preference": {
+      "value": "Operates in Auraiya · Sources from Kanpur",
+      "confidence": 80,
+      "reason": "The buyer's registered city is 'Auraiya, Uttar Pradesh' as per IDENTITY and BUYER PROFILE. One requirement for 'Notebook Making Machines' explicitly states 'Tino, Kanpur btao', indicating a sourcing interest in Kanpur. Confidence is high due to a verified operating city and an explicit sourcing city mentioned in a requirement.",
+      "grounded": true,
+      "sources": [
+        "IDENTITY",
+        "BUYER PROFILE",
+        "REQUIREMENTS"
+      ],
+      "policy": "MARKET",
+      "confidence_breakdown": {
+        "source_quality": 85,
+        "agreement": 90,
+        "freshness": 100,
+        "conflict_penalty": 0,
+        "final": 76
+      }
+    },
+    "products_of_interest": {
+      "value": "Notebook Making Machines · Raw Paper Material · TATA Ace",
+      "confidence": 85,
+      "reason": "The buyer has consistently posted requirements for 'Notebook Making Machines' (25-MAY-26, 23-MAY-26, 10-MAY-26) and 'Exercise Notebook Raw Material' (06-MAY-26), and also browsed 'Raw Paper Material' and 'Maplitho Paper'. 'TATA Ace' and 'Steel Load Body' also appear in recent requirements, indicating interest in transportation. This is directly from REQUIREMENTS and BUYER PROFILE. Confidence is high due to multiple recent requirements and browsing activity.",
+      "grounded": true,
+      "sources": [
+        "REQUIREMENTS",
+        "BUYER PROFILE"
+      ],
+      "policy": "PROCUREMENT",
+      "confidence_breakdown": {
+        "source_quality": 90,
+        "agreement": 95,
+        "freshness": 90,
+        "conflict_penalty": 0,
+        "final": 77
+      }
+    }
+  },
+  "needs_input": [
+    {
+      "attribute": "price_vs_quality",
+      "missing_reason": "no explicit discussion about price or quality preferences in calls or chats",
+      "best_next_question": "Are you looking for the most cost-effective option, or is quality your top priority?"
+    },
+    {
+      "attribute": "delivery_timeline",
+      "missing_reason": "no explicit delivery timeframe stated in requirements, calls, or chats",
+      "best_next_question": "What is your preferred delivery timeline for these products?"
+    },
+    {
+      "attribute": "payment_mode",
+      "missing_reason": "no payment terms discussed in any call or chat",
+      "best_next_question": "Do you usually buy on advance, credit, or part-payment?"
+    },
+    {
+      "attribute": "preferred_suppliers",
+      "missing_reason": "no stated preferences for supplier type (e.g., local, manufacturer-direct, verified)",
+      "best_next_question": "Do you have any preferences for the type of supplier you work with, such as local or manufacturer-direct?"
+    },
+    {
+      "attribute": "procurement_approach",
+      "missing_reason": "no explicit statements about procurement approach (e.g., spot, planned, single-source, multi-quote)",
+      "best_next_question": "How do you typically approach your purchases – do you compare multiple quotes, or do you have a preferred supplier?"
+    },
+    {
+      "attribute": "procurement_challenge",
+      "missing_reason": "no explicit blockers or challenges mentioned in calls or chats",
+      "best_next_question": "Are you facing any challenges in your current procurement process, such as price, availability, or delivery?"
+    },
+    {
+      "attribute": "deal_readiness",
+      "missing_reason": "no explicit lead tags or clear live signals to determine deal readiness",
+      "best_next_question": "What is your timeline for making a purchase decision?"
+    },
+    {
+      "attribute": "use_case",
+      "missing_reason": "no explicit stated application or end-use for the products",
+      "best_next_question": "What is the primary use or application for the products you are looking to purchase?"
+    },
+    {
+      "attribute": "retail_wholesale",
+      "missing_reason": "no quantity or order value information to classify requirements as retail or wholesale",
+      "best_next_question": "Are your purchases typically for retail sales or for wholesale distribution/manufacturing?"
+    },
+    {
+      "attribute": "b2b_b2c",
+      "missing_reason": "no explicit signal or clear persona to determine if the buyer is B2B or B2C",
+      "best_next_question": "Are you purchasing for your business (B2B) or for personal use (B2C)?"
+    },
+    {
+      "attribute": "target_customers",
+      "missing_reason": "no stated customer base (e.g., end-consumers, retailers, other businesses)",
+      "best_next_question": "Who are your typical customers for the products you manufacture or trade?"
+    },
+    {
+      "attribute": "selling_channel",
+      "missing_reason": "no stated selling channel (e.g., own storefront, IndiaMART listing, retail shop)",
+      "best_next_question": "How do you typically sell your products to your customers?"
+    },
+    {
+      "attribute": "sales_geography",
+      "missing_reason": "no stated sales geography (e.g., local, state, pan-India, export)",
+      "best_next_question": "What is your primary sales geography for your products?"
+    },
+    {
+      "attribute": "annual_turnover",
+      "missing_reason": "no verified web estimate, Udyam size band, or requirement order-values to infer turnover",
+      "best_next_question": "What is your estimated annual turnover?"
+    },
+    {
+      "attribute": "annual_procurements",
+      "missing_reason": "no quantity, rate, or consistent cadence evidence to imply an annual procurement volume or spend band",
+      "best_next_question": "What is your estimated annual procurement volume or spend for these products?"
+    }
+  ],
+  "__llm_health": {
+    "node": "profile-llm (bi-buyer-unified)",
+    "ok": true,
+    "model": "google/gemini-2.5-flash",
+    "fetched_at": "2026-08-18T10:46:08.623Z"
+  }
+}
